@@ -1,0 +1,8 @@
+{
+  "name": "TrackBook",
+  "description": "A smart financial tracking application that uses AI to automatically categorize and record transactions from receipts.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
