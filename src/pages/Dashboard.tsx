@@ -1601,7 +1601,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                           "font-bold truncate transition-colors duration-300",
                           theme === 'dark' ? "text-slate-100" : "text-black"
                         )}>{userName}</p>
-                        <p className="text-[8px] text-slate-400 mt-1">App Version: 5.0.0</p>
+                        <p className="text-[8px] text-slate-400 mt-1">App Version: 6.0.0</p>
                       </div>
 
                       <button 

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import { HashRouter as Router, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from './lib/supabase';
 import Dashboard from './pages/Dashboard';
 import Login from './pages/Login';
@@ -94,8 +94,8 @@ export default function App() {
 
   // PWA Install Prompt handling
   useEffect(() => {
-    // Force cache clear for v5 update
-    const CURRENT_VERSION = '5.0.0';
+    // Force cache clear for v6 update
+    const CURRENT_VERSION = '6.0.0';
     const savedVersion = localStorage.getItem('app_version');
     
     if (savedVersion !== CURRENT_VERSION) {
