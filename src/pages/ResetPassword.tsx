@@ -1,7 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
-import { motion } from 'motion/react';
 import { 
   Eye, 
   EyeOff, 
@@ -32,9 +31,6 @@ export default function ResetPassword() {
       }
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
-        // If no session, they might have accessed this page directly without a recovery token
-        // Or the token might have expired.
-        // We can check the URL for recovery tokens too, but Supabase usually handles this.
         const hash = window.location.hash;
         if (!hash.includes('type=recovery') && !hash.includes('access_token=')) {
            setError('Invalid or expired reset link. Please request a new one.');
@@ -45,7 +41,7 @@ export default function ResetPassword() {
     checkSession();
   }, []);
 
-  const handleResetPassword = async (e: React.FormEvent) => {
+  const handleResetPassword = async (e: FormEvent) => {
     e.preventDefault();
     
     if (!supabase) {
@@ -96,9 +92,7 @@ export default function ResetPassword() {
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4 bg-[#f3f7ff] dark:bg-black font-sans transition-colors duration-300">
-      <motion.div 
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
+      <div 
         className="w-full max-w-[400px] bg-white dark:bg-zinc-950 rounded-[32px] p-8 shadow-[0_10px_40px_rgba(0,0,0,0.04)] border border-white/50 dark:border-zinc-800"
       >
         <div className="text-center mb-8">
@@ -189,7 +183,7 @@ export default function ResetPassword() {
             Back to Login
           </button>
         </div>
-      </motion.div>
+      </div>
     </div>
   );
 }

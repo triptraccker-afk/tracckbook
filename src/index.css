@@ -28,4 +28,18 @@
   .input {
     @apply w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-zinc-900 bg-white dark:bg-zinc-950 focus:ring-2 focus:ring-indigo-500 outline-none transition-all dark:text-white;
   }
+
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 4px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(156, 163, 175, 0.3);
+    border-radius: 20px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(156, 163, 175, 0.5);
+  }
 }

@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { HashRouter as Router, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from './lib/supabase';
 import Dashboard from './pages/Dashboard';
 import Login from './pages/Login';
@@ -7,19 +7,26 @@ import ResetPassword from './pages/ResetPassword';
 import { Loader2 } from 'lucide-react';
 import { cn } from './lib/utils';
 
-function NavigationHandler({ 
-  session, 
-  setSession, 
-  setLoading 
-}: { 
-  session: any; 
-  setSession: (s: any) => void; 
-  setLoading: (l: boolean) => void;
-}) {
+export default function App() {
+  const [session, setSession] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [backendReady, setBackendReady] = useState(false);
+  const [backendError, setBackendError] = useState<string | null>(null);
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('theme');
+      if (saved === 'light' || saved === 'dark') return saved;
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    return 'light';
+  });
+
   const navigate = useNavigate();
   const location = useLocation();
 
   useEffect(() => {
+    console.log('App sequence starting (App.tsx)...');
+
     if (!supabase) {
       setLoading(false);
       return;
@@ -66,22 +73,44 @@ function NavigationHandler({
     });
 
     return () => subscription.unsubscribe();
-  }, [navigate, location.pathname, setSession, setLoading]);
+  }, [navigate, location.pathname]);
 
-  return null;
-}
-
-export default function App() {
-  const [session, setSession] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('theme');
-      if (saved === 'light' || saved === 'dark') return saved;
-      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    }
-    return 'light';
-  });
+  // Backend Health Check
+  useEffect(() => {
+    let checkCount = 0;
+    const maxChecks = 10;
+    
+    const checkBackend = async () => {
+      try {
+        const cacheBuster = `t=${Date.now()}`;
+        const response = await fetch(`/api/health?${cacheBuster}`, {
+          headers: { 'Accept': 'application/json' }
+        });
+        
+        const contentType = response.headers.get("content-type");
+        if (response.ok && contentType && contentType.includes("application/json")) {
+          const data = await response.json();
+          if (data && data.status === "ok") {
+            console.log('Backend connection verified.');
+            setBackendReady(true);
+            setBackendError(null);
+            return;
+          }
+        }
+        throw new Error('Backend responded but is not ready or returned invalid format.');
+      } catch (err) {
+        checkCount++;
+        console.warn(`Backend check failed (attempt ${checkCount}):`, err);
+        if (checkCount < maxChecks) {
+          setTimeout(checkBackend, 2000);
+        } else {
+          setBackendError('Backend connection timeout. Please refresh or try again later.');
+        }
+      }
+    };
+    
+    checkBackend();
+  }, []);
 
   // Theme handling
   useEffect(() => {
@@ -90,25 +119,31 @@ export default function App() {
     root.classList.add(theme);
     root.style.colorScheme = theme;
     localStorage.setItem('theme', theme);
+    
+    // Update theme-color meta tag for mobile browser headers
+    const metaTheme = document.querySelector('meta[name="theme-color"]');
+    if (metaTheme) {
+      metaTheme.setAttribute('content', theme === 'dark' ? '#000000' : '#ffffff');
+    }
   }, [theme]);
 
   // PWA Install Prompt handling
   useEffect(() => {
-    // Force cache clear for v6 update
-    const CURRENT_VERSION = '6.0.0';
+    // Force cache clear for v8 update - critical for network fixes and cache purging
+    const CURRENT_VERSION = '8.0.0';
     const savedVersion = localStorage.getItem('app_version');
     
     if (savedVersion !== CURRENT_VERSION) {
-      console.log('New version detected, clearing cache and local data...');
+      console.log('New version detected (v8), clearing cache and local data...');
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.getRegistrations().then(registrations => {
           for(let registration of registrations) registration.unregister();
         });
       }
-      localStorage.clear(); // Clear all potentially corrupt local storage
+      localStorage.clear();
       localStorage.setItem('app_version', CURRENT_VERSION);
-      // Hard reload once to kill old service worker control
-      setTimeout(() => window.location.reload(), 500);
+      // Hard reload once to kill old control
+      setTimeout(() => window.location.reload(), 200);
     }
 
     const handleBeforeInstallPrompt = (e: any) => {
@@ -126,13 +161,7 @@ export default function App() {
   }, []);
 
   return (
-    <Router>
-      <NavigationHandler 
-        session={session} 
-        setSession={setSession} 
-        setLoading={setLoading} 
-      />
-      
+    <>
       <Routes>
         {/* Public Routes */}
         <Route path="/login" element={<Login theme={theme} />} />
@@ -143,7 +172,16 @@ export default function App() {
           path="/" 
           element={
             session ? (
-              <Dashboard session={session} theme={theme} setTheme={setTheme} />
+              backendReady ? (
+                <Dashboard session={session} theme={theme} setTheme={setTheme} />
+              ) : (
+                <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
+                  <div className="flex flex-col items-center gap-4">
+                    <Loader2 className="animate-spin text-indigo-600" size={40} />
+                    <p className="text-sm font-medium text-slate-500">{backendError || 'Connecting to backend...'}</p>
+                  </div>
+                </div>
+              )
             ) : (
               // If we are still loading initial session, show a loader
               loading ? (
@@ -161,6 +199,6 @@ export default function App() {
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-    </Router>
+    </>
   );
 }

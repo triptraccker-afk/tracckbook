@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef, useMemo, useEffect } from 'react';
+import { Fragment, useState, useRef, useMemo, useEffect, Dispatch, SetStateAction, FormEvent, MouseEvent as ReactMouseEvent, ChangeEvent } from 'react';
 import { 
   Plus, 
   Minus, 
@@ -49,13 +49,14 @@ import {
   Moon,
   Palette,
   ArrowUp,
-  ArrowUpDown
+  ArrowUpDown,
+  RefreshCcw
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
 import ReactMarkdown from 'react-markdown';
 import { cn, formatCurrency, vibrate } from '../lib/utils';
 import { parseReceipt, parseMultipleReceipts, getApiKey } from '../services/gemini';
+import { uploadImage, fetchImages, deleteImage, ImageRecord } from '../services/imageService';
 import { supabase } from '../lib/supabase';
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
@@ -71,6 +72,8 @@ interface Transaction {
   mode: string;
   date: Date;
   images?: string[];
+  thumbnailUrls?: string[];
+  imageIds?: string[];
   imageLayout?: 'split' | 'merge';
   isAi?: boolean;
 }
@@ -82,7 +85,7 @@ interface Cashbook {
   createdAt: Date;
 }
 
-export default function Dashboard({ session, theme, setTheme }: { session: any, theme: 'light' | 'dark', setTheme: React.Dispatch<React.SetStateAction<'light' | 'dark'>> }) {
+export default function Dashboard({ session, theme, setTheme }: { session: any, theme: 'light' | 'dark', setTheme: Dispatch<SetStateAction<'light' | 'dark'>> }) {
   // Global State
   const [userName, setUserName] = useState('Siva');
   const [isHelpOpen, setIsHelpOpen] = useState(false);
@@ -117,6 +120,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [showDropZone, setShowDropZone] = useState(false);
   const [aiMode, setAiMode] = useState<'split' | 'merge'>('split');
   const [error, setError] = useState<string | null>(null);
+  const [bookError, setBookError] = useState<string | null>(null);
 
   // Auto-clear API Key error if dummy/env key is now valid
   useEffect(() => {
@@ -289,7 +293,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [activeBookId]);
 
-  const toggleTheme = (e: React.MouseEvent) => {
+  const toggleTheme = (e: ReactMouseEvent) => {
     e.stopPropagation();
     setTheme(prev => prev === 'light' ? 'dark' : 'light');
   };
@@ -319,17 +323,26 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
   const moveImage = (index: number, direction: 'up' | 'down') => {
     const newImages = [...selectedImages];
+    const newThumbs = [...selectedThumbnailUrls];
     const newIndex = direction === 'up' ? index - 1 : index + 1;
     if (newIndex < 0 || newIndex >= newImages.length) return;
     
-    const temp = newImages[index];
+    const tempImg = newImages[index];
     newImages[index] = newImages[newIndex];
-    newImages[newIndex] = temp;
+    newImages[newIndex] = tempImg;
+    
+    const tempThumb = newThumbs[index];
+    newThumbs[index] = newThumbs[newIndex];
+    newThumbs[newIndex] = tempThumb;
+    
     setSelectedImages(newImages);
+    setSelectedThumbnailUrls(newThumbs);
   };
 
   const removeImage = (index: number) => {
     setSelectedImages(prev => prev.filter((_, i) => i !== index));
+    setSelectedThumbnailUrls(prev => prev.filter((_, i) => i !== index));
+    setSelectedImageIds(prev => prev.filter((_, i) => i !== index));
   };
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
   const [previewImages, setPreviewImages] = useState<string[] | null>(null);
@@ -399,6 +412,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
   const [transactionDate, setTransactionDate] = useState(safeToDateTimeLocal(new Date()));
   const [selectedImages, setSelectedImages] = useState<string[]>([]);
+  const [selectedThumbnailUrls, setSelectedThumbnailUrls] = useState<string[]>([]);
+  const [selectedImageIds, setSelectedImageIds] = useState<string[]>([]);
+  const [isManualImageUploading, setIsManualImageUploading] = useState(false);
   const [imageLayout, setImageLayout] = useState<'split' | 'merge'>('split');
 
   const CATEGORIES = ['Food', 'Travel', 'Advance', 'Shopping', 'Custom'];
@@ -454,7 +470,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       try {
         const { data: cashbooks, error: cbError } = await supabase
           .from('cashbooks')
-          .select('*, entries(*, attachments(*), ai_attachments(*))')
+          .select('*, entries(*, attachments(*, images(*)), ai_attachments(*))')
           .eq('user_id', session.user.id);
 
         if (cbError) throw cbError;
@@ -465,13 +481,19 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             ...cb,
             transactions: (cb.entries || []).map((t: any) => {
               // Combine manual and AI attachments for the UI
-              const manualImgs = (t.attachments || []).map((a: any) => a.file_url);
+              const manualImgs = (t.attachments || []).map((a: any) => a.images?.image_url || a.file_url).filter(Boolean);
+              const manualThumbs = (t.attachments || []).map((a: any) => a.images?.thumbnail_url || a.images?.image_url || a.thumbnail_url || a.file_url).filter(Boolean);
+              const manualIds = (t.attachments || []).map((a: any) => a.image_id).filter(Boolean);
+              
               const aiImgs = (t.ai_attachments || []).map((a: any) => a.file_url);
+              const aiThumbs = (t.ai_attachments || []).map((a: any) => a.thumbnail_url || a.file_url);
               
               return {
                 ...t,
                 date: t.date ? new Date(t.date) : new Date(),
                 images: [...manualImgs, ...aiImgs],
+                thumbnailUrls: [...manualThumbs, ...aiThumbs],
+                imageIds: manualIds,
                 imageLayout: t.image_layout || 'split',
                 isAi: aiImgs.length > 0
               };
@@ -598,12 +620,22 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     });
   }, [activeBook, transactionSearchQuery, transactionTypeFilter, transactionCategoryFilter, transactionDurationFilter, sortColumn, sortDirection]);
 
-  const handleCreateBook = async (e: React.FormEvent) => {
+  const handleCreateBook = async (e: FormEvent) => {
     e.preventDefault();
-    if (!newBookName.trim() || !session) return;
+    const trimmedName = newBookName.trim();
+    if (!trimmedName || !session) return;
     
-    // Optimization: Don't show submitting overlay for simple book creation if it's too slow
-    // Or just make it very quick.
+    // Check for duplicate names (extremely robust case-insensitive check and trim)
+    const isDuplicate = books.some(b => 
+      b.name.trim().toLowerCase() === trimmedName.toLowerCase()
+    );
+
+    if (isDuplicate) {
+      vibrate(100);
+      setBookError(`A book with the name "${trimmedName}" already exists. Please use a unique name.`);
+      return;
+    }
+
     setIsSubmitting(true);
     setSubmittingMessage('Creating new book...');
     
@@ -617,6 +649,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     // Update local state immediately for perceived speed
     setBooks(prev => [...prev, newBook]);
     setNewBookName('');
+    setBookError(null);
+    setError(null);
     setIsCreatingBook(false);
     setIsSubmitting(false);
 
@@ -639,9 +673,17 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     }
   };
 
-  const handleUpdateBook = async (e: React.FormEvent) => {
+  const handleUpdateBook = async (e: FormEvent) => {
     e.preventDefault();
-    if (!editBookName.trim() || !isEditingBook || !session) return;
+    const trimmedName = editBookName.trim();
+    if (!trimmedName || !isEditingBook || !session) return;
+
+    // Check for duplicate names (excluding current book)
+    if (books.some(b => b.id !== isEditingBook && b.name.toLowerCase() === trimmedName.toLowerCase())) {
+      vibrate(50);
+      setBookError(`Book "${trimmedName}" already exists. Please choose a different name.`);
+      return;
+    }
 
     if (supabase) {
       try {
@@ -656,9 +698,11 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       }
     }
 
-    setBooks(books.map(b => b.id === isEditingBook ? { ...b, name: editBookName } : b));
+    setBooks(books.map(b => b.id === isEditingBook ? { ...b, name: trimmedName } : b));
     setIsEditingBook(null);
     setEditBookName('');
+    setBookError(null);
+    setError(null);
   };
 
   const handleUpdateProfile = async () => {
@@ -759,7 +803,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     setShowBulkDeleteConfirm(false);
   };
 
-  const handleAddTransaction = async (e: React.FormEvent) => {
+  const handleAddTransaction = async (e: FormEvent) => {
     e.preventDefault();
     if (!activeBookId || !showForm || !amount || !session) return;
 
@@ -779,6 +823,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         mode: finalMode,
         date: dateObj,
         images: selectedImages.length > 0 ? selectedImages : editingTransaction.images,
+        thumbnailUrls: selectedThumbnailUrls.length > 0 ? selectedThumbnailUrls : editingTransaction.thumbnailUrls,
         imageLayout: imageLayout
       };
 
@@ -836,16 +881,19 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               throw err;
             }
 
-            if (selectedImages.length > 0) {
-              await supabase.from('attachments').delete().eq('entry_id', editingTransaction.id);
-              const attachmentInserts = selectedImages.map(url => ({
+            if (selectedImageIds.length > 0) {
+              console.log(`[Sync] Updating attachments for entry ${editingTransaction.id}. Count: ${selectedImageIds.length}`);
+              const { error: delError } = await supabase.from('attachments').delete().eq('entry_id', editingTransaction.id);
+              if (delError) console.error("[Sync] Error clearing old attachments:", delError);
+
+              const attachmentInserts = selectedImageIds.map((imgId, idx) => ({
                 entry_id: editingTransaction.id,
                 user_id: session.user.id,
-                file_url: url,
-                file_name: 'manual_upload',
-                file_type: 'image'
+                image_id: imgId
               }));
-              await supabase.from('attachments').insert(attachmentInserts);
+              const { error: insError } = await supabase.from('attachments').insert(attachmentInserts);
+              if (insError) throw insError;
+              console.log("[Sync] Attachments updated successfully.");
             }
           } catch (error: any) {
             console.error('Detailed Supabase Update Error:', error);
@@ -865,6 +913,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         mode: finalMode,
         date: dateObj,
         images: selectedImages.length > 0 ? selectedImages : undefined,
+        thumbnailUrls: selectedThumbnailUrls.length > 0 ? selectedThumbnailUrls : undefined,
+        imageIds: selectedImageIds.length > 0 ? selectedImageIds : undefined,
         imageLayout: imageLayout
       };
 
@@ -917,15 +967,16 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               throw err;
             }
 
-            if (newTransaction.images && newTransaction.images.length > 0) {
-              const attachmentInserts = newTransaction.images.map(url => ({
+            if (selectedImageIds.length > 0) {
+              console.log(`[Sync] Creating attachments for new entry ${newTransaction.id}. Count: ${selectedImageIds.length}`);
+              const attachmentInserts = selectedImageIds.map((imgId, idx) => ({
                 entry_id: newTransaction.id,
                 user_id: session.user.id,
-                file_url: url,
-                file_name: 'manual_upload',
-                file_type: 'image'
+                image_id: imgId
               }));
-              await supabase.from('attachments').insert(attachmentInserts);
+              const { error: insError } = await supabase.from('attachments').insert(attachmentInserts);
+              if (insError) throw insError;
+              console.log("[Sync] Attachments created successfully.");
             }
           } catch (error: any) {
             console.error('Error creating entry in Supabase:', error);
@@ -1015,6 +1066,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     if (!MODES.includes(t.mode)) setCustomMode(t.mode);
     setTransactionDate(safeToDateTimeLocal(t.date));
     setSelectedImages(t.images || []);
+    setSelectedThumbnailUrls(t.thumbnailUrls || []);
+    setSelectedImageIds(t.imageIds || []);
     setImageLayout(t.imageLayout || 'split');
   };
 
@@ -1046,6 +1099,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     setCustomMode('');
     setTransactionDate(safeToDateTimeLocal(new Date()));
     setSelectedImages([]);
+    setSelectedThumbnailUrls([]);
+    setSelectedImageIds([]);
     setTransactionTypeFilter('all');
     setTransactionDurationFilter('All');
     setTransactionCategoryFilter('All');
@@ -1053,23 +1108,43 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     setIsSubmitting(false);
   };
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const resetImageUpload = () => {
+    setIsManualImageUploading(false);
+    setSelectedImages([]);
+    setSelectedThumbnailUrls([]);
+    setSelectedImageIds([]);
+    if (multiFileInputRef.current) multiFileInputRef.current.value = '';
+    vibrate(50);
+  };
+
+  const handleImageUpload = async (e: ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (!files) return;
+    if (!files || !activeBookId) return;
 
-    const newImages: string[] = [...selectedImages];
     const filesArray = Array.from(files).slice(0, 5 - selectedImages.length) as File[];
+    if (filesArray.length === 0) return;
 
-    filesArray.forEach(file => {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        newImages.push(reader.result as string);
-        if (newImages.length === filesArray.length + selectedImages.length) {
-          setSelectedImages(newImages);
+    setIsManualImageUploading(true);
+    try {
+      for (const file of filesArray) {
+        const result = await uploadImage(file, { 
+          userId: session.user.id, 
+          userName: userName || session.user.email || 'User',
+          userEmail: session.user.email
+        });
+        setSelectedImages(prev => [...prev, result.imageUrl]);
+        setSelectedThumbnailUrls(prev => [...prev, result.imageUrl]);
+        if (result.id) {
+          setSelectedImageIds(prev => [...prev, result.id!]);
         }
-      };
-      reader.readAsDataURL(file);
-    });
+      }
+    } catch (err: any) {
+      console.error('Manual upload error:', err);
+      setError('Failed to upload image: ' + err.message);
+    } finally {
+      setIsManualImageUploading(false);
+      if (e.target) e.target.value = '';
+    }
   };
 
   const exportToExcel = async () => {
@@ -1287,21 +1362,33 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     setUploadingMessage('Detecting bills...');
     try {
       if (aiMode === 'merge' && filesToProcess.length > 1) {
-        setUploadingMessage('Merging and detecting bills...');
-        const imagesData: { base64: string, mimeType: string, raw: string }[] = [];
+        setUploadingMessage('Uploading and detecting bills...');
+        const imagesData: { base64: string, mimeType: string, url: string, thumbUrl: string, id: string }[] = [];
         
         for (const file of filesToProcess) {
           if (abortUploadRef.current) return;
-          const base64 = await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result as string);
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-          });
+          
+          // Parallelize upload and reading base64
+          const [uploadResult, base64] = await Promise.all([
+            uploadImage(file, { 
+              userId: session.user.id, 
+              userName: userName || session.user.email || 'User',
+              userEmail: session.user.email
+            }),
+            new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result as string);
+              reader.onerror = reject;
+              reader.readAsDataURL(file);
+            })
+          ]);
+
           imagesData.push({
             base64: base64.split(',')[1],
             mimeType: file.type,
-            raw: base64
+            url: uploadResult.imageUrl,
+            thumbUrl: uploadResult.imageUrl,
+            id: uploadResult.id || ''
           });
         }
 
@@ -1317,7 +1404,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             category: result.category,
             mode: 'Online',
             date: parseAIDate(result.date),
-            images: imagesData.map(img => img.raw),
+            images: imagesData.map(img => img.url),
+            thumbnailUrls: imagesData.map(img => img.thumbUrl),
+            imageIds: imagesData.map(img => img.id).filter(id => id),
             isAi: true,
             imageLayout: 'merge'
           };
@@ -1355,15 +1444,15 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 }
               }
 
-              const aiAttachmentInserts = imagesData.map(img => ({
-                entry_id: newTransaction.id,
-                user_id: session.user.id,
-                file_url: img.raw,
-                file_name: 'ai_merged_bill',
-                file_type: 'image'
-              }));
-              const { error: attachError } = await supabase.from('ai_attachments').insert(aiAttachmentInserts);
-              if (attachError) throw attachError;
+              if (newTransaction.imageIds && newTransaction.imageIds.length > 0) {
+                const attachmentInserts = newTransaction.imageIds.map(imgId => ({
+                  entry_id: newTransaction.id,
+                  user_id: session.user.id,
+                  image_id: imgId
+                }));
+                const { error: attachError } = await supabase.from('attachments').insert(attachmentInserts);
+                if (attachError) throw attachError;
+              }
             } catch (error: any) {
               console.error('Error syncing merged AI entry (detailed):', error);
               const msg = error.message || 'Unknown error';
@@ -1376,101 +1465,105 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         const total = filesToProcess.length;
         for (const file of filesToProcess) {
           if (abortUploadRef.current) return;
-          setUploadingMessage(`Detecting bill ${completed}/${total}...`);
-          await new Promise<void>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onerror = () => reject(new Error('File reading failed'));
-            reader.onloadend = async () => {
-              try {
-                if (abortUploadRef.current) {
-                  resolve();
-                  return;
-                }
-                const base64String = (reader.result as string).split(',')[1];
-                const result = await parseReceipt(base64String, file.type);
+          setUploadingMessage(`Uploading and detecting bill ${completed}/${total}...`);
+          
+          try {
+            // Upload to Cloudinary first
+            const uploadResult = await uploadImage(file, { 
+              userId: session.user.id, 
+              userName: userName || session.user.email || 'User',
+              userEmail: session.user.email
+            });
+            
+            // Get base64 for Gemini
+            const base64 = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result as string);
+              reader.onerror = reject;
+              reader.readAsDataURL(file);
+            });
+
+            const base64String = base64.split(',')[1];
+            const result = await parseReceipt(base64String, file.type);
                 
-                if (result && !abortUploadRef.current) {
-                  completed++;
-                  setUploadingMessage(`Detected ${result.category} (${completed}/${total})! Syncing...`);
-                  
-                  const newTransaction: Transaction = {
-                    id: safeUUID(),
-                    amount: result.amount,
-                    type: result.type,
-                    description: result.description,
-                    category: result.category,
-                    mode: 'Online',
-                    date: parseAIDate(result.date),
-                    images: [reader.result as string],
-                    isAi: true,
-                    imageLayout: 'split'
+            if (result && !abortUploadRef.current) {
+              completed++;
+              setUploadingMessage(`Detected ${result.category} (${completed}/${total})! Syncing...`);
+              
+              const newTransaction: Transaction = {
+                id: safeUUID(),
+                amount: result.amount,
+                type: result.type,
+                description: result.description,
+                category: result.category,
+                mode: 'Online',
+                date: parseAIDate(result.date),
+                images: [uploadResult.imageUrl],
+                thumbnailUrls: [uploadResult.imageUrl],
+                imageIds: uploadResult.id ? [uploadResult.id] : undefined,
+                isAi: true,
+                imageLayout: 'split'
+              };
+
+              // Optimistic update
+              setBooks(prev => prev.map(b => 
+                b.id === activeBookId 
+                  ? { ...b, transactions: [newTransaction, ...b.transactions] }
+                  : b
+              ));
+
+              if (supabase && session) {
+                try {
+                  const payload: any = {
+                    id: newTransaction.id,
+                    cashbook_id: activeBookId,
+                    user_id: session.user.id,
+                    amount: newTransaction.amount,
+                    type: newTransaction.type,
+                    description: newTransaction.description,
+                    category: newTransaction.category,
+                    mode: newTransaction.mode,
+                    date: safeToISOString(newTransaction.date)
                   };
 
-                  // Optimistic update
-                  setBooks(prev => prev.map(b => 
-                    b.id === activeBookId 
-                      ? { ...b, transactions: [newTransaction, ...b.transactions] }
-                      : b
-                  ));
-
-                  if (supabase && session) {
-                    try {
-                      const payload: any = {
-                        id: newTransaction.id,
-                        cashbook_id: activeBookId,
-                        user_id: session.user.id,
-                        amount: newTransaction.amount,
-                        type: newTransaction.type,
-                        description: newTransaction.description,
-                        category: newTransaction.category,
-                        mode: newTransaction.mode,
-                        date: safeToISOString(newTransaction.date)
-                      };
-
-                      // Try with image_layout first
-                      const { error: entryError } = await supabase.from('entries').insert([{ ...payload, image_layout: 'split' }]);
-                      
-                      if (entryError) {
-                        if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist')) {
-                          const { error: retryError } = await supabase.from('entries').insert([payload]);
-                          if (retryError) throw retryError;
-                        } else {
-                          throw entryError;
-                        }
-                      }
-
-                      if (newTransaction.images && newTransaction.images.length > 0) {
-                        const aiAttachmentInserts = newTransaction.images.map(url => ({
-                          entry_id: newTransaction.id,
-                          user_id: session.user.id,
-                          file_url: url,
-                          file_name: 'ai_detected_bill',
-                          file_type: 'image'
-                        }));
-                        const { error: attachError } = await supabase.from('ai_attachments').insert(aiAttachmentInserts);
-                        if (attachError) throw attachError;
-                      }
-                    } catch (error: any) {
-                      console.error('Error syncing AI entry:', error);
-                      const msg = error.message || 'Unknown error';
-                      setError(`AI Sync Error: ${msg}. Your Supabase "amount" column likely needs to be changed to DECIMAL.`);
-                      // Rollback local state on failure
-                      setBooks(prev => prev.map(b => 
-                        b.id === activeBookId 
-                          ? { ...b, transactions: b.transactions.filter(t => t.id !== newTransaction.id) }
-                          : b
-                      ));
+                  // Try with image_layout first
+                  const { error: entryError } = await supabase.from('entries').insert([{ ...payload, image_layout: 'split' }]);
+                  
+                  if (entryError) {
+                    if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist')) {
+                      const { error: retryError } = await supabase.from('entries').insert([payload]);
+                      if (retryError) throw retryError;
+                    } else {
+                      throw entryError;
                     }
                   }
+
+                  if (newTransaction.imageIds && newTransaction.imageIds.length > 0) {
+                    const aiAttachmentInserts = newTransaction.imageIds.map(imgId => ({
+                      entry_id: newTransaction.id,
+                      user_id: session.user.id,
+                      image_id: imgId
+                    }));
+                    const { error: attachError = null } = await supabase.from('attachments').insert(aiAttachmentInserts);
+                    if (attachError) throw attachError;
+                  }
+                } catch (error: any) {
+                  console.error('Error syncing AI entry:', error);
+                  const msg = error.message || 'Unknown error';
+                  setError(`AI Sync Error: ${msg}.`);
+                  // Rollback local state on failure
+                  setBooks(prev => prev.map(b => 
+                    b.id === activeBookId 
+                      ? { ...b, transactions: b.transactions.filter(t => t.id !== newTransaction.id) }
+                      : b
+                  ));
                 }
-                resolve();
-              } catch (err) {
-                console.error('Error in file processing callback:', err);
-                reject(err);
               }
-            };
-            reader.readAsDataURL(file);
-          });
+            }
+          } catch (err) {
+            console.error('Error in file processing:', err);
+            throw err;
+          }
         }
       }
       setIsUploading(false);
@@ -1485,7 +1578,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       await processFiles(e.target.files);
     }
@@ -1507,22 +1600,17 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       theme === 'dark' ? "bg-black text-slate-100" : "bg-slate-50 text-black"
     )}>
       {/* Error Alert */}
-      <AnimatePresence>
+      <div className="fixed top-0 left-0 right-0 z-[60]">
         {error && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
+          <div
             className="bg-rose-500 text-white px-4 py-2 text-center text-sm font-medium flex items-center justify-center gap-2 sticky top-0 z-[60]"
           >
             <AlertCircle size={16} />
             <span>{error}</span>
             <button onClick={() => setError(null)} className="ml-2 hover:bg-white/20 rounded p-0.5 transition-colors">
               <X size={14} />
-            </button>
-          </motion.div>
-        )}
-      </AnimatePresence>
+            </button> </div> ) }
+      </div>
 
       {/* Header Component */}
       {!activeBookId && (
@@ -1581,12 +1669,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   <ChevronDown size={14} className={cn("text-slate-400 transition-transform", isProfileOpen && "rotate-180")} />
                 </button>
 
-                <AnimatePresence>
+                <Fragment>
                   {isProfileOpen && (
-                    <motion.div
-                      initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                      animate={{ opacity: 1, y: 0, scale: 1 }}
-                      exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                    <div
                       className={cn(
                         "absolute right-0 mt-2 w-64 rounded-2xl shadow-2xl border p-2 z-50 transition-colors duration-300",
                         theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-100"
@@ -1648,21 +1733,16 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       >
                         <LogOut size={18} />
                         <span className="font-medium flex-1 text-left">Sign Out</span>
-                      </button>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
+                      </button> </div> ) }
+                </Fragment>
               </div>
             </div>
           </div>
 
           {/* Mobile Search Overlay */}
-          <AnimatePresence>
+          <Fragment>
             {isSearchExpanded && (
-              <motion.div 
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
+              <div
                 className={cn(
                   "absolute inset-0 z-[60] px-4 flex items-center gap-2 transition-colors duration-300",
                   theme === 'dark' ? "bg-black" : "bg-white"
@@ -1687,23 +1767,20 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     <X size={18} />
                   </button>
                 )}
-              </motion.div>
+              </div>
             )}
-          </AnimatePresence>
+          </Fragment>
         </header>
       )}
 
       {/* Main Content Area */}
       <main className="w-full mx-auto p-2 sm:p-4 lg:p-6 lg:px-6 xl:px-10">
-        <AnimatePresence mode="wait">
+        <Fragment>
           {!activeBookId ? (
             /* PAGE 1: HOME / BOOKS LIST */
-            <motion.div
+            <div
               key="home"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="space-y-8"
+              className="space-y-8 pb-40 sm:pb-0"
             >
               {/* User Welcome Section */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -1821,10 +1898,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     : "grid-cols-1"
                 )}>
                   {filteredBooks.map((book) => (
-                    <motion.div
+                    <div
                       key={book.id}
-                      initial={{ opacity: 0, scale: 0.95 }}
-                      animate={{ opacity: 1, scale: 1 }}
                       onMouseDown={() => onTouchStartBook(book.id)}
                       onMouseUp={onTouchEndBook}
                       onTouchStart={() => onTouchStartBook(book.id)}
@@ -1876,28 +1951,22 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                             onClick={() => setActiveBookId(book.id)}
                             className="p-1.5 sm:p-2 text-indigo-800 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 rounded-lg transition-all ml-0.5"
                           >
-                            <motion.div
-                              animate={{ x: [0, 3, 0] }}
-                              transition={{ repeat: Infinity, duration: 1.5, ease: "easeInOut" }}
-                            >
+                            <div className="flex items-center justify-center">
                               <ArrowRight size={18} className="sm:w-6 sm:h-6" />
-                            </motion.div>
+                            </div>
                           </button>
                         </div>
                       </div>
-                    </motion.div>
+                    </div>
                   ))}
                 </div>
               )}
-            </motion.div>
+            </div>
           ) : (
             /* PAGE 2: INDIVIDUAL CASHBOOK VIEW */
-            <motion.div
+            <div
               key="cashbook"
-              initial={{ opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
-              className="w-full space-y-4 sm:space-y-6 pb-24 sm:pb-0"
+              className="w-full space-y-4 sm:space-y-6 pb-40 sm:pb-0"
             >
               {/* Header Actions */}
               <div className="flex items-center justify-between">
@@ -1928,12 +1997,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     <DownloadCloud size={18} />
                     Reports
                   </button>
-                  <AnimatePresence>
+                  <Fragment>
                     {showReportsMenu && (
-                      <motion.div
-                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                        exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                      <div
                         className="absolute right-0 mt-2 w-48 bg-white dark:bg-zinc-950 rounded-2xl shadow-2xl border border-slate-100 dark:border-zinc-900 p-2 z-50"
                       >
                         <button 
@@ -1949,10 +2015,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                         >
                           <FileText size={18} className="text-rose-600" />
                           <span className="font-bold text-sm">Export PDF</span>
-                        </button>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
+                        </button> </div> ) }
+                  </Fragment>
                 </div>
               </div>
 
@@ -2016,13 +2080,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     <ChevronDown size={16} className={cn("transition-transform", showReportsMenu && "rotate-180")} />
                   </button>
                   
-                  <AnimatePresence>
+                  <Fragment>
                     {showReportsMenu && (
-                      <motion.div
-                        initial={{ height: 0, opacity: 0 }}
-                        animate={{ height: 'auto', opacity: 1 }}
-                        exit={{ height: 0, opacity: 0 }}
-                        className="overflow-hidden bg-white dark:bg-slate-800/50"
+                      <div                         className="overflow-hidden bg-white dark:bg-slate-800/50"
                       >
                         <div className="grid grid-cols-2 divide-x divide-slate-100 dark:divide-slate-800 border-t border-slate-100 dark:border-slate-800">
                           <button 
@@ -2046,9 +2106,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                             )}>PDF</span>
                           </button>
                         </div>
-                      </motion.div>
+                      </div>
                     )}
-                  </AnimatePresence>
+                  </Fragment>
                 </div>
               </div>
 
@@ -2296,10 +2356,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                               .reduce((acc, curr) => acc + (curr.type === 'in' ? curr.amount : -curr.amount), 0);
 
                             return (
-                              <motion.div
+                              <div
                                 key={t.id}
-                                initial={{ opacity: 0, y: 10 }}
-                                animate={{ opacity: 1, y: 0 }}
                                 onMouseDown={() => onTouchStart(t.id)}
                                 onMouseUp={onTouchEnd}
                                 onTouchStart={() => onTouchStart(t.id)}
@@ -2383,12 +2441,17 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                                           setPreviewZoom(1);
                                         }}
                                         className={cn(
-                                          "flex items-center gap-1 transition-colors duration-300",
-                                          theme === 'dark' ? "text-indigo-400" : "text-indigo-600"
+                                          "flex items-center gap-1.5 transition-colors duration-300",
+                                          theme === 'dark' ? "text-indigo-400 hover:text-indigo-300" : "text-indigo-600 hover:text-indigo-700 underline underline-offset-2 decoration-indigo-200"
                                         )}
                                       >
-                                        <Paperclip size={10} />
-                                        <span className="text-[8px] font-bold">{t.images.length}</span>
+                                        <Paperclip size={11} className="shrink-0" />
+                                        <div className="flex flex-col items-start leading-tight">
+                                          <div className="flex items-center gap-1">
+                                            <span className="text-[9px] font-black">{t.images.length}</span>
+                                            <span className="text-[7px] font-bold uppercase tracking-tighter opacity-70">Attachments</span>
+                                          </div>
+                                        </div>
                                       </button>
                                     ) : (
                                       <div className={cn(
@@ -2431,9 +2494,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                                       <Trash2 size={10} />
                                     </button>
                                   </div>
-                                </div>
-                              </motion.div>
-                            );
+                                </div></div>);
                           })}
                         </div>
                       ));
@@ -2607,12 +2668,17 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                                           setPreviewRotation(0);
                                           setPreviewZoom(1);
                                         }}
-                                        className="flex items-center gap-2 text-slate-500 hover:text-indigo-600 transition-colors group/bill cursor-pointer"
+                                        className={cn(
+                                          "flex items-center gap-2 group/bill cursor-pointer transition-all",
+                                          theme === 'dark' ? "text-indigo-400 hover:text-indigo-300" : "text-[#475569] hover:text-[#2563eb]"
+                                        )}
                                       >
-                                        <Paperclip size={16} />
-                                        <div className="text-left">
-                                          <p className="text-[10px] font-black leading-none">{t.images.length}</p>
-                                          <p className="text-[10px] font-bold text-slate-400 group-hover/bill:text-indigo-400">Attachments</p>
+                                        <Paperclip size={14} className="shrink-0" />
+                                        <div className="flex flex-col items-start leading-tight">
+                                          <div className="flex items-center gap-1">
+                                            <span className="text-[11px] font-black">{t.images.length}</span>
+                                            <span className="text-[9px] font-bold uppercase tracking-tighter opacity-70">Attachments</span>
+                                          </div>
                                         </div>
                                       </button>
                                     ) : null}
@@ -2679,7 +2745,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       : "bg-white border border-indigo-200 text-indigo-700 shadow-sm shadow-indigo-100/20"
                   )}
                 >
-                  {isUploading ? <Loader2 size={20} className="animate-spin" /> : <motion.div animate={{ rotate: [0, 15, -15, 0] }} transition={{ repeat: Infinity, duration: 2 }}><Upload size={20} /></motion.div>}
+                  {isUploading ? <Loader2 size={20} className="animate-spin" /> : <div><Upload size={20} /></div>}
                   AI UPLOAD
                 </button>
                 <div className="flex gap-3">
@@ -2709,25 +2775,21 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   </button>
                 </div>
               </div>
-            </motion.div>
+            </div>
           )}
-        </AnimatePresence>
+        </Fragment>
       </main>
 
       {/* MODALS */}
 
       {/* Delete Confirmation Modal */}
-      <AnimatePresence>
+      <Fragment>
         {deleteConfirmId && (
           <div className={cn(
             "fixed inset-0 z-[150] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300",
             theme === 'dark' ? "bg-black/60" : "bg-indigo-900/10"
           )}>
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              className={cn(
+            <div               className={cn(
                 "w-full max-w-sm rounded-3xl p-6 shadow-2xl text-center space-y-4 transition-colors duration-300",
                 theme === 'dark' ? "bg-zinc-950" : "bg-white"
               )}
@@ -2765,23 +2827,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   {deleteTimer > 0 ? `Delete (${deleteTimer}s)` : 'Delete'}
                 </button>
               </div>
-            </motion.div>
-          </div>
+ </div>           </div>
         )}
-      </AnimatePresence>
+      </Fragment>
 
       {/* Transaction Delete Confirmation Modal */}
-      <AnimatePresence>
+      <Fragment>
         {transactionToDelete && (
           <div className={cn(
             "fixed inset-0 z-[150] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300",
             theme === 'dark' ? "bg-black/60" : "bg-indigo-900/10"
           )}>
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              className={cn(
+            <div               className={cn(
                 "w-full max-w-sm rounded-3xl p-6 shadow-2xl text-center space-y-4 transition-colors duration-300",
                 theme === 'dark' ? "bg-zinc-950" : "bg-white"
               )}
@@ -2819,23 +2876,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   {deleteTimer > 0 ? `Delete (${deleteTimer}s)` : 'Delete'}
                 </button>
               </div>
-            </motion.div>
-          </div>
+ </div>           </div>
         )}
-      </AnimatePresence>
+      </Fragment>
 
       {/* AI Upload Warning Modal */}
-      <AnimatePresence>
+      <Fragment>
         {showAiWarning && (
           <div className={cn(
             "fixed inset-0 z-[120] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300",
             theme === 'dark' ? "bg-black/60" : "bg-indigo-900/10"
           )}>
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              className={cn(
+            <div               className={cn(
                 "w-full max-w-sm rounded-3xl p-6 shadow-2xl text-center space-y-4 transition-colors duration-300",
                 theme === 'dark' ? "bg-zinc-950" : "bg-white"
               )}
@@ -2876,23 +2928,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   Proceed
                 </button>
               </div>
-            </motion.div>
-          </div>
+ </div>           </div>
         )}
-      </AnimatePresence>
+      </Fragment>
 
       {/* AI Drop Zone Modal */}
-      <AnimatePresence>
+      <Fragment>
         {showDropZone && (
           <div className={cn(
             "fixed inset-0 z-[120] flex items-center justify-center p-4 backdrop-blur-md transition-colors duration-300",
             theme === 'dark' ? "bg-black/70" : "bg-slate-900/40"
           )}>
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 20 }}
-              className={cn(
+            <div               className={cn(
                 "w-full max-w-md rounded-3xl p-8 shadow-2xl space-y-6 transition-colors duration-300",
                 theme === 'dark' ? "bg-zinc-950" : "bg-white border border-slate-100"
               )}
@@ -2944,23 +2991,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 <div className="shrink-0"><Loader2 size={14} className="animate-spin" /></div>
                 <p>AI will process images one by one. Max 5 images allowed.</p>
               </div>
-            </motion.div>
-          </div>
+ </div>           </div>
         )}
-      </AnimatePresence>
+      </Fragment>
 
       {/* Create Book Modal */}
-      <AnimatePresence>
+      <Fragment>
         {isCreatingBook && (
           <div className={cn(
             "fixed inset-0 z-[100] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300",
             theme === 'dark' ? "bg-black/60" : "bg-slate-900/40"
           )}>
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              className={cn(
+            <div               className={cn(
                 "w-full max-w-md rounded-3xl p-6 shadow-2xl transition-colors duration-300",
                 theme === 'dark' ? "bg-zinc-950" : "bg-white"
               )}
@@ -2970,10 +3012,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   "text-xl font-bold transition-colors duration-300",
                   theme === 'dark' ? "text-white" : "text-black"
                 )}>Create New Book</h3>
-                <button onClick={() => setIsCreatingBook(false)} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full transition-colors">
+                <button onClick={() => { setIsCreatingBook(false); setBookError(null); setError(null); }} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full transition-colors">
                   <X size={20} className="text-slate-400" />
                 </button>
               </div>
+              
+              {bookError && (
+                <div className="mb-4 p-3 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 rounded-xl flex items-center gap-2 text-rose-600 dark:text-rose-400 text-sm animate-in fade-in slide-in-from-top-1">
+                  <AlertCircle size={16} />
+                  <span>{bookError}</span>
+                </div>
+              )}
+
               <form onSubmit={handleCreateBook} className="space-y-4">
                 <div className="space-y-1">
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Book Name</label>
@@ -2982,7 +3032,16 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     type="text"
                     placeholder="e.g., Personal, Business"
                     value={newBookName}
-                    onChange={(e) => setNewBookName(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setNewBookName(val);
+                      if (bookError) setBookError(null);
+                      
+                      // Immediate validation for better UX
+                      if (val.trim() && books.some(b => b.name.trim().toLowerCase() === val.trim().toLowerCase())) {
+                        setBookError(`A book named "${val.trim()}" already exists.`);
+                      }
+                    }}
                     className={cn(
                       "w-full px-4 py-3 rounded-xl border focus:ring-2 focus:ring-indigo-500 outline-none transition-all",
                       theme === 'dark' ? "bg-slate-800 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-black"
@@ -3011,23 +3070,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   Create Book
                 </button>
               </form>
-            </motion.div>
-          </div>
+ </div>           </div>
         )}
-      </AnimatePresence>
+      </Fragment>
 
       {/* Edit Book Modal */}
-      <AnimatePresence>
+      <Fragment>
         {isEditingBook && (
           <div className={cn(
             "fixed inset-0 z-[100] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300",
             theme === 'dark' ? "bg-black/60" : "bg-slate-900/40"
           )}>
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              className={cn(
+            <div               className={cn(
                 "w-full max-w-md rounded-3xl p-6 shadow-2xl transition-colors duration-300",
                 theme === 'dark' ? "bg-zinc-950" : "bg-white"
               )}
@@ -3037,10 +3091,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   "text-xl font-bold transition-colors duration-300",
                   theme === 'dark' ? "text-white" : "text-black"
                 )}>Edit Book Name</h3>
-                <button onClick={() => setIsEditingBook(null)} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full transition-colors">
+                <button onClick={() => { setIsEditingBook(null); setBookError(null); setError(null); }} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full transition-colors">
                   <X size={20} className="text-slate-400" />
                 </button>
               </div>
+              
+              {bookError && (
+                <div className="mb-4 p-3 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 rounded-xl flex items-center gap-2 text-rose-600 dark:text-rose-400 text-sm animate-in fade-in slide-in-from-top-1">
+                  <AlertCircle size={16} />
+                  <span>{bookError}</span>
+                </div>
+              )}
+
               <form onSubmit={handleUpdateBook} className="space-y-4">
                 <div className="space-y-1">
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Book Name</label>
@@ -3048,7 +3110,10 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     autoFocus
                     type="text"
                     value={editBookName}
-                    onChange={(e) => setEditBookName(e.target.value)}
+                    onChange={(e) => {
+                      setEditBookName(e.target.value);
+                      if (bookError) setBookError(null);
+                    }}
                     className={cn(
                       "w-full px-4 py-3 rounded-xl border focus:ring-2 focus:ring-indigo-500 outline-none transition-all",
                       theme === 'dark' ? "bg-slate-800 border-slate-800 text-white" : "bg-slate-50 border-slate-200 text-black"
@@ -3065,23 +3130,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   Save Changes
                 </button>
               </form>
-            </motion.div>
-          </div>
+ </div>           </div>
         )}
-      </AnimatePresence>
+      </Fragment>
 
       {/* Profile Settings Modal */}
-      <AnimatePresence>
+      <Fragment>
         {isEditingName && (
           <div className={cn(
             "fixed inset-0 z-[100] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300",
             theme === 'dark' ? "bg-black/60" : "bg-slate-900/40"
           )}>
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              className={cn(
+            <div               className={cn(
                 "w-full max-w-md rounded-3xl p-6 shadow-2xl transition-colors duration-300",
                 theme === 'dark' ? "bg-slate-900" : "bg-white"
               )}
@@ -3122,23 +3182,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   Save Changes
                 </button>
               </div>
-            </motion.div>
-          </div>
+ </div>           </div>
         )}
-      </AnimatePresence>
+      </Fragment>
 
       {/* Transaction Form Modal */}
-      <AnimatePresence>
+      <Fragment>
         {showForm && (
           <div className={cn(
             "fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300",
             theme === 'dark' ? "bg-black/60" : "bg-indigo-900/10"
           )}>
-            <motion.div
-              initial={{ opacity: 0, y: 100 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 100 }}
-              className={cn(
+            <div               className={cn(
                 "w-full max-w-lg rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden transition-colors duration-300",
                 theme === 'dark' ? "bg-zinc-950" : "bg-white"
               )}
@@ -3309,41 +3364,64 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   {/* Image Layout Selection */}
                   <div className="space-y-2">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Image Layout in PDF</label>
-                    <div className={cn(
-                      "p-1 rounded-xl flex gap-1 transition-colors duration-300",
-                      theme === 'dark' ? "bg-slate-800" : "bg-slate-100"
-                    )}>
+                    <div className="flex items-center gap-2">
+                      <div className={cn(
+                        "flex-1 p-1 rounded-xl flex gap-1 transition-colors duration-300",
+                        theme === 'dark' ? "bg-slate-800" : "bg-slate-100"
+                      )}>
+                        <button
+                          type="button"
+                          onClick={() => setImageLayout('merge')}
+                          className={cn(
+                            "flex-1 py-2 rounded-lg font-bold transition-all text-[10px] flex items-center justify-center gap-2",
+                            imageLayout === 'merge' 
+                              ? (theme === 'dark' ? "bg-slate-700 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm")
+                              : (theme === 'dark' ? "text-slate-400 hover:bg-slate-700/50" : "text-slate-500 hover:bg-slate-200/50")
+                          )}
+                        >
+                          <LayoutGrid size={14} />
+                          MERGE
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setImageLayout('split')}
+                          className={cn(
+                            "flex-1 py-2 rounded-lg font-bold transition-all text-[10px] flex items-center justify-center gap-2",
+                            imageLayout === 'split' 
+                              ? (theme === 'dark' ? "bg-slate-700 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm")
+                              : (theme === 'dark' ? "text-slate-400 hover:bg-slate-700/50" : "text-slate-500 hover:bg-slate-200/50")
+                          )}
+                        >
+                          <List size={14} />
+                          SPLIT
+                        </button>
+                      </div>
                       <button
                         type="button"
-                        onClick={() => setImageLayout('merge')}
+                        onClick={resetImageUpload}
                         className={cn(
-                          "flex-1 py-2 rounded-lg font-bold transition-all text-[10px] flex items-center justify-center gap-2",
-                          imageLayout === 'merge' 
-                            ? (theme === 'dark' ? "bg-slate-700 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm")
-                            : (theme === 'dark' ? "text-slate-400 hover:bg-slate-700/50" : "text-slate-500 hover:bg-slate-200/50")
+                          "p-2.5 rounded-xl border transition-all active:rotate-180 duration-500 shrink-0",
+                          theme === 'dark' 
+                            ? "bg-slate-800 border-slate-700 text-slate-400 hover:text-indigo-400" 
+                            : "bg-slate-50 border-slate-200 text-slate-400 hover:text-indigo-600 shadow-sm"
                         )}
+                        title="Reset Uploads"
                       >
-                        <LayoutGrid size={14} />
-                        MERGE (Side by Side)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setImageLayout('split')}
-                        className={cn(
-                          "flex-1 py-2 rounded-lg font-bold transition-all text-[10px] flex items-center justify-center gap-2",
-                          imageLayout === 'split' 
-                            ? (theme === 'dark' ? "bg-slate-700 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm")
-                            : (theme === 'dark' ? "text-slate-400 hover:bg-slate-700/50" : "text-slate-500 hover:bg-slate-200/50")
-                        )}
-                      >
-                        <List size={14} />
-                        SPLIT (Page by Page)
+                        <RefreshCcw size={16} className={isManualImageUploading ? "animate-spin" : ""} />
                       </button>
                     </div>
                   </div>
 
                   <div className="space-y-1.5">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Bills / Attachments (Max 5)</label>
+                    <div className="flex items-center justify-between">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Bills / Attachments (Max 5)</label>
+                      {isManualImageUploading && (
+                        <div className="flex items-center gap-1.5 text-indigo-500">
+                          <Loader2 size={12} className="animate-spin" />
+                          <span className="text-[9px] font-bold uppercase tracking-wider">Optimizing...</span>
+                        </div>
+                      )}
+                    </div>
                     <div className="space-y-3">
                       {selectedImages.length > 0 && (
                         <div className="space-y-4">
@@ -3482,53 +3560,53 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     </button>
                     <button
                       type="submit"
+                      disabled={isSubmitting || isManualImageUploading}
                       className={cn(
-                        "flex-1 py-3 rounded-xl font-bold text-white transition-all active:scale-95 text-sm",
+                        "flex-1 py-3 rounded-xl font-bold text-white transition-all active:scale-95 text-sm flex items-center justify-center gap-2",
                         showForm === 'in' 
                           ? (theme === 'dark' ? "bg-emerald-600 hover:bg-emerald-700 shadow-none" : "bg-emerald-600 hover:bg-emerald-700 shadow-lg shadow-emerald-100")
                           : (theme === 'dark' ? "bg-rose-600 hover:bg-rose-700 shadow-none" : "bg-rose-600 hover:bg-rose-700 shadow-lg shadow-rose-100")
                       )}
                     >
-                      Save
+                      {(isSubmitting || isManualImageUploading) ? (
+                        <>
+                          <Loader2 className="animate-spin" size={16} />
+                          {isManualImageUploading ? 'OPTIMIZING...' : 'SAVING...'} </>                       ) : 'Save'}
                     </button>
                   </div>
                 </form>
               </div>
-            </motion.div>
-          </div>
+ </div>           </div>
         )}
-      </AnimatePresence>
+      </Fragment>
 
       {/* Processing Overlay */}
-      <AnimatePresence mode="wait">
+      <Fragment>
         {isUploading && (
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[200] flex items-center justify-center bg-indigo-600 text-white"
-          >
+          <div className={cn(
+            "fixed inset-0 z-[200] flex items-center justify-center transition-colors duration-300",
+            theme === 'dark' ? "bg-black text-white" : "bg-white text-slate-900"
+          )}>
             <div className="text-center space-y-8 px-6 w-full max-w-sm">
               <div className="relative flex items-center justify-center">
-                <motion.div
-                  animate={{ rotate: 360 }}
-                  transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
-                  className="w-16 h-16 border-4 border-white/20 border-t-white rounded-full"
-                />
+                <div className={cn(
+                  "w-16 h-16 border-4 rounded-full border-t-indigo-600 animate-spin",
+                  theme === 'dark' ? "border-slate-800" : "border-slate-100"
+                )} />
               </div>
               <div className="space-y-3">
-                <AnimatePresence mode="wait">
-                  <motion.h3 
+                <Fragment>
+                  <div
                     key={uploadingMessage}
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -10 }}
-                    className="text-2xl font-bold tracking-tight"
+                    className="text-2xl font-black tracking-tight"
                   >
                     {uploadingMessage}
-                  </motion.h3>
-                </AnimatePresence>
-                <p className="text-indigo-100/80 text-sm">
+                  </div>
+                </Fragment>
+                <p className={cn(
+                  "text-sm font-medium",
+                  theme === 'dark' ? "text-slate-400" : "text-slate-500"
+                )}>
                   AI is reading your receipt and extracting details
                 </p>
               </div>
@@ -3548,12 +3626,11 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 </button>
               </div>
             </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+ </div>         )}
+      </Fragment>
 
       {/* Image Gallery Preview Modal */}
-      <AnimatePresence>
+      <Fragment>
         {previewImages && (
           <div className="fixed inset-0 z-[200] bg-slate-950/95 backdrop-blur-xl flex flex-col">
             {/* Gallery Header */}
@@ -3566,67 +3643,94 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   <X size={24} />
                 </button>
                 <div>
-                  <p className="font-bold">Attachment Preview</p>
+                  <p className="font-bold">{activeBook?.name || 'Attachment Preview'}</p>
                   <p className="text-xs text-slate-400">{previewIndex + 1} of {previewImages.length}</p>
                 </div>
               </div>
               
-              <div className="flex items-center gap-2">
-                <button 
-                  onClick={() => setPreviewZoom(prev => Math.max(0.5, prev - 0.25))}
-                  className="p-2 hover:bg-white/10 rounded-full transition-colors"
-                  title="Zoom Out"
-                >
-                  <ZoomOut size={20} />
-                </button>
-                <button 
-                  onClick={() => setPreviewZoom(prev => Math.min(3, prev + 0.25))}
-                  className="p-2 hover:bg-white/10 rounded-full transition-colors"
-                  title="Zoom In"
-                >
-                  <ZoomIn size={20} />
-                </button>
-                <button 
-                  onClick={() => setPreviewRotation(prev => (prev + 90) % 360)}
-                  className="p-2 hover:bg-white/10 rounded-full transition-colors"
-                  title="Rotate"
-                >
-                  <RotateCw size={20} />
-                </button>
-                <a 
-                  href={previewImages[previewIndex]} 
-                  download={`attachment-${previewIndex + 1}.png`}
-                  className="p-2 hover:bg-white/10 rounded-full transition-colors"
-                  title="Download"
-                >
-                  <Download size={20} />
-                </a>
+              <div className="flex items-center gap-2 sm:gap-6 ml-auto overflow-x-auto no-scrollbar">
+                <div className="flex flex-col items-center gap-0.5 sm:gap-1 shrink-0">
+                  <button 
+                    onClick={() => setPreviewZoom(prev => Math.max(0.5, prev - 0.25))}
+                    className="p-1.5 sm:p-2 hover:bg-white/10 rounded-full transition-colors"
+                  >
+                    <ZoomOut size={18} className="sm:w-5 sm:h-5" />
+                  </button>
+                  <span className="text-[8px] sm:text-[10px] text-slate-400 font-bold uppercase tracking-tighter">Out</span>
+                </div>
+
+                <div className="flex flex-col items-center gap-0.5 sm:gap-1 shrink-0">
+                  <button 
+                    onClick={() => setPreviewZoom(prev => Math.min(3, prev + 0.25))}
+                    className="p-1.5 sm:p-2 hover:bg-white/10 rounded-full transition-colors"
+                  >
+                    <ZoomIn size={18} className="sm:w-5 sm:h-5" />
+                  </button>
+                  <span className="text-[8px] sm:text-[10px] text-slate-400 font-bold uppercase tracking-tighter">In</span>
+                </div>
+
+                <div className="flex flex-col items-center gap-0.5 sm:gap-1 shrink-0">
+                  <button 
+                    onClick={() => setPreviewRotation(prev => (prev + 90) % 360)}
+                    className="p-1.5 sm:p-2 hover:bg-white/10 rounded-full transition-colors"
+                  >
+                    <RotateCw size={18} className="sm:w-5 sm:h-5" />
+                  </button>
+                  <span className="text-[8px] sm:text-[10px] text-slate-400 font-bold uppercase tracking-tighter">Rotate</span>
+                </div>
+
+                <div className="flex flex-col items-center gap-0.5 sm:gap-1 shrink-0">
+                  <button 
+                    onClick={async () => {
+                      const url = previewImages[previewIndex];
+                      try {
+                        const response = await fetch(url);
+                        const blob = await response.blob();
+                        const blobUrl = window.URL.createObjectURL(blob);
+                        const link = document.createElement('a');
+                        link.href = blobUrl;
+                        link.download = `attachment-${Date.now()}.png`;
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                        window.URL.revokeObjectURL(blobUrl);
+                      } catch (err) {
+                        console.error('Download failed:', err);
+                        // Fallback for CORS: try Cloudinary specific attachment flag or just open
+                        const downloadUrl = url.includes('cloudinary.com') 
+                          ? url.replace('/upload/', '/upload/fl_attachment/') 
+                          : url;
+                        window.open(downloadUrl, '_blank', 'noopener,noreferrer');
+                      }
+                    }}
+                    className="p-1.5 sm:p-2 hover:bg-white/10 rounded-full transition-colors"
+                  >
+                    <Download size={18} className="sm:w-5 sm:h-5" />
+                  </button>
+                  <span className="text-[8px] sm:text-[10px] text-slate-400 font-bold uppercase tracking-tighter">Save</span>
+                </div>
               </div>
             </div>
 
             {/* Main Preview Area */}
             <div className="flex-1 relative flex items-center justify-center overflow-hidden">
-              <AnimatePresence mode="wait">
-                <motion.div
+              <Fragment>
+                <div
                   key={previewIndex}
-                  initial={{ opacity: 0, scale: 0.9 }}
-                  animate={{ 
-                    opacity: 1, 
-                    scale: previewZoom,
-                    rotate: previewRotation
-                  }}
-                  exit={{ opacity: 0, scale: 0.9 }}
-                  transition={{ type: "spring", damping: 25, stiffness: 200 }}
                   className="relative max-w-full max-h-full p-4"
                 >
                   <img 
                     src={previewImages[previewIndex]} 
                     alt="preview" 
-                    className="max-w-full max-h-[80vh] object-contain shadow-2xl rounded-lg"
+                    style={{ 
+                      transform: `scale(${previewZoom}) rotate(${previewRotation}deg)`,
+                      transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
+                    }}
+                    className="max-w-full max-h-[80vh] object-contain shadow-2xl rounded-lg cursor-grab active:cursor-grabbing"
                     referrerPolicy="no-referrer"
                   />
-                </motion.div>
-              </AnimatePresence>
+                </div>
+              </Fragment>
 
               {/* Navigation Arrows */}
               {previewImages.length > 1 && (
@@ -3650,9 +3754,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     className="absolute right-4 p-4 bg-white/5 hover:bg-white/10 rounded-full text-white backdrop-blur-md transition-all"
                   >
                     <ChevronRight size={32} />
-                  </button>
-                </>
-              )}
+                  </button> </> ) }
             </div>
 
             {/* Thumbnails Strip */}
@@ -3680,9 +3782,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             )}
           </div>
         )}
-      </AnimatePresence>
+      </Fragment>
       {/* Report Generation Overlay */}
-      <AnimatePresence>
+      <Fragment>
         {reportLoading && (
           <div className={cn(
             "fixed inset-0 z-[300] flex items-center justify-center backdrop-blur-md transition-colors duration-300",
@@ -3700,17 +3802,14 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     fill="transparent"
                     className={theme === 'dark' ? "text-slate-800" : "text-slate-100"}
                   />
-                  <motion.circle
+                  <circle
                     cx="64"
                     cy="64"
                     r="58"
                     stroke="currentColor"
                     strokeWidth="8"
                     fill="transparent"
-                    strokeDasharray={364.4}
-                    initial={{ strokeDashoffset: 364.4 }}
-                    animate={{ strokeDashoffset: 364.4 - (364.4 * reportLoading.progress) / 100 }}
-                    className="text-indigo-600"
+                    strokeDasharray={364.4} strokeDashoffset={364.4 - (364.4 * reportLoading.progress) / 100} strokeLinecap="round" className="text-indigo-600"
                   />
                 </svg>
                 <div className="absolute inset-0 flex items-center justify-center">
@@ -3738,37 +3837,45 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             </div>
           </div>
         )}
-      </AnimatePresence>
+      </Fragment>
       {/* Help & Support Dialog */}
-      <AnimatePresence>
+      <Fragment>
         {isHelpOpen && (
           <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className={cn(
+            <div               className={cn(
                 "rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden border transition-colors duration-300",
                 theme === 'dark' ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
               )}
             >
-              <div className="p-6 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between bg-indigo-600 text-white">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 bg-white/20 rounded-xl">
-                    <HelpCircle size={24} />
-                  </div>
-                  <div>
-                    <h3 className="text-xl font-black tracking-tight">Help & Support</h3>
-                    <p className="text-xs text-indigo-100 font-medium uppercase tracking-widest">AI Assistant</p>
-                  </div>
+            <div className={cn(
+              "p-6 border-b flex items-center justify-between transition-colors duration-300",
+              theme === 'dark' ? "bg-zinc-950 border-zinc-900 text-white" : "bg-white border-slate-100 text-slate-800"
+            )}>
+              <div className="flex items-center gap-3">
+                <div className={cn(
+                  "p-2 rounded-xl",
+                  theme === 'dark' ? "bg-indigo-900/40 text-indigo-400" : "bg-indigo-50 text-indigo-600"
+                )}>
+                  <HelpCircle size={24} />
                 </div>
-                <button 
-                  onClick={() => { setIsHelpOpen(false); setHelpQuery(''); setHelpResponse(''); }}
-                  className="p-2 hover:bg-white/20 rounded-full transition-colors"
-                >
-                  <X size={24} />
-                </button>
+                <div>
+                  <h3 className="text-xl font-black tracking-tight">Help & Support</h3>
+                  <p className={cn(
+                    "text-[10px] uppercase tracking-widest font-black",
+                    theme === 'dark' ? "text-indigo-400/70" : "text-indigo-600/70"
+                  )}>AI Assistant</p>
+                </div>
               </div>
+              <button 
+                onClick={() => { setIsHelpOpen(false); setHelpQuery(''); setHelpResponse(''); }}
+                className={cn(
+                  "p-2 rounded-full transition-colors",
+                  theme === 'dark' ? "hover:bg-zinc-900 text-slate-400" : "hover:bg-slate-100 text-slate-400"
+                )}
+              >
+                <X size={24} />
+              </button>
+            </div>
 
               <div className="p-6 space-y-6 max-h-[70vh] overflow-y-auto">
                 <div className="space-y-4">
@@ -3798,10 +3905,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 </div>
 
                 {helpResponse && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="bg-indigo-50 dark:bg-indigo-900/20 rounded-2xl p-5 border border-indigo-100 dark:border-indigo-800/50"
+                  <div                     className="bg-indigo-50 dark:bg-indigo-900/20 rounded-2xl p-5 border border-indigo-100 dark:border-indigo-800/50"
                   >
                     <div className="flex items-center gap-2 mb-3">
                       <div className="w-2 h-2 bg-indigo-600 rounded-full animate-pulse" />
@@ -3813,8 +3917,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     )}>
                       <ReactMarkdown>{helpResponse}</ReactMarkdown>
                     </div>
-                  </motion.div>
-                )}
+ </div>                 )}
 
                 <div className="pt-4 border-t border-slate-100 dark:border-slate-800 text-center">
                   <p className="text-slate-400 text-xs font-medium mb-2">Need more help?</p>
@@ -3827,22 +3930,17 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   </a>
                 </div>
               </div>
-            </motion.div>
-          </div>
+ </div>           </div>
         )}
-      </AnimatePresence>
+      </Fragment>
 
-      <AnimatePresence>
+      <Fragment>
         {isSubmitting && (
           <div className={cn(
             "fixed inset-0 z-[200] flex items-center justify-center p-4 backdrop-blur-md transition-colors duration-300",
             theme === 'dark' ? "bg-black/80" : "bg-slate-900/40"
           )}>
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              className={cn(
+            <div               className={cn(
                 "rounded-3xl p-8 shadow-2xl text-center space-y-6 max-w-xs w-full border transition-colors duration-300",
                 theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-100"
               )}
@@ -3852,10 +3950,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   "absolute inset-0 border-4 rounded-full transition-colors duration-300",
                   theme === 'dark' ? "border-indigo-900/30" : "border-indigo-100"
                 )} />
-                <motion.div 
-                  animate={{ rotate: 360 }}
-                  transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
-                  className="absolute inset-0 border-4 border-indigo-600 border-t-transparent rounded-full"
+                <div                   className="absolute inset-0 border-4 border-indigo-600 border-t-transparent rounded-full"
                 />
                 <div className="absolute inset-0 flex items-center justify-center">
                   <Sparkles className="text-indigo-600 animate-pulse" size={32} />
@@ -3871,23 +3966,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   theme === 'dark' ? "text-slate-400" : "text-slate-600"
                 )}>Please wait a moment...</p>
               </div>
-            </motion.div>
-          </div>
+ </div>           </div>
         )}
-      </AnimatePresence>
+      </Fragment>
 
       {/* Bulk Transaction Delete Confirmation Modal */}
-      <AnimatePresence>
+      <Fragment>
         {showBulkTransactionDeleteConfirm && (
           <div className={cn(
             "fixed inset-0 z-[150] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300",
             theme === 'dark' ? "bg-black/60" : "bg-slate-900/40"
           )}>
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              className={cn(
+            <div               className={cn(
                 "w-full max-w-sm rounded-3xl p-6 shadow-2xl text-center space-y-4 transition-colors duration-300",
                 theme === 'dark' ? "bg-zinc-950" : "bg-white"
               )}
@@ -3927,23 +4017,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   {deleteTimer > 0 ? `Delete (${deleteTimer}s)` : 'Delete'}
                 </button>
               </div>
-            </motion.div>
-          </div>
+ </div>           </div>
         )}
-      </AnimatePresence>
+      </Fragment>
 
       {/* Bulk Delete Confirmation Modal */}
-      <AnimatePresence>
+      <Fragment>
         {showBulkDeleteConfirm && (
           <div className={cn(
             "fixed inset-0 z-[150] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300",
             theme === 'dark' ? "bg-black/60" : "bg-slate-900/40"
           )}>
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              className={cn(
+            <div               className={cn(
                 "w-full max-w-sm rounded-3xl p-6 shadow-2xl text-center space-y-4 transition-colors duration-300",
                 theme === 'dark' ? "bg-zinc-950" : "bg-white"
               )}
@@ -3983,23 +4068,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   {deleteTimer > 0 ? `Delete (${deleteTimer}s)` : 'Delete'}
                 </button>
               </div>
-            </motion.div>
-          </div>
+ </div>           </div>
         )}
-      </AnimatePresence>
+      </Fragment>
 
       {/* Exit App Confirmation Modal */}
-      <AnimatePresence>
+      <Fragment>
         {showExitConfirm && (
           <div className={cn(
             "fixed inset-0 z-[200] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300",
             theme === 'dark' ? "bg-black/60" : "bg-indigo-900/10"
           )}>
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              className={cn(
+            <div               className={cn(
                 "w-full max-w-sm rounded-3xl p-6 shadow-2xl text-center space-y-4 transition-colors duration-300",
                 theme === 'dark' ? "bg-zinc-950" : "bg-white"
               )}
@@ -4049,27 +4129,17 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   Exit
                 </button>
               </div>
-            </motion.div>
-          </div>
+ </div>           </div>
         )}
-      </AnimatePresence>
+      </Fragment>
 
-      <AnimatePresence>
+      <Fragment>
         {showComingSoon && (
           <div className="fixed inset-0 z-[300] flex items-center justify-center p-4">
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowComingSoon(false)}
+            <div               onClick={() => setShowComingSoon(false)}
               className="absolute inset-0 bg-slate-900/60 backdrop-blur-md"
             />
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0, y: 30 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.9, opacity: 0, y: 30 }}
-              transition={{ type: "spring", damping: 25, stiffness: 300 }}
-              className={cn(
+            <div               className={cn(
                 "relative w-full max-w-[380px] overflow-hidden rounded-[40px] shadow-[0_32px_64px_-16px_rgba(0,0,0,0.3)] border-4 text-center p-10",
                 theme === 'dark' 
                   ? "bg-zinc-950/90 border-zinc-800/50" 
@@ -4081,15 +4151,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   <Sparkles size={48} className="text-amber-500" />
                 </div>
                 {/* Decorative Elements */}
-                <motion.div 
-                  animate={{ scale: [1, 1.2, 1], opacity: [0.3, 0.6, 0.3] }}
-                  transition={{ repeat: Infinity, duration: 3 }}
-                  className="absolute -top-4 -left-4 w-12 h-12 bg-indigo-500/20 blur-xl rounded-full"
+                <div                   className="absolute -top-4 -left-4 w-12 h-12 bg-indigo-500/20 blur-xl rounded-full"
                 />
-                <motion.div 
-                  animate={{ scale: [1.2, 1, 1.2], opacity: [0.3, 0.6, 0.3] }}
-                  transition={{ repeat: Infinity, duration: 4 }}
-                  className="absolute -bottom-4 -right-4 w-12 h-12 bg-amber-500/20 blur-xl rounded-full"
+                <div                   className="absolute -bottom-4 -right-4 w-12 h-12 bg-amber-500/20 blur-xl rounded-full"
                 />
               </div>
               
@@ -4117,10 +4181,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 </button>
                 <p className="text-[10px] uppercase font-black tracking-widest text-slate-400 opacity-40">Dev Mode v5.0.0</p>
               </div>
-            </motion.div>
-          </div>
+ </div>           </div>
         )}
-      </AnimatePresence>
+      </Fragment>
 
       {/* Hidden AI File Input */}
       <input 

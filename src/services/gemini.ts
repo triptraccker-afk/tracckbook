@@ -14,7 +14,7 @@ export const getApiKey = () => {
 
 const ai = new GoogleGenAI({ apiKey: getApiKey() });
 
-async function withRetry<T>(fn: () => Promise<T>, maxRetries: number = 2, initialDelay: number = 500): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, maxRetries: number = 5, initialDelay: number = 3000): Promise<T> {
   let lastError: any;
   for (let i = 0; i < maxRetries; i++) {
     try {
@@ -65,7 +65,7 @@ export async function parseReceipt(base64Image: string, mimeType: string): Promi
     if (!apiKey) throw new Error("API Key missing");
 
     const response = await withRetry(() => ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-1.5-flash",
       contents: [
         {
           parts: [
@@ -113,7 +113,7 @@ export async function parseMultipleReceipts(images: { base64: string, mimeType: 
     if (!apiKey) throw new Error("API Key missing");
 
     const response = await withRetry(() => ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-1.5-flash",
       contents: [
         {
           parts: [
