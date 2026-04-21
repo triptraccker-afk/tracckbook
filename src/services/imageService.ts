@@ -1,3 +1,5 @@
+import { getApiUrl } from '../lib/api';
+
 /**
  * Service for handling image uploads to Cloudinary via backend
  */
@@ -16,7 +18,7 @@ export async function fetchImages(): Promise<ImageRecord[]> {
   while (attempt < maxRetries) {
     try {
       const cacheBuster = `t=${Date.now()}`;
-      const url = `/api/images?${cacheBuster}`;
+      const url = getApiUrl(`/api/images?${cacheBuster}`);
       console.log(`[ImageService] Sync attempt ${attempt + 1}: Fetching from ${url}`);
       
       const response = await fetch(url, {
@@ -66,7 +68,7 @@ export async function fetchImages(): Promise<ImageRecord[]> {
 }
 
 export async function deleteImage(publicId: string): Promise<void> {
-  const url = `/api/images/${encodeURIComponent(publicId)}`;
+  const url = getApiUrl(`/api/images/${encodeURIComponent(publicId)}`);
   try {
     const response = await fetch(url, {
       method: 'DELETE'
@@ -107,7 +109,7 @@ export async function uploadImage(file: File, options?: { userId?: string, userN
     fileName: file.name
   });
 
-  const apiEndpoint = `/api/upload`;
+  const apiEndpoint = getApiUrl(`/api/upload`);
 
   try {
     console.log(`[ImageService] Uploading file to ${apiEndpoint}...`);

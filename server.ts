@@ -48,8 +48,16 @@ async function startServer() {
     next();
   });
 
-  app.use(cors());
+  app.use(cors({
+    origin: true, // Allow all origins in development/shared mode
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
+  }));
   app.use(express.json({ limit: '10mb' }));
+
+  // Explicit options handling
+  app.options('*', cors());
 
   // Debug route
   app.get("/api/ping", (req, res) => {

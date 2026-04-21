@@ -5,7 +5,7 @@ import Dashboard from './pages/Dashboard';
 import Login from './pages/Login';
 import ResetPassword from './pages/ResetPassword';
 import { Loader2 } from 'lucide-react';
-import { cn } from './lib/utils';
+import { getApiUrl } from './lib/api';
 
 export default function App() {
   const [session, setSession] = useState<any>(null);
@@ -83,7 +83,8 @@ export default function App() {
     const checkBackend = async () => {
       try {
         const cacheBuster = `t=${Date.now()}`;
-        const response = await fetch(`/api/health?${cacheBuster}`, {
+        const apiUrl = getApiUrl(`/api/health?${cacheBuster}`);
+        const response = await fetch(apiUrl, {
           headers: { 'Accept': 'application/json' }
         });
         
