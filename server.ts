@@ -315,14 +315,19 @@ async function startServer() {
     });
   });
 
+  // Export for Vercel
+  if (process.env.VERCEL) {
+    return app;
+  }
+
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`> Server ready at http://0.0.0.0:${PORT}`);
     console.log(`> Mode: ${process.env.NODE_ENV || 'development'}`);
     console.log(`> Cloudinary configured: ${!!process.env.CLOUDINARY_CLOUD_NAME}`);
     console.log(`> Supabase configured: ${!!process.env.SUPABASE_SERVICE_ROLE_KEY}`);
   });
+
+  return app;
 }
 
-startServer().catch(err => {
-  console.error("Failed to start server:", err);
-});
+export default startServer();
