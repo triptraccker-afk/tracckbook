@@ -180,6 +180,22 @@ export default function App() {
     };
   }, []);
 
+  // Protected Route Rendering Logic
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
+        <div className="flex flex-col items-center gap-4">
+          <Loader2 className="animate-spin text-indigo-600" size={40} />
+          <p className="text-sm font-medium text-slate-500 animate-pulse">Initializing TrackBook...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!session && location.pathname !== '/login' && location.pathname !== '/resetpassword') {
+    return <Navigate to="/login" replace />;
+  }
+
   return (
     <>
       <Routes>
@@ -187,53 +203,10 @@ export default function App() {
         <Route path="/login" element={<Login theme={theme} />} />
         <Route path="/resetpassword" element={<ResetPassword />} />
 
-        {/* Protected Routes */}
+        {/* Home / Dashboard */}
         <Route 
           path="/" 
-          element={
-            session ? (
-              backendReady ? (
-                <Dashboard session={session} theme={theme} setTheme={setTheme} />
-              ) : (
-                <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black p-4">
-                  <div className="flex flex-col items-center gap-6 max-w-sm w-full text-center">
-                    {backendError ? (
-                      <>
-                        <div className="w-16 h-16 bg-rose-100 dark:bg-rose-900/30 rounded-full flex items-center justify-center">
-                          <AlertCircle className="text-rose-600 dark:text-rose-400" size={32} />
-                        </div>
-                        <div className="space-y-2">
-                          <h2 className="text-xl font-bold text-slate-900 dark:text-white">Connection Issue</h2>
-                          <p className="text-sm text-slate-500 dark:text-slate-400 leading-relaxed">{backendError}</p>
-                        </div>
-                        <button 
-                          onClick={() => window.location.reload()}
-                          className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-xl transition-all shadow-lg active:scale-[0.98]"
-                        >
-                          Try Connecting Again
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <Loader2 className="animate-spin text-indigo-600" size={40} />
-                        <p className="text-sm font-medium text-slate-500 dark:text-slate-400">Connecting to secure backend server...</p>
-                      </>
-                    )}
-                  </div>
-                </div>
-              )
-            ) : (
-              // If we are still loading initial session, show a loader
-              loading ? (
-                <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
-                  <div className="flex flex-col items-center gap-4">
-                    <Loader2 className="animate-spin text-indigo-600" size={40} />
-                    <p className="text-sm font-medium text-slate-500 animate-pulse">Initializing app...</p>
-                  </div>
-                </div>
-              ) : <Navigate to="/login" replace />
-            )
-          } 
+          element={<Dashboard session={session} theme={theme} setTheme={setTheme} />} 
         />
 
         {/* Fallback */}
