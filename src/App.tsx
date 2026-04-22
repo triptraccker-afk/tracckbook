@@ -175,8 +175,28 @@ export default function App() {
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
 
+    // Global click listener for haptic feedback
+    const handleGlobalClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      // Broad selector for interactive elements
+      const clickable = target.closest('button, a, [role="button"], input[type="submit"], .cursor-pointer');
+      
+      // Also check computed style as a fallback for elements with "cursor-pointer" class or pointer style
+      const style = window.getComputedStyle(target);
+      const isPointer = style.cursor === 'pointer';
+
+      if (clickable || isPointer) {
+        import('./lib/utils').then(({ vibrate }) => {
+          vibrate(25); // Light subtle tap
+        });
+      }
+    };
+
+    window.addEventListener('click', handleGlobalClick);
+
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      window.removeEventListener('click', handleGlobalClick);
     };
   }, []);
 

@@ -1215,10 +1215,25 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     }
     
     try {
+      vibrate(50); // Initial click vibration
       setReportLoading({ type: 'excel', progress: 0 });
       
+      // Smooth progress animation over ~2.5 seconds
+      const totalSteps = 100;
+      const duration = 2500; 
+      const stepTime = duration / totalSteps;
+      
+      for (let i = 1; i <= 100; i++) {
+        setReportLoading({ type: 'excel', progress: i });
+        await new Promise(resolve => setTimeout(resolve, stepTime));
+        // Small vibrations at certain milestones if mobile
+        if (i % 25 === 0) vibrate(10);
+      }
+      
+      // Final 100% pause
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
       // Calculate PDF page numbers for reference accurately
-      // Start from 1 because we are removing the summary table page in PDF
       let currentPage = 1; 
       const transactionPageMap = new Map<string, string>();
       
@@ -1267,7 +1282,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Transactions");
       
-      setReportLoading({ type: 'excel', progress: 95 });
+      vibrate([30, 50, 30]); // Success vibration triad
       const fileName = `${activeBook.name.replace(/\s+/g, '_')}_excel.xlsx`;
       XLSX.writeFile(wb, fileName);
       
@@ -1286,7 +1301,21 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       return;
     }
     try {
-      setReportLoading({ type: 'pdf', progress: 10 });
+      vibrate(50); // Initial click vibration
+      setReportLoading({ type: 'pdf', progress: 0 });
+
+      // Artificial progress loop over ~2.5 seconds
+      const totalSteps = 100;
+      const duration = 2500; 
+      const stepTime = duration / totalSteps;
+      
+      for (let i = 1; i <= 100; i++) {
+        setReportLoading({ type: 'pdf', progress: i });
+        await new Promise(resolve => setTimeout(resolve, stepTime));
+        if (i % 25 === 0) vibrate(10);
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, 500));
 
       const doc = new jsPDF();
       const pageWidth = doc.internal.pageSize.getWidth();
@@ -1409,7 +1438,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         doc.text("No attachments found in this book.", pageWidth / 2, pageHeight / 2, { align: 'center' });
       }
 
-      setReportLoading({ type: 'pdf', progress: 100 });
+      vibrate([30, 50, 30]); // Success vibration triad
       const fileName = `${activeBook.name.replace(/[^a-z0-9]/gi, '_')}_pdf.pdf`;
       doc.save(fileName);
     } catch (error: any) {
@@ -2856,7 +2885,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 theme === 'dark' ? "bg-slate-900/80 border-slate-800" : "bg-white/80 border-slate-100"
               )}>
                 <button
-                  onClick={() => { vibrate(); setShowAiWarning(true); }}
+                  onClick={() => { vibrate(); setShowComingSoon(true); }}
                   disabled={isUploading}
                   className={cn(
                     "w-full flex items-center justify-center gap-2 py-3 rounded-2xl font-black transition-all active:scale-95",
