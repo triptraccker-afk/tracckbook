@@ -4,7 +4,7 @@ import { supabase } from './lib/supabase';
 import Dashboard from './pages/Dashboard';
 import Login from './pages/Login';
 import ResetPassword from './pages/ResetPassword';
-import { Loader2 } from 'lucide-react';
+import { Loader2, AlertCircle } from 'lucide-react';
 import { getApiUrl } from './lib/api';
 
 export default function App() {
@@ -81,31 +81,50 @@ export default function App() {
     const maxChecks = 10;
     
     const checkBackend = async () => {
+      const isDevelopment = import.meta.env.DEV;
+      
       try {
-        const cacheBuster = `t=${Date.now()}`;
-        const apiUrl = getApiUrl(`/api/health?${cacheBuster}`);
+        const apiUrl = getApiUrl(`/api/health?t=${Date.now()}`);
+        console.log(`[HealthCheck] Checking: ${apiUrl}`);
+        
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+        
         const response = await fetch(apiUrl, {
-          headers: { 'Accept': 'application/json' }
+          method: 'GET',
+          headers: { 'Accept': 'application/json' },
+          signal: controller.signal
         });
         
+        clearTimeout(timeoutId);
         const contentType = response.headers.get("content-type");
-        if (response.ok && contentType && contentType.includes("application/json")) {
+        
+        if (response.status === 401) {
+          throw new Error('401: Vercel Deployment Protection is ON.');
+        }
+
+        if (response.ok && contentType?.includes("application/json")) {
           const data = await response.json();
           if (data && data.status === "ok") {
-            console.log('Backend connection verified.');
             setBackendReady(true);
             setBackendError(null);
             return;
           }
         }
-        throw new Error('Backend responded but is not ready or returned invalid format.');
-      } catch (err) {
+        throw new Error(`Server returned ${response.status}`);
+      } catch (err: any) {
         checkCount++;
-        console.warn(`Backend check failed (attempt ${checkCount}):`, err);
-        if (checkCount < maxChecks) {
+        const errorMsg = err.name === 'AbortError' ? 'Timeout' : err.message;
+        
+        if (isDevelopment) {
+          setBackendReady(true);
+          return;
+        }
+
+        if (checkCount < 5) { 
           setTimeout(checkBackend, 2000);
         } else {
-          setBackendError('Backend connection timeout. Please refresh or try again later.');
+          setBackendError(`Backend Issue: ${errorMsg}`);
         }
       }
     };
@@ -176,10 +195,30 @@ export default function App() {
               backendReady ? (
                 <Dashboard session={session} theme={theme} setTheme={setTheme} />
               ) : (
-                <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
-                  <div className="flex flex-col items-center gap-4">
-                    <Loader2 className="animate-spin text-indigo-600" size={40} />
-                    <p className="text-sm font-medium text-slate-500">{backendError || 'Connecting to backend...'}</p>
+                <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black p-4">
+                  <div className="flex flex-col items-center gap-6 max-w-sm w-full text-center">
+                    {backendError ? (
+                      <>
+                        <div className="w-16 h-16 bg-rose-100 dark:bg-rose-900/30 rounded-full flex items-center justify-center">
+                          <AlertCircle className="text-rose-600 dark:text-rose-400" size={32} />
+                        </div>
+                        <div className="space-y-2">
+                          <h2 className="text-xl font-bold text-slate-900 dark:text-white">Connection Issue</h2>
+                          <p className="text-sm text-slate-500 dark:text-slate-400 leading-relaxed">{backendError}</p>
+                        </div>
+                        <button 
+                          onClick={() => window.location.reload()}
+                          className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-xl transition-all shadow-lg active:scale-[0.98]"
+                        >
+                          Try Connecting Again
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <Loader2 className="animate-spin text-indigo-600" size={40} />
+                        <p className="text-sm font-medium text-slate-500 dark:text-slate-400">Connecting to secure backend server...</p>
+                      </>
+                    )}
                   </div>
                 </div>
               )

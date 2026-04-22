@@ -19,14 +19,11 @@ export async function fetchImages(): Promise<ImageRecord[]> {
     try {
       const cacheBuster = `t=${Date.now()}`;
       const url = getApiUrl(`/api/images?${cacheBuster}`);
-      console.log(`[ImageService] Sync attempt ${attempt + 1}: Fetching from ${url}`);
+      const fullUrl = url.startsWith('http') ? url : `${window.location.origin}${url}`;
+      console.log(`[ImageService] Fetching images from: ${fullUrl}`);
       
-      const response = await fetch(url, {
-        headers: {
-          'Accept': 'application/json',
-          'Cache-Control': 'no-cache',
-          'X-Requested-With': 'XMLHttpRequest'
-        }
+      const response = await fetch(fullUrl, {
+        method: 'GET'
       });
       
       if (!response.ok) {
@@ -110,15 +107,14 @@ export async function uploadImage(file: File, options?: { userId?: string, userN
   });
 
   const apiEndpoint = getApiUrl(`/api/upload`);
+  // Construct absolute URL for mobile browser stability
+  const fullEndpoint = apiEndpoint.startsWith('http') ? apiEndpoint : `${window.location.origin}${apiEndpoint}`;
 
   try {
-    console.log(`[ImageService] Uploading file to ${apiEndpoint}...`);
-    const response = await fetch(apiEndpoint, {
+    console.log(`[ImageService] Uploading file to: ${fullEndpoint}...`);
+    const response = await fetch(fullEndpoint, {
       method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'X-Requested-With': 'XMLHttpRequest'
-      },
+      // DO NOT set Content-Type header manually for FormData, it breaks boundaries
       body: formData,
     });
 

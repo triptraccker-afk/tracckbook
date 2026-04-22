@@ -886,14 +886,37 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               const { error: delError } = await supabase.from('attachments').delete().eq('entry_id', editingTransaction.id);
               if (delError) console.error("[Sync] Error clearing old attachments:", delError);
 
-              const attachmentInserts = selectedImageIds.map((imgId, idx) => ({
-                entry_id: editingTransaction.id,
-                user_id: session.user.id,
-                image_id: imgId
-              }));
-              const { error: insError } = await supabase.from('attachments').insert(attachmentInserts);
-              if (insError) throw insError;
-              console.log("[Sync] Attachments updated successfully.");
+              const attachmentInserts = selectedImageIds
+                .filter(imgId => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(imgId))
+                .map((imgId, idx) => ({
+                  entry_id: editingTransaction.id,
+                  user_id: session.user.id,
+                  image_id: imgId,
+                  user_name: userName || session.user.email || 'User'
+                }));
+              
+              if (attachmentInserts.length > 0) {
+                const { error: insError } = await supabase.from('attachments').insert(attachmentInserts);
+                if (insError) {
+                  console.error("[Supabase] Attachment (edit) insert error:", insError);
+                  const isMissingColumn = insError.code === '42703' || 
+                                         insError.message?.toLowerCase().includes('user_name') ||
+                                         insError.message?.toLowerCase().includes('column');
+                                         
+                  if (isMissingColumn) {
+                    console.warn("[Supabase] Retrying attachments (edit) without user_name column...");
+                    const fallbackInserts = attachmentInserts.map((item: any) => {
+                      const { user_name, ...rest } = item;
+                      return rest;
+                    });
+                    const { error: retryError } = await supabase.from('attachments').insert(fallbackInserts);
+                    if (retryError) throw retryError;
+                  } else {
+                    throw insError;
+                  }
+                }
+                console.log("[Sync] Attachments updated successfully.");
+              }
             }
           } catch (error: any) {
             console.error('Detailed Supabase Update Error:', error);
@@ -969,14 +992,38 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
             if (selectedImageIds.length > 0) {
               console.log(`[Sync] Creating attachments for new entry ${newTransaction.id}. Count: ${selectedImageIds.length}`);
-              const attachmentInserts = selectedImageIds.map((imgId, idx) => ({
-                entry_id: newTransaction.id,
-                user_id: session.user.id,
-                image_id: imgId
-              }));
-              const { error: insError } = await supabase.from('attachments').insert(attachmentInserts);
-              if (insError) throw insError;
-              console.log("[Sync] Attachments created successfully.");
+              const attachmentInserts = selectedImageIds
+                .filter(imgId => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(imgId))
+                .map((imgId, idx) => ({
+                  entry_id: newTransaction.id,
+                  user_id: session.user.id,
+                  image_id: imgId,
+                  user_name: userName || session.user.email || 'User'
+                }));
+
+              if (attachmentInserts.length > 0) {
+                const { error: insError } = await supabase.from('attachments').insert(attachmentInserts);
+                
+                if (insError) {
+                  console.error("[Supabase] Attachment insert error:", insError);
+                  const isMissingColumn = insError.code === '42703' || 
+                                         insError.message?.toLowerCase().includes('user_name') ||
+                                         insError.message?.toLowerCase().includes('column');
+                                         
+                  if (isMissingColumn) {
+                    console.warn("[Supabase] Retrying attachments without user_name column...");
+                    const fallbackInserts = attachmentInserts.map((item: any) => {
+                      const { user_name, ...rest } = item;
+                      return rest;
+                    });
+                    const { error: retryError } = await supabase.from('attachments').insert(fallbackInserts);
+                    if (retryError) throw retryError;
+                  } else {
+                    throw insError;
+                  }
+                }
+                console.log("[Sync] Attachments created successfully.");
+              }
             }
           } catch (error: any) {
             console.error('Error creating entry in Supabase:', error);
@@ -1119,111 +1166,133 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
   const handleImageUpload = async (e: ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (!files || !activeBookId) return;
+    if (!files || !activeBookId || !session) return;
 
     const filesArray = Array.from(files).slice(0, 5 - selectedImages.length) as File[];
     if (filesArray.length === 0) return;
 
     setIsManualImageUploading(true);
+    setSubmittingMessage('Uploading images...');
+    
     try {
       for (const file of filesArray) {
+        setSubmittingMessage(`Uploading: ${file.name}`);
         const result = await uploadImage(file, { 
           userId: session.user.id, 
           userName: userName || session.user.email || 'User',
           userEmail: session.user.email
         });
-        setSelectedImages(prev => [...prev, result.imageUrl]);
-        setSelectedThumbnailUrls(prev => [...prev, result.imageUrl]);
-        if (result.id) {
-          setSelectedImageIds(prev => [...prev, result.id!]);
+        
+        if (result.imageUrl || (result.urls && result.urls.length > 0)) {
+          const url = result.imageUrl || result.urls[0];
+          setSelectedImages(prev => [...prev, url]);
+          setSelectedThumbnailUrls(prev => [...prev, result.thumbnailUrl || url]);
+          
+          // CRITICAL: We need the ID to link in the attachments table
+          // ONLY use the db_id (Supabase UUID). NEVER use Cloudinary path.
+          const dbId = result.db_id;
+          if (dbId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(dbId)) {
+            setSelectedImageIds(prev => [...prev, dbId]);
+          } else {
+            console.warn("[Upload] No valid Supabase UUID received, image will be visible but not linked in attachments table.");
+          }
         }
       }
     } catch (err: any) {
       console.error('Manual upload error:', err);
-      setError('Failed to upload image: ' + err.message);
+      setError('Failed to upload image: ' + (err.message || 'Unknown error'));
     } finally {
       setIsManualImageUploading(false);
+      setSubmittingMessage('');
       if (e.target) e.target.value = '';
     }
   };
 
   const exportToExcel = async () => {
-    if (!activeBook) return;
-    setReportLoading({ type: 'excel', progress: 0 });
-    
-    // Simulate progress
-    for (let i = 0; i <= 100; i += 10) {
-      setReportLoading(prev => prev ? { ...prev, progress: i } : null);
-      await new Promise(r => setTimeout(r, 100));
+    if (!activeBook) {
+      setError("Please select a book first.");
+      return;
     }
-
-    // Calculate PDF page numbers for reference
-    let currentPage = 1;
-    const transactionPageMap = new Map<string, string>();
     
-    const transactionsWithImages = filteredTransactions.filter(t => t.images && t.images.length > 0);
-    for (const t of transactionsWithImages) {
-      const layout = t.imageLayout || 'split';
-      const imageCount = t.images?.length || 0;
-      const pagesUsed = layout === 'merge' ? Math.ceil(imageCount / 2) : imageCount;
+    try {
+      setReportLoading({ type: 'excel', progress: 0 });
       
-      if (pagesUsed === 1) {
-        transactionPageMap.set(t.id, `Refer Page Number ${currentPage}`);
-      } else {
-        transactionPageMap.set(t.id, `Refer Page Number ${currentPage} to ${currentPage + pagesUsed - 1}`);
+      // Calculate PDF page numbers for reference accurately
+      // Start from 1 because we are removing the summary table page in PDF
+      let currentPage = 1; 
+      const transactionPageMap = new Map<string, string>();
+      
+      const transactionsWithImages = filteredTransactions.filter(t => t.images && t.images.length > 0);
+      for (const t of transactionsWithImages) {
+        const layout = t.imageLayout || 'split';
+        const imageCount = t.images?.length || 0;
+        const pagesUsed = layout === 'merge' ? Math.ceil(imageCount / 2) : imageCount;
+        
+        if (pagesUsed === 1) {
+          transactionPageMap.set(t.id, `${currentPage}`);
+        } else if (pagesUsed > 1) {
+          transactionPageMap.set(t.id, `${currentPage} to ${currentPage + pagesUsed - 1}`);
+        }
+        
+        currentPage += pagesUsed;
       }
+
+      const data = filteredTransactions.map(t => ({
+        Date: t.date.toLocaleDateString('en-IN'),
+        Details: t.description,
+        Category: t.category,
+        Mode: t.mode,
+        'Cash In': t.type === 'in' ? t.amount : 0,
+        'Cash Out': t.type === 'out' ? t.amount : 0,
+        'Refer page number': transactionPageMap.get(t.id) || '-'
+      }));
+
+      const totalIn = totals.in;
+      const totalOut = totals.out;
+      const balance = totals.net;
+
+      const ws = XLSX.utils.json_to_sheet(data);
       
-      currentPage += pagesUsed;
+      // Add summary rows
+      XLSX.utils.sheet_add_aoa(ws, [
+        [],
+        ['', '', '', '', totalIn, totalOut],
+        ['', '', '', '', balance]
+      ], { origin: -1 });
+
+      const lastRow = XLSX.utils.decode_range(ws['!ref'] || 'A1').e.r;
+      ws[XLSX.utils.encode_cell({ r: lastRow - 1, c: 3 })] = { v: 'TOTAL', t: 's' };
+      ws[XLSX.utils.encode_cell({ r: lastRow, c: 3 })] = { v: 'BALANCE', t: 's' };
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Transactions");
+      
+      setReportLoading({ type: 'excel', progress: 95 });
+      const fileName = `${activeBook.name.replace(/\s+/g, '_')}_excel.xlsx`;
+      XLSX.writeFile(wb, fileName);
+      
+    } catch (err: any) {
+      console.error("[Export] Excel Error:", err);
+      setError("Failed to export Excel: " + (err.message || "Unknown error"));
+    } finally {
+      setTimeout(() => setReportLoading(null), 500);
+      setShowReportsMenu(false);
     }
-
-    const data = filteredTransactions.map(t => ({
-      Date: t.date.toLocaleDateString('en-IN'),
-      Details: t.description,
-      Category: t.category,
-      Mode: t.mode,
-      'Cash In': t.type === 'in' ? t.amount : 0,
-      'Cash Out': t.type === 'out' ? t.amount : 0,
-      'Reference': transactionPageMap.get(t.id) || '-'
-    }));
-
-    // Add totals and balance as per user reference
-    const totalIn = totals.in;
-    const totalOut = totals.out;
-    const balance = totals.net;
-
-    const ws = XLSX.utils.json_to_sheet(data);
-    
-    // Add summary rows
-    XLSX.utils.sheet_add_aoa(ws, [
-      [],
-      ['', '', '', '', totalIn, totalOut],
-      ['', '', '', '', balance]
-    ], { origin: -1 });
-
-    // Update summary labels to align with the new column structure
-    const lastRow = XLSX.utils.decode_range(ws['!ref'] || 'A1').e.r;
-    ws[XLSX.utils.encode_cell({ r: lastRow - 1, c: 3 })] = { v: 'TOTAL', t: 's' };
-    ws[XLSX.utils.encode_cell({ r: lastRow, c: 3 })] = { v: 'BALANCE', t: 's' };
-
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Transactions");
-    XLSX.writeFile(wb, `${activeBook.name}_Report.xlsx`);
-    
-    setReportLoading(null);
-    setShowReportsMenu(false);
   };
 
   const exportToPDF = async () => {
-    if (!activeBook) return;
+    if (!activeBook) {
+      setError("Please select a book first.");
+      return;
+    }
     try {
-      console.log("Starting PDF export...");
       setReportLoading({ type: 'pdf', progress: 10 });
 
       const doc = new jsPDF();
-      
-      setReportLoading({ type: 'pdf', progress: 40 });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
 
-      // Attachments only
+      // No summary table page as requested. Start directly with images.
       const transactionsWithImages = filteredTransactions.filter(t => t.images && t.images.length > 0);
       
       if (transactionsWithImages.length > 0) {
@@ -1232,121 +1301,122 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         let isFirstPage = true;
 
         for (const t of transactionsWithImages) {
-          if (t.images) {
-            const layout = t.imageLayout || 'split';
-            
-            if (layout === 'merge') {
-              // Merge layout: 2 images per page side-by-side
-              for (let i = 0; i < t.images.length; i += 2) {
-                if (!isFirstPage) doc.addPage();
-                isFirstPage = false;
+          if (!t.images) continue;
+          const layout = t.imageLayout || 'split';
 
-                const pageWidth = doc.internal.pageSize.getWidth();
-                const pageHeight = doc.internal.pageSize.getHeight();
-                const margin = 10;
-                const gap = 5;
-                const availableWidth = pageWidth - (margin * 2) - gap;
-                const imgWidth = availableWidth / 2;
-                const imgHeight = pageHeight * 0.6; // Take 60% of height for side-by-side
-                const y = (pageHeight - imgHeight) / 2;
+          if (layout === 'merge') {
+            // MERGE: 2 images per page side-by-side
+            for (let i = 0; i < t.images.length; i += 2) {
+              if (isFirstPage) isFirstPage = false; else doc.addPage();
+              
+              const margin = 12; // Adjusted margin
+              const gap = 4;
+              const availableWidth = pageWidth - (margin * 2) - gap;
+              const maxImgWidth = availableWidth / 2;
+              const maxImgHeight = pageHeight - (margin * 2);
+              const y = margin;
 
-                // Add transaction header
-                doc.setFontSize(10);
-                doc.setTextColor(80);
-                doc.text(`Transaction: ${t.description} (${t.amount}) - ${t.date.toLocaleDateString('en-IN')}`, 10, 10);
-
-                // First image in pair
-                try {
-                  const img1 = t.images[i];
-                  let format1 = 'JPEG';
-                  if (img1.startsWith('data:image/png')) format1 = 'PNG';
-                  else if (img1.startsWith('data:image/webp')) format1 = 'WEBP';
-                  const base64Data1 = img1.includes('base64,') ? img1.split('base64,')[1] : img1;
-                  doc.addImage(base64Data1, format1 as any, margin, y, imgWidth, imgHeight, undefined, 'FAST');
-                } catch (e) { console.error(e); }
-                processedImages++;
-
-                // Second image in pair (if exists)
-                if (i + 1 < t.images.length) {
-                  try {
-                    const img2 = t.images[i + 1];
-                    let format2 = 'JPEG';
-                    if (img2.startsWith('data:image/png')) format2 = 'PNG';
-                    else if (img2.startsWith('data:image/webp')) format2 = 'WEBP';
-                    const base64Data2 = img2.includes('base64,') ? img2.split('base64,')[1] : img2;
-                    doc.addImage(base64Data2, format2 as any, margin + imgWidth + gap, y, imgWidth, imgHeight, undefined, 'FAST');
-                  } catch (e) { console.error(e); }
-                  processedImages++;
-                }
-
-                const imageProgress = 40 + (processedImages / totalImages) * 50;
-                setReportLoading({ type: 'pdf', progress: Math.round(imageProgress) });
-              }
-            } else {
-              // Split layout: 1 image per page (current behavior)
-              for (const img of t.images) {
-                try {
-                  if (!isFirstPage) doc.addPage();
-                  isFirstPage = false;
-                  
-                  let format = 'JPEG';
-                  if (img.startsWith('data:image/png')) format = 'PNG';
-                  else if (img.startsWith('data:image/webp')) format = 'WEBP';
-                  const base64Data = img.includes('base64,') ? img.split('base64,')[1] : img;
-                  
-                  const pageWidth = doc.internal.pageSize.getWidth();
-                  const pageHeight = doc.internal.pageSize.getHeight();
-                  const imgWidth = pageWidth * 0.9;
-                  const imgHeight = pageHeight * 0.9;
-                  const x = (pageWidth - imgWidth) / 2;
-                  const y = (pageHeight - imgHeight) / 2;
-
-                  // Add transaction header
-                  doc.setFontSize(10);
-                  doc.setTextColor(80);
-                  doc.text(`Transaction: ${t.description} (${t.amount}) - ${t.date.toLocaleDateString('en-IN')}`, 10, 10);
-
-                  doc.addImage(base64Data, format as any, x, y, imgWidth, imgHeight, undefined, 'FAST');
-                } catch (e) { console.error(e); }
+              // First image logic
+              try {
+                const img1 = t.images[i];
+                let format1 = 'JPEG';
+                if (img1.startsWith('data:image/png')) format1 = 'PNG';
+                else if (img1.startsWith('data:image/webp')) format1 = 'WEBP';
+                const data1 = img1.includes('base64,') ? img1.split('base64,')[1] : img1;
                 
+                const props = doc.getImageProperties(img1);
+                const ratio = props.width / props.height;
+                let finalWidth = maxImgWidth;
+                let finalHeight = finalWidth / ratio;
+                
+                if (finalHeight > maxImgHeight) {
+                  finalHeight = maxImgHeight;
+                  finalWidth = finalHeight * ratio;
+                }
+                
+                doc.addImage(data1, format1 as any, margin, y + (maxImgHeight - finalHeight) / 2, finalWidth, finalHeight, undefined, 'FAST', 0);
                 processedImages++;
-                const imageProgress = 40 + (processedImages / totalImages) * 50;
-                setReportLoading({ type: 'pdf', progress: Math.round(imageProgress) });
+              } catch (e) { console.error(e); }
+
+              // Second image logic
+              if (i + 1 < t.images.length) {
+                try {
+                  const img2 = t.images[i + 1];
+                  let format2 = 'JPEG';
+                  if (img2.startsWith('data:image/png')) format2 = 'PNG';
+                  else if (img2.startsWith('data:image/webp')) format2 = 'WEBP';
+                  const data2 = img2.includes('base64,') ? img2.split('base64,')[1] : img2;
+                  
+                  const props = doc.getImageProperties(img2);
+                  const ratio = props.width / props.height;
+                  let finalWidth = maxImgWidth;
+                  let finalHeight = finalWidth / ratio;
+                  
+                  if (finalHeight > maxImgHeight) {
+                    finalHeight = maxImgHeight;
+                    finalWidth = finalHeight * ratio;
+                  }
+                  
+                  doc.addImage(data2, format2 as any, margin + maxImgWidth + gap, y + (maxImgHeight - finalHeight) / 2, finalWidth, finalHeight, undefined, 'FAST', 0);
+                  processedImages++;
+                } catch (e) { console.error(e); }
               }
+
+              setReportLoading({ type: 'pdf', progress: Math.round(40 + (processedImages / totalImages) * 55) });
+            }
+          } else {
+            // SPLIT: 1 image per page
+            for (const img of t.images) {
+              if (isFirstPage) isFirstPage = false; else doc.addPage();
+              
+              const margin = 12; // Adjusted margin
+              const availableWidth = pageWidth - (margin * 2);
+              const availableHeight = pageHeight - (margin * 2);
+
+              try {
+                let format = 'JPEG';
+                if (img.startsWith('data:image/png')) format = 'PNG';
+                else if (img.startsWith('data:image/webp')) format = 'WEBP';
+                const base64Data = img.includes('base64,') ? img.split('base64,')[1] : img;
+                
+                // Get original image properties to maintain aspect ratio
+                const props = doc.getImageProperties(img);
+                const ratio = props.width / props.height;
+                
+                let finalWidth = availableWidth;
+                let finalHeight = finalWidth / ratio;
+                
+                // If height exceeds page, scale down based on height
+                if (finalHeight > availableHeight) {
+                  finalHeight = availableHeight;
+                  finalWidth = finalHeight * ratio;
+                }
+                
+                // Center the image on the page
+                const xOffset = margin + (availableWidth - finalWidth) / 2;
+                const yOffset = margin + (availableHeight - finalHeight) / 2;
+                
+                doc.addImage(base64Data, format as any, xOffset, yOffset, finalWidth, finalHeight, undefined, 'FAST', 0);
+              } catch (e) { console.error(e); }
+              
+              processedImages++;
+              setReportLoading({ type: 'pdf', progress: Math.round(40 + (processedImages / totalImages) * 55) });
             }
           }
         }
       } else {
-        doc.setFontSize(12);
-        doc.text("No attachments found in this book.", 14, 20);
+        // Fallback if no images
+        doc.text("No attachments found in this book.", pageWidth / 2, pageHeight / 2, { align: 'center' });
       }
 
-      setReportLoading({ type: 'pdf', progress: 95 });
-      await new Promise(r => setTimeout(r, 300));
-      
-      const fileName = `${activeBook.name.replace(/[^a-z0-9]/gi, '_')}_Report.pdf`;
-      
-      // Add page numbers and footer
-      const totalPages = doc.getNumberOfPages();
-      for (let i = 1; i <= totalPages; i++) {
-        doc.setPage(i);
-        doc.setFontSize(8);
-        doc.setTextColor(150);
-        doc.text(`Page ${i} of ${totalPages}`, doc.internal.pageSize.getWidth() / 2, doc.internal.pageSize.getHeight() - 5, { align: 'center' });
-        doc.text(`Report: ${activeBook.name}`, 10, doc.internal.pageSize.getHeight() - 5);
-        doc.text(new Date().toLocaleDateString('en-IN'), doc.internal.pageSize.getWidth() - 30, doc.internal.pageSize.getHeight() - 5);
-      }
-
-      doc.save(fileName);
-      console.log("PDF saved successfully");
-      
       setReportLoading({ type: 'pdf', progress: 100 });
-      await new Promise(r => setTimeout(r, 300));
-    } catch (error) {
-      console.error("PDF Export failed:", error);
-      alert("Failed to download PDF. Please try again.");
+      const fileName = `${activeBook.name.replace(/[^a-z0-9]/gi, '_')}_pdf.pdf`;
+      doc.save(fileName);
+    } catch (error: any) {
+      console.error("[Export] PDF Export failed:", error);
+      setError("Failed to export PDF: " + (error.message || "Unknown error"));
     } finally {
-      setReportLoading(null);
+      setTimeout(() => setReportLoading(null), 500);
       setShowReportsMenu(false);
     }
   };
@@ -1388,7 +1458,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             mimeType: file.type,
             url: uploadResult.imageUrl,
             thumbUrl: uploadResult.imageUrl,
-            id: uploadResult.id || ''
+            id: uploadResult.db_id || '' // Prefer REAL UUID from server
           });
         }
 
@@ -1445,13 +1515,37 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               }
 
               if (newTransaction.imageIds && newTransaction.imageIds.length > 0) {
-                const attachmentInserts = newTransaction.imageIds.map(imgId => ({
-                  entry_id: newTransaction.id,
-                  user_id: session.user.id,
-                  image_id: imgId
-                }));
-                const { error: attachError } = await supabase.from('attachments').insert(attachmentInserts);
-                if (attachError) throw attachError;
+                const attachmentInserts = newTransaction.imageIds
+                  .filter(imgId => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(imgId))
+                  .map(imgId => ({
+                    entry_id: newTransaction.id,
+                    user_id: session.user.id,
+                    image_id: imgId,
+                    user_name: userName || session.user.email || 'User'
+                  }));
+                
+                if (attachmentInserts.length > 0) {
+                  const { error: attachError } = await supabase.from('attachments').insert(attachmentInserts);
+                  
+                  if (attachError) {
+                    console.error("[Supabase] AI sync attachment error:", attachError);
+                    const isMissingColumn = attachError.code === '42703' || 
+                                           attachError.message?.toLowerCase().includes('user_name') ||
+                                           attachError.message?.toLowerCase().includes('column');
+                                           
+                    if (isMissingColumn) {
+                      console.warn("[Supabase] Retrying AI sync attachments without user_name column...");
+                      const fallbackInserts = attachmentInserts.map((item: any) => {
+                        const { user_name, ...rest } = item;
+                        return rest;
+                      });
+                      const { error: retryError } = await supabase.from('attachments').insert(fallbackInserts);
+                      if (retryError) throw retryError;
+                    } else {
+                      throw attachError;
+                    }
+                  }
+                }
               }
             } catch (error: any) {
               console.error('Error syncing merged AI entry (detailed):', error);
@@ -1500,7 +1594,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 date: parseAIDate(result.date),
                 images: [uploadResult.imageUrl],
                 thumbnailUrls: [uploadResult.imageUrl],
-                imageIds: uploadResult.id ? [uploadResult.id] : undefined,
+                imageIds: uploadResult.db_id ? [uploadResult.db_id] : undefined, // USE UUID
                 isAi: true,
                 imageLayout: 'split'
               };
@@ -1539,13 +1633,37 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   }
 
                   if (newTransaction.imageIds && newTransaction.imageIds.length > 0) {
-                    const aiAttachmentInserts = newTransaction.imageIds.map(imgId => ({
-                      entry_id: newTransaction.id,
-                      user_id: session.user.id,
-                      image_id: imgId
-                    }));
-                    const { error: attachError = null } = await supabase.from('attachments').insert(aiAttachmentInserts);
-                    if (attachError) throw attachError;
+                    const aiAttachmentInserts = newTransaction.imageIds
+                      .filter(imgId => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(imgId))
+                      .map(imgId => ({
+                        entry_id: newTransaction.id,
+                        user_id: session.user.id,
+                        image_id: imgId,
+                        user_name: userName || session.user.email || 'User'
+                      }));
+                    
+                    if (aiAttachmentInserts.length > 0) {
+                      const { error: aiAttachError } = await supabase.from('attachments').insert(aiAttachmentInserts);
+                      
+                      if (aiAttachError) {
+                        console.error("[Supabase] AI bulk attachment error:", aiAttachError);
+                        const isMissingColumn = aiAttachError.code === '42703' || 
+                                               aiAttachError.message?.toLowerCase().includes('user_name') ||
+                                               aiAttachError.message?.toLowerCase().includes('column');
+                                               
+                        if (isMissingColumn) {
+                          console.warn("[Supabase] Retrying AI bulk attachments without user_name column...");
+                          const fallbackInserts = aiAttachmentInserts.map((item: any) => {
+                            const { user_name, ...rest } = item;
+                            return rest;
+                          });
+                          const { error: retryError } = await supabase.from('attachments').insert(fallbackInserts);
+                          if (retryError) throw retryError;
+                        } else {
+                          throw aiAttachError;
+                        }
+                      }
+                    }
                   }
                 } catch (error: any) {
                   console.error('Error syncing AI entry:', error);
@@ -2003,15 +2121,15 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                         className="absolute right-0 mt-2 w-48 bg-white dark:bg-zinc-950 rounded-2xl shadow-2xl border border-slate-100 dark:border-zinc-900 p-2 z-50"
                       >
                         <button 
-                          onClick={exportToExcel}
-                          className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition-all"
+                          onClick={(e) => { e.stopPropagation(); e.preventDefault(); exportToExcel(); }}
+                          className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition-all cursor-pointer"
                         >
                           <FileSpreadsheet size={18} className="text-emerald-600" />
                           <span className="font-bold text-sm">Export Excel</span>
                         </button>
                         <button 
-                          onClick={exportToPDF}
-                          className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition-all"
+                          onClick={(e) => { e.stopPropagation(); e.preventDefault(); exportToPDF(); }}
+                          className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition-all cursor-pointer"
                         >
                           <FileText size={18} className="text-rose-600" />
                           <span className="font-bold text-sm">Export PDF</span>
@@ -2086,8 +2204,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       >
                         <div className="grid grid-cols-2 divide-x divide-slate-100 dark:divide-slate-800 border-t border-slate-100 dark:border-slate-800">
                           <button 
-                            onClick={exportToExcel}
-                            className="flex items-center justify-center gap-2 py-4 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all"
+                            onPointerDown={(e) => { e.stopPropagation(); e.preventDefault(); exportToExcel(); }}
+                            onClick={(e) => { e.stopPropagation(); e.preventDefault(); }}
+                            className="flex items-center justify-center gap-2 py-4 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all cursor-pointer"
                           >
                             <Download size={16} className="text-emerald-600" />
                             <span className={cn(
@@ -2096,8 +2215,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                             )}>Excel</span>
                           </button>
                           <button 
-                            onClick={exportToPDF}
-                            className="flex items-center justify-center gap-2 py-4 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all"
+                            onPointerDown={(e) => { e.stopPropagation(); e.preventDefault(); exportToPDF(); }}
+                            onClick={(e) => { e.stopPropagation(); e.preventDefault(); }}
+                            className="flex items-center justify-center gap-2 py-4 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all cursor-pointer"
                           >
                             <FileText size={16} className="text-rose-600" />
                             <span className={cn(
@@ -3172,6 +3292,16 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     )}
                   />
                 </div>
+                <div className="space-y-1 opacity-70">
+                  <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Email Address</label>
+                  <div className={cn(
+                    "w-full px-4 py-3 rounded-xl border cursor-not-allowed",
+                    theme === 'dark' ? "border-slate-800 bg-slate-900/50 text-slate-400" : "border-slate-200 bg-slate-100/50 text-slate-500"
+                  )}>
+                    {session?.user?.email}
+                  </div>
+                  <p className="text-[10px] text-slate-400 ml-1">Email cannot be changed.</p>
+                </div>
                 <button
                   onClick={handleUpdateProfile}
                   className={cn(
@@ -3491,12 +3621,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                                   type="button"
                                   onClick={() => removeImage(i)}
                                   className={cn(
-                                    "absolute -top-2 -right-2 p-1 bg-rose-600 text-white rounded-full transition-opacity z-10",
-                                    theme === 'dark' ? "shadow-none" : "shadow-lg",
-                                    "opacity-0 group-hover:opacity-100"
+                                    "absolute -top-2 -right-2 p-1.5 bg-rose-600 text-white rounded-full transition-all z-10 active:scale-90",
+                                    theme === 'dark' ? "shadow-none" : "shadow-lg shadow-rose-200",
+                                    "border-2 border-white dark:border-zinc-950"
                                   )}
                                 >
-                                  <X size={12} />
+                                  <X size={12} strokeWidth={4} />
                                 </button>
                                 
                                 <div className="absolute bottom-1 left-1/2 -translate-x-1/2 bg-black/50 text-[8px] text-white px-1.5 rounded-full">
@@ -3809,7 +3939,10 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     stroke="currentColor"
                     strokeWidth="8"
                     fill="transparent"
-                    strokeDasharray={364.4} strokeDashoffset={364.4 - (364.4 * reportLoading.progress) / 100} strokeLinecap="round" className="text-indigo-600"
+                    strokeDasharray={364.4}
+                    strokeDashoffset={364.4 - (364.4 * reportLoading.progress) / 100}
+                    strokeLinecap="round"
+                    className="text-indigo-600 transition-all duration-500 ease-out"
                   />
                 </svg>
                 <div className="absolute inset-0 flex items-center justify-center">
@@ -3822,10 +3955,10 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               
               <div className="space-y-2">
                 <h3 className={cn(
-                  "text-xl font-black transition-colors duration-300",
+                  "text-xl font-black transition-colors duration-300 capitalize",
                   theme === 'dark' ? "text-white" : "text-black"
                 )}>
-                  Exporting your {reportLoading.type.toUpperCase()} report
+                  Downloading {reportLoading.type} report...
                 </h3>
                 <p className={cn(
                   "font-medium transition-colors duration-300",

@@ -1,7 +1,7 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
 export const getApiKey = () => {
-  const envKey = process.env.GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API_KEY;
+  const envKey = process.env.GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API;
   
   // If env key exists and looks like a real key (not "undefined" string), use it.
   if (envKey && envKey !== "undefined" && envKey !== "null" && envKey.trim().length > 10) {

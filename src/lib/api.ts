@@ -12,16 +12,19 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || '';
  * Otherwise returns the endpoint as is (relative).
  */
 export function getApiUrl(endpoint: string): string {
-  // Ensure endpoint starts with /
   const path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   
-  // If API_BASE_URL is set, use it
+  // FORCE relative paths in development/preview to ensure 
+  // we hit the AI Studio local backend and NOT a potentially protected external backend.
+  if (import.meta.env.DEV) {
+    return path;
+  }
+
+  const API_BASE_URL = import.meta.env.VITE_API_URL || '';
   if (API_BASE_URL) {
-    // Strip trailing slash from base if present
     const base = API_BASE_URL.endsWith('/') ? API_BASE_URL.slice(0, -1) : API_BASE_URL;
     return `${base}${path}`;
   }
   
-  // Fallback to relative URL
   return path;
 }
