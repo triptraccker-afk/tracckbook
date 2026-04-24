@@ -91,45 +91,56 @@ async function startServer() {
   });
 
   // Upload image (accepts singular 'image' or plural 'images')
-  app.post("/api/upload", upload.any(), async (req: any, res: any) => {
+  app.post("/api/upload", (req, res, next) => {
+    console.log(`[Upload] Incoming request: ${req.method} ${req.url} - Content-Type: ${req.headers['content-type']}`);
+    next();
+  }, upload.any(), async (req: any, res: any) => {
     try {
       const files = req.files as Express.Multer.File[];
-      if (!files || files.length === 0) return res.status(400).json({ error: "No files provided" });
+      if (!files || files.length === 0) {
+        console.error("[Upload] No files in request. Body keys:", Object.keys(req.body || {}));
+        return res.status(400).json({ error: "No files provided" });
+      }
 
       // DEBUG: Log exactly what is in req.body
       console.log(`[Upload] Body received:`, JSON.stringify(req.body));
       console.log(`[Upload] Processing ${files.length} files...`);
 
       const uploadResults = await Promise.all(files.map(async (file) => {
-        const b64 = Buffer.from(file.buffer).toString("base64");
-        const dataURI = `data:${file.mimetype};base64,${b64}`;
-        
         // Ensure Cloudinary is configured
-        if (!cloudName || cloudName === 'undefined') {
-          console.error("[Upload] Cloudinary Cloud Name is MISSING or invalid:", cloudName);
-          throw new Error("Cloudinary configuration missing on server (cloudName not found)");
+        if (!cloudName) {
+          console.error("[Upload] Cloudinary Cloud Name is MISSING");
+          throw new Error("Cloudinary configuration missing on server");
         }
 
         // Get user info from body with fallback
         const userId = req.body.userId || 'unknown_user';
         const userEmail = req.body.userEmail || '';
-        // Extract a "readable" name from email or name
         const displayName = (req.body.userName || userEmail || 'user').split('@')[0];
         const sanitizedDisplayName = displayName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
         
-        // Exact Path: trackbook/users/name_email_userid/receipts
         const userFolderPath = `trackbook/users/${sanitizedDisplayName}_${userId.slice(0, 8)}/receipts`;
 
-        console.log(`[Upload] Attempting Cloudinary upload for ${file.originalname} to: ${userFolderPath}`);
+        console.log(`[Upload] Attempting Stream upload for ${file.originalname} to: ${userFolderPath}`);
 
         try {
-          const result = await cloudinary.uploader.upload(dataURI, {
-            folder: userFolderPath,
-            resource_type: "auto",
-            access_mode: "public",
-            use_filename: true,
-            unique_filename: true
-          });
+          // Use upload_stream to avoid memory-heavy base64 string conversion
+          const result = await new Promise((resolve, reject) => {
+            const uploadStream = cloudinary.uploader.upload_stream(
+              {
+                folder: userFolderPath,
+                resource_type: "auto",
+                access_mode: "public",
+                use_filename: true,
+                unique_filename: true
+              },
+              (error, result) => {
+                if (error) reject(error);
+                else resolve(result);
+              }
+            );
+            uploadStream.end(file.buffer);
+          }) as any;
 
           console.log(`[Upload] Cloudinary SUCCESS for ${file.originalname}`);
 
@@ -198,8 +209,14 @@ async function startServer() {
   // Serve Frontend
   if (process.env.NODE_ENV === "production" || process.env.VERCEL) {
     app.use(express.static(distPath));
+    
+    // Explicitly handle non-existent API routes to return 404 JSON instead of HTML
+    app.all('/api/*', (req, res) => {
+      console.log(`[API] 404 Not Found: ${req.method} ${req.url}`);
+      res.status(404).json({ error: `API route not found: ${req.method} ${req.url}` });
+    });
+
     app.get('*', (req, res) => {
-      if (req.url.startsWith('/api/')) return res.status(404).end();
       res.sendFile(path.join(distPath, 'index.html'));
     });
   } else {

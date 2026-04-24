@@ -84,6 +84,10 @@ export interface UploadResponse {
   id?: string;
   imageUrl: string;
   public_id: string;
+  db_id?: string;
+  urls?: string[];
+  db_ids?: string[];
+  thumbnailUrl?: string;
 }
 
 export async function uploadImage(file: File, options?: { userId?: string, userName?: string, userEmail?: string, folder?: string }): Promise<UploadResponse> {
@@ -107,14 +111,18 @@ export async function uploadImage(file: File, options?: { userId?: string, userN
   });
 
   const apiEndpoint = getApiUrl(`/api/upload`);
-  // Construct absolute URL for mobile browser stability
-  const fullEndpoint = apiEndpoint.startsWith('http') ? apiEndpoint : `${window.location.origin}${apiEndpoint}`;
+  // Only prepend origin if it's a relative path starting with /
+  const fullEndpoint = (apiEndpoint.startsWith('/') && !apiEndpoint.startsWith('//')) 
+    ? `${window.location.origin}${apiEndpoint}` 
+    : apiEndpoint;
 
   try {
     console.log(`[ImageService] Uploading file to: ${fullEndpoint}...`);
     const response = await fetch(fullEndpoint, {
       method: 'POST',
       body: formData,
+      // Ensure we don't send credentials if cross-origin unless specifically needed
+      credentials: apiEndpoint.startsWith('http') && !apiEndpoint.includes(window.location.hostname) ? 'omit' : 'include'
     });
 
     // Read the body once as text, then decide
