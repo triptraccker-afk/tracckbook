@@ -14,7 +14,7 @@
   "functions": {
     "server.ts": {
       "memory": 1024,
-      "maxDuration": 15
+      "maxDuration": 60
     }
   },
   "rewrites": [

@@ -17,12 +17,12 @@ const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.
 const supabaseAdmin = (supabaseUrl && supabaseServiceKey) ? createClient(supabaseUrl, supabaseServiceKey) : null;
 
 // Config Cloudinary
-// Priority: Use the exact keys provided by the user to ensure stability
-const cloudName = 'dd2kcpetc'; 
-const apiKey = '758297935941252'; 
-const apiSecret = 'o-8jD_-3MuU2Ltq3JmQMRt56hd0'; 
+// Priority: Use Environment Variables, fallback to user-provided keys if missing
+const cloudName = process.env.CLOUDINARY_CLOUD_NAME || 'dd2kcpetc'; 
+const apiKey = process.env.CLOUDINARY_API_KEY || '758297935941252'; 
+const apiSecret = process.env.CLOUDINARY_API_SECRET || 'o-8jD_-3MuU2Ltq3JmQMRt56hd0'; 
 
-console.log('[Cloudinary] Config Applied with User Keys:', { cloudName, hasApiKey: !!apiKey, hasApiSecret: !!apiSecret });
+console.log('[Cloudinary] Config Initialized:', { cloudName, hasApiKey: !!apiKey, hasApiSecret: !!apiSecret });
 
 cloudinary.config({
   cloud_name: cloudName,
@@ -116,115 +116,38 @@ async function startServer() {
     }
   });
 
-  // Upload image (accepts singular 'image' or plural 'images')
-  app.post("/api/upload", handleUpload, async (req: any, res: any) => {
+  // Register image metadata in DB (Client uploads directly to Cloudinary, then calls this)
+  app.post("/api/images/register", async (req, res) => {
     try {
-      const files = req.files as Express.Multer.File[];
-      if (!files || files.length === 0) {
-        console.error("[Upload] No files in request. Body keys:", Object.keys(req.body || {}));
-        return res.status(400).json({ error: "No files provided" });
+      const { imageUrl, publicId, userId, userName, userEmail } = req.body;
+      if (!imageUrl || !publicId) {
+        return res.status(400).json({ error: "Missing required image metadata" });
       }
 
-      // DEBUG: Log exactly what is in req.body
-      console.log(`[Upload] Body received:`, JSON.stringify(req.body));
-      console.log(`[Upload] Processing ${files.length} files...`);
+      if (!supabaseAdmin) {
+        return res.json({ success: true, db_synced: false, message: "Supabase not configured" });
+      }
 
-      const uploadResults = await Promise.all(files.map(async (file) => {
-        // Ensure Cloudinary is configured
-        if (!cloudName) {
-          console.error("[Upload] Cloudinary Cloud Name is MISSING");
-          throw new Error("Cloudinary configuration missing on server");
-        }
+      const isValidUUID = userId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId);
+      const insertPayload: any = {
+        image_url: imageUrl,
+        public_id: publicId,
+        user_id: isValidUUID ? userId : null,
+        user_name: userName || userEmail || 'User'
+      };
 
-        // Get user info from body with fallback
-        const userId = req.body.userId || 'unknown_user';
-        const userEmail = req.body.userEmail || '';
-        const displayName = (req.body.userName || userEmail || 'user').split('@')[0];
-        const sanitizedDisplayName = displayName.replace(/[^a-z0-9]/gi, '_').toLowerCase();
-        
-        const userFolderPath = `trackbook/users/${sanitizedDisplayName}_${userId.slice(0, 8)}/receipts`;
+      const { data, error } = await supabaseAdmin.from('images').insert([insertPayload]).select();
+      
+      if (error) {
+        console.error("[Supabase] Insert error:", error.message);
+        // Retry with safe payload
+        const { data: fallbackData } = await supabaseAdmin.from('images').insert([{ image_url: imageUrl }]).select();
+        return res.json({ success: true, db_id: fallbackData?.[0]?.id });
+      }
 
-        console.log(`[Upload] Attempting Stream upload for ${file.originalname} to: ${userFolderPath}`);
-
-        try {
-          // Use upload_stream to avoid memory-heavy base64 string conversion
-          const result = await new Promise((resolve, reject) => {
-            const uploadStream = cloudinary.uploader.upload_stream(
-              {
-                folder: userFolderPath,
-                resource_type: "auto",
-                access_mode: "public",
-                use_filename: true,
-                unique_filename: true
-              },
-              (error, result) => {
-                if (error) reject(error);
-                else resolve(result);
-              }
-            );
-            uploadStream.end(file.buffer);
-          }) as any;
-
-          console.log(`[Upload] Cloudinary SUCCESS for ${file.originalname}`);
-
-          // Save to Supabase
-          if (supabaseAdmin) {
-            const userId = req.body.userId;
-            const isValidUUID = userId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId);
-
-            const insertPayload: any = {
-              image_url: result.secure_url,
-              public_id: result.public_id,
-              user_id: isValidUUID ? userId : null,
-              user_name: req.body.userName || req.body.userEmail || 'User'
-            };
-
-            let { data, error } = await supabaseAdmin.from('images').insert([insertPayload]).select();
-            
-            if (error) {
-              console.error("[Supabase] Insert error:", error.message);
-              
-              // If user_name or public_id is missing, try without them
-              if (error.message?.includes('user_name') || error.message?.includes('public_id') || error.code === '42703') {
-                console.warn("[Supabase] Retrying image insert with safe payload...");
-                const safePayload: any = { image_url: result.secure_url };
-                if (!error.message?.includes('public_id')) safePayload.public_id = result.public_id;
-                if (isValidUUID) safePayload.user_id = userId;
-
-                const fallbackResult = await supabaseAdmin.from('images').insert([safePayload]).select();
-                
-                data = fallbackResult.data;
-                error = fallbackResult.error;
-              }
-            }
-
-            if (data && data[0]) {
-              console.log("[Supabase] Image created with UUID:", data[0].id);
-              return {
-                ...result,
-                db_id: data[0].id
-              };
-            } else if (error) {
-              console.error("[Supabase] Final Supabase failure:", error.message);
-            }
-          }
-          return result;
-        } catch (cloudinaryErr: any) {
-          console.error(`[Upload] Cloudinary ERROR for ${file.originalname}:`, cloudinaryErr);
-          throw new Error(`Cloudinary Error: ${cloudinaryErr.message || 'Unknown upload error'}`);
-        }
-      }));
-
-      // Return ONLY the DB UUIDs when available, fallback safely
-      res.json({
-        imageUrl: uploadResults[0].secure_url,
-        db_id: uploadResults[0].db_id, // REAL UUID
-        urls: uploadResults.map(r => r.secure_url),
-        db_ids: uploadResults.map(r => r.db_id).filter(Boolean), // List of UUIDs
-        imageIds: uploadResults.map(r => r.db_id || r.public_id) // For legacy UI support
-      });
+      res.json({ success: true, db_id: data?.[0]?.id });
     } catch (err: any) {
-      console.error("Upload handler error:", err.message);
+      console.error("Register image error:", err.message);
       res.status(500).json({ error: err.message });
     }
   });

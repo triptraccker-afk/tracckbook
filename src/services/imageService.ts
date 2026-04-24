@@ -12,12 +12,16 @@ export interface ImageRecord {
   created_at?: string;
 }
 
+// Cloudinary Config (Direct Upload)
+const CLOUDINARY_CLOUD_NAME = 'dd2kcpetc';
+const CLOUDINARY_UPLOAD_PRESET = 'trackbook_preset'; // You MUST create this as an "Unsigned" preset in Cloudinary Settings
+
 // Compression options for mobile stability
 const compressionOptions = {
-  maxSizeMB: 0.8, // Aim for under 1MB for serverless safety
-  maxWidthOrHeight: 1920,
+  maxSizeMB: 0.6, // Target ~600KB for better performance on mobile
+  maxWidthOrHeight: 1600, // Sufficient for receipt readability
   useWebWorker: true,
-  initialQuality: 0.8
+  initialQuality: 0.7
 };
 
 async function compressFile(file: File): Promise<File> {
@@ -25,7 +29,7 @@ async function compressFile(file: File): Promise<File> {
   if (!file.type.startsWith('image/')) return file;
   
   // Skip if already small
-  if (file.size < 1.1 * 1024 * 1024) return file;
+  if (file.size < 0.8 * 1024 * 1024) return file;
   
   try {
     console.log(`[ImageService] Compressing ${file.name} (${(file.size / 1024 / 1024).toFixed(2)}MB)...`);
@@ -42,8 +46,39 @@ async function compressFile(file: File): Promise<File> {
   }
 }
 
+/**
+ * Register the uploaded image URL in our own database
+ */
+async function registerImageWithServer(imageUrl: string, publicId: string, options?: { userId?: string, userName?: string, userEmail?: string, folder?: string }): Promise<any> {
+  const apiEndpoint = getApiUrl(`/api/images/register`);
+  try {
+    const response = await fetch(apiEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        imageUrl,
+        publicId,
+        userId: options?.userId,
+        userName: options?.userName,
+        userEmail: options?.userEmail,
+        folder: options?.folder
+      }),
+      credentials: 'include'
+    });
+    
+    if (!response.ok) {
+      console.warn('[ImageService] Failed to register image in DB, but it exists on Cloudinary');
+      return null;
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('[ImageService] Error registering image on server:', error);
+    return null;
+  }
+}
+
 export async function fetchImages(): Promise<ImageRecord[]> {
-  const maxRetries = 5;
+  const maxRetries = 3;
   let attempt = 0;
 
   while (attempt < maxRetries) {
@@ -51,45 +86,16 @@ export async function fetchImages(): Promise<ImageRecord[]> {
       const cacheBuster = `t=${Date.now()}`;
       const url = getApiUrl(`/api/images?${cacheBuster}`);
       const fullUrl = url.startsWith('http') ? url : `${window.location.origin}${url}`;
-      console.log(`[ImageService] Fetching images from: ${fullUrl}`);
       
-      const response = await fetch(fullUrl, {
-        method: 'GET'
-      });
+      const response = await fetch(fullUrl, { method: 'GET' });
       
-      if (!response.ok) {
-        let errorBody = '';
-        try {
-          const contentType = response.headers.get("content-type");
-          if (contentType && contentType.includes("application/json")) {
-            const errorData = await response.json();
-            errorBody = errorData.error || errorData.message || JSON.stringify(errorData);
-          } else {
-            errorBody = await response.text();
-          }
-        } catch (e) {
-          errorBody = response.statusText;
-        }
-        
-        console.error(`[ImageService] Request failed with status ${response.status}:`, errorBody.substring(0, 200));
-        throw new Error(`Server returned ${response.status}: ${errorBody.substring(0, 100)}`);
-      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       
-      const data = await response.json();
-      console.log(`[ImageService] Successfully retrieved ${data?.length || 0} images.`);
-      return data;
+      return await response.json();
     } catch (error: any) {
       attempt++;
-      const isNetworkError = error instanceof TypeError && (error.message.includes('fetch') || error.message.includes('NetworkError'));
-      console.error(`[ImageService] Sync attempt ${attempt} encountered ${isNetworkError ? 'Network Connectivity Issue' : 'Error'}:`, error.message);
-      
-      if (attempt >= maxRetries) {
-        throw new Error(`Critical: Failed to sync images after ${maxRetries} attempts. Network status: ${error.message}`);
-      }
-      
-      const delay = Math.min(Math.pow(2, attempt - 1) * 1000, 10000);
-      console.log(`[ImageService] Scheduled retry in ${delay}ms...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
+      if (attempt >= maxRetries) throw error;
+      await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
     }
   }
   return [];
@@ -98,15 +104,13 @@ export async function fetchImages(): Promise<ImageRecord[]> {
 export async function deleteImage(publicId: string): Promise<void> {
   const url = getApiUrl(`/api/images/${encodeURIComponent(publicId)}`);
   try {
-    const response = await fetch(url, {
-      method: 'DELETE'
-    });
+    const response = await fetch(url, { method: 'DELETE' });
     if (!response.ok) {
       const data = await response.json();
       throw new Error(data.error || 'Delete failed');
     }
   } catch (error) {
-    console.error('[ImageService] Delete image error:', error);
+    console.error('[ImageService] Delete error:', error);
     throw error;
   }
 }
@@ -121,116 +125,82 @@ export interface UploadResponse {
   thumbnailUrl?: string;
 }
 
+/**
+ * DIRECT UPLOAD TO CLOUDINARY
+ */
 export async function uploadImage(file: File, options?: { userId?: string, userName?: string, userEmail?: string, folder?: string }): Promise<UploadResponse> {
-  // Compress before uploading
+  // 1. Compress Client-Side
   const compressedFile = await compressFile(file);
   
+  // 2. Prepare Direct Cloudinary Upload
   const formData = new FormData();
+  formData.append('file', compressedFile);
+  formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
   
-  // Important: Append other fields BEFORE the file for some multer configurations to parse req.body correctly
-  if (options?.userId) formData.append('userId', options.userId);
-  if (options?.userName) formData.append('userName', options.userName);
-  if (options?.userEmail) formData.append('userEmail', options.userEmail);
-  if (options?.folder) formData.append('folder', options.folder);
-  
-  // Append the compressed file
-  formData.append('image', compressedFile);
+  // Optional: User-specific folder structure if preset allows
+  if (options?.userId) {
+    const sanitizedName = (options.userName || 'user').replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+    formData.append('folder', `trackbook/users/${sanitizedName}_${options.userId.slice(0, 8)}/receipts`);
+  }
 
-  console.log('[ImageService] FormData prepared:', {
-    userId: options?.userId,
-    userName: options?.userName,
-    userEmail: options?.userEmail,
-    folder: options?.folder,
-    fileName: compressedFile.name,
-    size: (compressedFile.size / 1024).toFixed(1) + ' KB'
-  });
-
-  const apiEndpoint = getApiUrl(`/api/upload`);
-  // Only prepend origin if it's a relative path starting with /
-  const fullEndpoint = (apiEndpoint.startsWith('/') && !apiEndpoint.startsWith('//')) 
-    ? `${window.location.origin}${apiEndpoint}` 
-    : apiEndpoint;
+  const cloudinaryUrl = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`;
 
   try {
-    console.log(`[ImageService] Uploading file to: ${fullEndpoint}...`);
-    const response = await fetch(fullEndpoint, {
+    console.log(`[ImageService] Direct uploading to Cloudinary...`);
+    const response = await fetch(cloudinaryUrl, {
       method: 'POST',
-      body: formData,
-      // Ensure we don't send credentials if cross-origin unless specifically needed
-      credentials: apiEndpoint.startsWith('http') && !apiEndpoint.includes(window.location.hostname) ? 'omit' : 'include'
+      body: formData
     });
 
-    // Read the body once as text, then decide
-    const responseText = await response.text();
-    let data: any;
-    
-    try {
-      data = JSON.parse(responseText);
-    } catch (e) {
-      data = null;
-    }
-
     if (!response.ok) {
-      const errorMessage = data?.error || data?.message || responseText || response.statusText || 'Upload failed';
-      console.error('[ImageService] Upload failed:', errorMessage);
-      throw new Error(errorMessage);
+      const errorData = await response.json();
+      console.error('[ImageService] Cloudinary direct upload failed:', errorData);
+      throw new Error(`Direct upload failed: ${errorData.error?.message || 'Unknown Cloudinary error'}`);
     }
 
-    if (!data) {
-      console.error('[ImageService] Error: Received non-JSON response from server:', responseText.substring(0, 500));
-      throw new Error('Server returned invalid format. Expected JSON, got text/html or plain text.');
-    }
+    const data = await response.json();
+    console.log('[ImageService] Cloudinary SUCCESS:', data.secure_url);
 
-    console.log('[ImageService] Upload successful:', data.imageUrl || (data.urls ? data.urls.length + ' files' : 'unknown'));
-    return data;
+    // 3. Register with our server for DB persistence (metadata only - no large file)
+    const dbRecord = await registerImageWithServer(data.secure_url, data.public_id, options);
+
+    return {
+      imageUrl: data.secure_url,
+      public_id: data.public_id,
+      db_id: dbRecord?.db_id || dbRecord?.id
+    };
   } catch (error: any) {
-    console.error('[ImageService] Fetch error:', error);
+    console.error('[ImageService] Direct upload error:', error);
     throw error;
   }
 }
 
 /**
- * Upload multiple files with sequential compression
+ * Sequential batch upload
  */
 export async function uploadMultipleImages(files: File[], options?: { userId?: string, userName?: string, userEmail?: string, folder?: string }): Promise<UploadResponse> {
-  const formData = new FormData();
-  
-  if (options?.userId) formData.append('userId', options.userId);
-  if (options?.userName) formData.append('userName', options.userName);
-  if (options?.userEmail) formData.append('userEmail', options.userEmail);
-  if (options?.folder) formData.append('folder', options.folder);
+  const urls: string[] = [];
+  const db_ids: string[] = [];
+  const public_ids: string[] = [];
 
-  // Compress sequentially to avoid high memory spikes in browser
   for (const file of files) {
-    const compressed = await compressFile(file);
-    formData.append('images', compressed);
-    // Explicitly plural 'images' to match multer expectations for plural uploads
-  }
-
-  const apiEndpoint = getApiUrl(`/api/upload`);
-  const fullEndpoint = (apiEndpoint.startsWith('/') && !apiEndpoint.startsWith('//')) 
-    ? `${window.location.origin}${apiEndpoint}` 
-    : apiEndpoint;
-
-  try {
-    const response = await fetch(fullEndpoint, {
-      method: 'POST',
-      body: formData,
-      credentials: 'include'
-    });
-
-    const responseText = await response.text();
-    let data;
     try {
-      data = JSON.parse(responseText);
+      const result = await uploadImage(file, options);
+      urls.push(result.imageUrl);
+      public_ids.push(result.public_id);
+      if (result.db_id) db_ids.push(result.db_id);
     } catch (e) {
-      throw new Error(`Invalid server response format: ${responseText.substring(0, 100)}`);
+      console.error(`[ImageService] Batch item failed:`, e);
+      // Continue with others
     }
-
-    if (!response.ok) throw new Error(data.error || 'Batch upload failed');
-    return data;
-  } catch (error: any) {
-    console.error('[ImageService] Batch upload error:', error);
-    throw error;
   }
+
+  if (urls.length === 0) throw new Error('All uploads in batch failed');
+
+  return {
+    imageUrl: urls[0],
+    public_id: public_ids[0],
+    urls,
+    db_ids
+  };
 }
