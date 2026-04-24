@@ -11,6 +11,12 @@
       "config": { "distDir": "dist" }
     }
   ],
+  "functions": {
+    "server.ts": {
+      "memory": 1024,
+      "maxDuration": 15
+    }
+  },
   "rewrites": [
     {
       "source": "/api/(.*)",

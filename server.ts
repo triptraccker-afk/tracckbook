@@ -30,7 +30,33 @@ cloudinary.config({
   api_secret: apiSecret,
 });
 
-const upload = multer({ storage: multer.memoryStorage() });
+// Multer setup with memory storage and size limits
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit per file
+    files: 5 // Max 5 files per request
+  }
+});
+
+/**
+ * Helper to handle Multer errors gracefully
+ */
+const handleUpload = (req: any, res: any, next: any) => {
+  const uploadHandler = upload.any();
+  uploadHandler(req, res, (err: any) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: "File too large. Max 10MB allowed." });
+      }
+      return res.status(400).json({ error: `Upload error: ${err.message}` });
+    } else if (err) {
+      console.error("[Multer] Error:", err);
+      return res.status(500).json({ error: "Server failed to process upload data." });
+    }
+    next();
+  });
+};
 
 async function startServer() {
   const app = express();
@@ -91,10 +117,7 @@ async function startServer() {
   });
 
   // Upload image (accepts singular 'image' or plural 'images')
-  app.post("/api/upload", (req, res, next) => {
-    console.log(`[Upload] Incoming request: ${req.method} ${req.url} - Content-Type: ${req.headers['content-type']}`);
-    next();
-  }, upload.any(), async (req: any, res: any) => {
+  app.post("/api/upload", handleUpload, async (req: any, res: any) => {
     try {
       const files = req.files as Express.Multer.File[];
       if (!files || files.length === 0) {

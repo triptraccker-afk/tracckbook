@@ -1,3 +1,4 @@
+import imageCompression from 'browser-image-compression';
 import { getApiUrl } from '../lib/api';
 
 /**
@@ -9,6 +10,36 @@ export interface ImageRecord {
   image_url: string;
   public_id: string;
   created_at?: string;
+}
+
+// Compression options for mobile stability
+const compressionOptions = {
+  maxSizeMB: 0.8, // Aim for under 1MB for serverless safety
+  maxWidthOrHeight: 1920,
+  useWebWorker: true,
+  initialQuality: 0.8
+};
+
+async function compressFile(file: File): Promise<File> {
+  // Only compress images
+  if (!file.type.startsWith('image/')) return file;
+  
+  // Skip if already small
+  if (file.size < 1.1 * 1024 * 1024) return file;
+  
+  try {
+    console.log(`[ImageService] Compressing ${file.name} (${(file.size / 1024 / 1024).toFixed(2)}MB)...`);
+    const compressedBlob = await imageCompression(file, compressionOptions);
+    const compressedFile = new File([compressedBlob], file.name, {
+      type: file.type,
+      lastModified: Date.now(),
+    });
+    console.log(`[ImageService] Compressed to ${(compressedFile.size / 1024 / 1024).toFixed(2)}MB`);
+    return compressedFile;
+  } catch (error) {
+    console.error('[ImageService] Compression failed, using original:', error);
+    return file;
+  }
 }
 
 export async function fetchImages(): Promise<ImageRecord[]> {
@@ -91,6 +122,9 @@ export interface UploadResponse {
 }
 
 export async function uploadImage(file: File, options?: { userId?: string, userName?: string, userEmail?: string, folder?: string }): Promise<UploadResponse> {
+  // Compress before uploading
+  const compressedFile = await compressFile(file);
+  
   const formData = new FormData();
   
   // Important: Append other fields BEFORE the file for some multer configurations to parse req.body correctly
@@ -99,15 +133,16 @@ export async function uploadImage(file: File, options?: { userId?: string, userN
   if (options?.userEmail) formData.append('userEmail', options.userEmail);
   if (options?.folder) formData.append('folder', options.folder);
   
-  // Append the file LAST
-  formData.append('image', file);
+  // Append the compressed file
+  formData.append('image', compressedFile);
 
   console.log('[ImageService] FormData prepared:', {
     userId: options?.userId,
     userName: options?.userName,
     userEmail: options?.userEmail,
     folder: options?.folder,
-    fileName: file.name
+    fileName: compressedFile.name,
+    size: (compressedFile.size / 1024).toFixed(1) + ' KB'
   });
 
   const apiEndpoint = getApiUrl(`/api/upload`);
@@ -146,10 +181,56 @@ export async function uploadImage(file: File, options?: { userId?: string, userN
       throw new Error('Server returned invalid format. Expected JSON, got text/html or plain text.');
     }
 
-    console.log('[ImageService] Upload successful:', data.imageUrl);
+    console.log('[ImageService] Upload successful:', data.imageUrl || (data.urls ? data.urls.length + ' files' : 'unknown'));
     return data;
   } catch (error: any) {
     console.error('[ImageService] Fetch error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Upload multiple files with sequential compression
+ */
+export async function uploadMultipleImages(files: File[], options?: { userId?: string, userName?: string, userEmail?: string, folder?: string }): Promise<UploadResponse> {
+  const formData = new FormData();
+  
+  if (options?.userId) formData.append('userId', options.userId);
+  if (options?.userName) formData.append('userName', options.userName);
+  if (options?.userEmail) formData.append('userEmail', options.userEmail);
+  if (options?.folder) formData.append('folder', options.folder);
+
+  // Compress sequentially to avoid high memory spikes in browser
+  for (const file of files) {
+    const compressed = await compressFile(file);
+    formData.append('images', compressed);
+    // Explicitly plural 'images' to match multer expectations for plural uploads
+  }
+
+  const apiEndpoint = getApiUrl(`/api/upload`);
+  const fullEndpoint = (apiEndpoint.startsWith('/') && !apiEndpoint.startsWith('//')) 
+    ? `${window.location.origin}${apiEndpoint}` 
+    : apiEndpoint;
+
+  try {
+    const response = await fetch(fullEndpoint, {
+      method: 'POST',
+      body: formData,
+      credentials: 'include'
+    });
+
+    const responseText = await response.text();
+    let data;
+    try {
+      data = JSON.parse(responseText);
+    } catch (e) {
+      throw new Error(`Invalid server response format: ${responseText.substring(0, 100)}`);
+    }
+
+    if (!response.ok) throw new Error(data.error || 'Batch upload failed');
+    return data;
+  } catch (error: any) {
+    console.error('[ImageService] Batch upload error:', error);
     throw error;
   }
 }
