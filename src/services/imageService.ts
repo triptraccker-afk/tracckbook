@@ -114,23 +114,28 @@ export async function uploadImage(file: File, options?: { userId?: string, userN
     console.log(`[ImageService] Uploading file to: ${fullEndpoint}...`);
     const response = await fetch(fullEndpoint, {
       method: 'POST',
-      // DO NOT set Content-Type header manually for FormData, it breaks boundaries
       body: formData,
     });
 
-    const contentType = response.headers.get("content-type");
+    // Read the body once as text, then decide
+    const responseText = await response.text();
+    let data: any;
     
-    if (contentType && contentType.includes("text/html")) {
-      const htmlText = await response.text();
-      console.error('[ImageService] Error: Received HTML instead of JSON. Full response:', htmlText.substring(0, 500));
-      throw new Error('Server returned HTML. This usually means the API route was not found or the backend server is not running.');
+    try {
+      data = JSON.parse(responseText);
+    } catch (e) {
+      data = null;
     }
 
-    const data = await response.json();
-
     if (!response.ok) {
-      console.error('[ImageService] Upload failed with status:', response.status, data);
-      throw new Error(data.error || 'Upload failed');
+      const errorMessage = data?.error || data?.message || responseText || response.statusText || 'Upload failed';
+      console.error('[ImageService] Upload failed:', errorMessage);
+      throw new Error(errorMessage);
+    }
+
+    if (!data) {
+      console.error('[ImageService] Error: Received non-JSON response from server:', responseText.substring(0, 500));
+      throw new Error('Server returned invalid format. Expected JSON, got text/html or plain text.');
     }
 
     console.log('[ImageService] Upload successful:', data.imageUrl);
