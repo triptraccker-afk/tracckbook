@@ -404,9 +404,20 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
   const safeUUID = () => {
     try {
-      return crypto.randomUUID();
+      if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+        return crypto.randomUUID();
+      }
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        const r = Math.random() * 16 | 0;
+        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+      });
     } catch (e) {
-      return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        const r = Math.random() * 16 | 0;
+        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+      });
     }
   };
 
@@ -468,10 +479,10 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       }
 
       try {
-        console.log("[Fetch] Loading cashbooks, entries and attachments...");
+        console.log("[Fetch] Loading cashbooks, entries and attachments (V6.2)...");
         const { data: cashbooks, error: cbError } = await supabase
           .from('cashbooks')
-          .select('*, entries(*, attachments(*, images(*)), ai_attachments(*))')
+          .select('*, entries(*, attachments(*), ai_attachments(*))')
           .eq('user_id', session.user.id);
 
         if (cbError) throw cbError;
@@ -486,11 +497,11 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               // 1. Direct file_url from attachment
               // 2. image_url from joined images table
               const manualImgs = (t.attachments || []).map((a: any) => 
-                a.file_url || a.images?.image_url
+                a.file_url
               ).filter(Boolean);
               
               const manualThumbs = (t.attachments || []).map((a: any) => 
-                a.thumbnail_url || a.thumbnailUrl || a.file_url || a.images?.thumbnail_url || a.images?.image_url
+                a.thumbnail_url || a.thumbnailUrl || a.file_url
               ).filter(Boolean);
               
               const manualIds = (t.attachments || []).map((a: any) => a.image_id).filter(Boolean);
@@ -895,10 +906,10 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             }
 
             if (selectedImages.length > 0) {
-              console.log(`[Sync] ATTACHMENT EDIT START for entry ${editingTransaction.id}. Count: ${selectedImages.length}`);
+              console.log(`[Sync V6.2] ATTACHMENT EDIT START for entry ${editingTransaction.id}. Count: ${selectedImages.length}`);
               const { error: delError } = await supabase.from('attachments').delete().eq('entry_id', editingTransaction.id);
-              if (delError) console.error("[Sync] Error clearing old attachments:", delError);
-              else console.log("[Sync] Old attachments cleared successfully.");
+              if (delError) console.error("[Sync V6.2] Error clearing old attachments:", delError);
+              else console.log("[Sync V6.2] Old attachments cleared successfully.");
  
               const attachmentInserts = selectedImages.map((url, idx) => ({
                 entry_id: editingTransaction.id,
@@ -908,12 +919,23 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               }));
               
               if (attachmentInserts.length > 0) {
-                console.log(`[Sync] Attempting to insert ${attachmentInserts.length} updated attachments...`);
-                const { error: insError } = await supabase.from('attachments').insert(attachmentInserts);
-                if (insError) {
-                  console.error("[Supabase] Attachment (edit) final error:", insError);
-                } else {
-                  console.log("[Sync] Attachments updated successfully!");
+                console.log(`[Sync V6.2] Attempting to insert ${attachmentInserts.length} updated attachments...`);
+                // Use a single batch insert, but wrap in try-catch for more info
+                try {
+                  const { error: insError } = await supabase.from('attachments').insert(attachmentInserts);
+                  if (insError) {
+                    console.error("[Supabase V6.2] Attachment (edit) final error:", insError);
+                    // Single fallback attempt if batch failed (might be a specific row issue)
+                    if (attachmentInserts.length > 1) {
+                        for (const item of attachmentInserts) {
+                            await supabase.from('attachments').insert([item]);
+                        }
+                    }
+                  } else {
+                    console.log("[Sync V6.2] Attachments updated successfully!");
+                  }
+                } catch (e) {
+                  console.error("[Sync V6.2] Fatal insert error:", e);
                 }
               }
             }
@@ -990,7 +1012,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             }
 
             if (selectedImages.length > 0) {
-              console.log(`[Sync] Creating attachments for new entry ${newTransaction.id}. Count: ${selectedImages.length}`);
+              console.log(`[Sync V6.2] Creating attachments for new entry ${newTransaction.id}. Count: ${selectedImages.length}`);
               const attachmentInserts = selectedImages.map((url, idx) => ({
                 entry_id: newTransaction.id,
                 user_id: session.user.id,
@@ -999,12 +1021,22 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               }));
 
               if (attachmentInserts.length > 0) {
-                console.log(`[Sync] Attempting to insert ${attachmentInserts.length} new attachments...`);
-                const { error: insError } = await supabase.from('attachments').insert(attachmentInserts);
-                if (insError) {
-                  console.error("[Supabase] Attachment insert error:", insError);
-                } else {
-                  console.log("[Sync] Attachments created successfully!");
+                console.log(`[Sync V6.2] Attempting to insert ${attachmentInserts.length} new attachments...`);
+                try {
+                  const { error: insError } = await supabase.from('attachments').insert(attachmentInserts);
+                  if (insError) {
+                    console.error("[Supabase V6.2] Attachment insert error:", insError);
+                    // Fallback to individual inserts
+                    if (attachmentInserts.length > 1) {
+                         for (const item of attachmentInserts) {
+                            await supabase.from('attachments').insert([item]);
+                        }
+                    }
+                  } else {
+                    console.log("[Sync V6.2] Attachments created successfully!");
+                  }
+                } catch (e) {
+                   console.error("[Sync V6.2] Fatal insert error:", e);
                 }
               }
             }
@@ -1155,41 +1187,44 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     if (filesArray.length === 0) return;
 
     setIsManualImageUploading(true);
-    setSubmittingMessage('Uploading images...');
+    setSubmittingMessage('Optimizing & Uploading...');
     
     try {
-      for (const file of filesArray) {
-        setSubmittingMessage(`Uploading: ${file.name}`);
-        const result = await uploadImage(file, { 
-          userId: session.user.id, 
-          userName: userName || session.user.email || 'User',
-          userEmail: session.user.email
-        });
+      console.log(`[Upload] Starting parallel upload for ${filesArray.length} files`);
+      const uploadOptions = { 
+        userId: session.user.id, 
+        userName: userName || session.user.email || 'User',
+        userEmail: session.user.email
+      };
+      
+      const uploadPromises = filesArray.map(file => 
+        uploadImage(file, uploadOptions).catch(err => {
+          console.error(`[Upload] Failed for ${file.name}:`, err);
+          return null;
+        })
+      );
+      
+      const results = await Promise.all(uploadPromises);
+      const validResults = results.filter((r): r is any => r !== null);
+      
+      if (validResults.length > 0) {
+        const newUrls = validResults.map(r => r.imageUrl);
+        const newThumbs = validResults.map(r => r.thumbnailUrl || r.imageUrl);
+        const newIds = validResults.map(r => r.db_id).filter(id => id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
         
-        if (result.imageUrl || (result.urls && result.urls.length > 0)) {
-          const url = result.imageUrl || result.urls[0];
-          const dbId = result.db_id;
-          
-          console.log(`[Upload] Image Success: ${url}, DB ID: ${dbId}`);
-          
-          setSelectedImages(prev => [...prev, url]);
-          setSelectedThumbnailUrls(prev => [...prev, result.thumbnailUrl || url]);
-          
-          // CRITICAL: We need the ID to link in the attachments table
-          if (dbId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(dbId)) {
-            setSelectedImageIds(prev => [...prev, dbId]);
-          } else {
-            console.warn("[Upload] No valid Supabase UUID received for image_id, will use file_url only.");
-            // Push a placeholder or null to keep arrays in sync? No, better to keep them in sync.
-            // Actually, if we use file_url as fallback, we still want to keep the same number of elements if possible.
-            // But let's assume images table always returns a DB ID now.
-            setSelectedImageIds(prev => [...prev, dbId || '']); 
-          }
-        }
+        setSelectedImages(prev => [...prev, ...newUrls]);
+        setSelectedThumbnailUrls(prev => [...prev, ...newThumbs]);
+        setSelectedImageIds(prev => [...prev, ...newIds]);
+        
+        console.log(`[Upload] Successfully uploaded ${validResults.length} images in parallel.`);
+      }
+
+      if (validResults.length < filesArray.length) {
+        setError(`${filesArray.length - validResults.length} images failed to upload.`);
       }
     } catch (err: any) {
       console.error('Manual upload error:', err);
-      setError('Failed to upload image: ' + (err.message || 'Unknown error'));
+      setError('Failed to upload images: ' + (err.message || 'Unknown error'));
     } finally {
       setIsManualImageUploading(false);
       setSubmittingMessage('');
@@ -1543,7 +1578,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 if (attachmentInserts.length > 0) {
                   const { error: attachError } = await supabase.from('attachments').insert(attachmentInserts);
                   if (attachError) {
-                    console.error("[Supabase] AI sync attachment error:", attachError);
+                    console.error("[Supabase V6.2] AI sync attachment error:", attachError);
                   }
                 }
               }
@@ -1643,7 +1678,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     if (aiAttachmentInserts.length > 0) {
                       const { error: aiAttachError } = await supabase.from('attachments').insert(aiAttachmentInserts);
                       if (aiAttachError) {
-                        console.error("[Supabase] AI bulk attachment error:", aiAttachError);
+                        console.error("[Supabase V6.2] AI bulk attachment error:", aiAttachError);
                       }
                     }
                   }
@@ -1786,7 +1821,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                           "font-bold truncate transition-colors duration-300",
                           theme === 'dark' ? "text-slate-100" : "text-black"
                         )}>{userName}</p>
-                        <p className="text-[8px] text-slate-400 mt-1">App Version: 6.0.0</p>
+                        <p className="text-[8px] text-slate-400 mt-1">App Version: 6.2.0</p>
                       </div>
 
                       <button 
@@ -3530,7 +3565,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       {isManualImageUploading && (
                         <div className="flex items-center gap-1.5 text-indigo-500">
                           <Loader2 size={12} className="animate-spin" />
-                          <span className="text-[9px] font-bold uppercase tracking-wider">Optimizing...</span>
+                          <span className="text-[9px] font-bold uppercase tracking-wider">Uploading...</span>
                         </div>
                       )}
                     </div>
@@ -3683,7 +3718,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       {(isSubmitting || isManualImageUploading) ? (
                         <>
                           <Loader2 className="animate-spin" size={16} />
-                          {isManualImageUploading ? 'OPTIMIZING...' : 'SAVING...'} </>                       ) : 'Save'}
+                          {isManualImageUploading ? 'UPLOADING...' : 'SAVING...'}
+                        </>
+                      ) : 'Save'}
                     </button>
                   </div>
                 </form>

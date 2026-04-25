@@ -90,13 +90,16 @@ async function startServer() {
 
   // Register image metadata in DB (Client uploads directly to Cloudinary, then calls this)
   app.post("/api/images/register", async (req, res) => {
+    console.log(`[API] Received image registration request for: ${req.body.publicId}`);
     try {
       const { imageUrl, publicId, userId, userName, userEmail } = req.body;
       if (!imageUrl || !publicId) {
+        console.warn("[API] Registration failed: Missing Required Metadata");
         return res.status(400).json({ error: "Missing required image metadata" });
       }
 
       if (!supabaseAdmin) {
+        console.warn("[API] Supabase Admin not configured, returning mock success");
         return res.json({ success: true, db_synced: false, message: "Supabase not configured" });
       }
 
@@ -108,15 +111,22 @@ async function startServer() {
         user_name: userName || userEmail || 'User'
       };
 
+      console.log(`[Supabase] Attempting insert for ${publicId}...`);
       const { data, error } = await supabaseAdmin.from('images').insert([insertPayload]).select();
       
       if (error) {
         console.error("[Supabase] Insert error:", error.message);
-        // Retry with safe payload
-        const { data: fallbackData } = await supabaseAdmin.from('images').insert([{ image_url: imageUrl }]).select();
+        // Retry with minimal safe payload
+        console.log("[Supabase] Retrying with minimal payload...");
+        const { data: fallbackData, error: fallbackError } = await supabaseAdmin.from('images').insert([{ image_url: imageUrl, public_id: publicId }]).select();
+        if (fallbackError) {
+           console.error("[Supabase] Fallback insert also failed:", fallbackError.message);
+           return res.json({ success: true, db_id: null, warning: "DB record not created" });
+        }
         return res.json({ success: true, db_id: fallbackData?.[0]?.id });
       }
 
+      console.log(`[API] Successfully registered image ${publicId} with DB ID ${data?.[0]?.id}`);
       res.json({ success: true, db_id: data?.[0]?.id });
     } catch (err: any) {
       console.error("Register image error:", err.message);
