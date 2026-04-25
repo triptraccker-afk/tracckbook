@@ -29,6 +29,7 @@ cloudinary.config({
 });
 
 async function startServer() {
+  console.log(`[Server] Starting initialization...`);
   const app = express();
   
   app.use(cors({ origin: true, credentials: true }));
@@ -41,6 +42,7 @@ async function startServer() {
   });
 
   // API Routes
+  console.log(`[Server] Setting up API routes...`);
   app.get("/api/health", (req, res) => {
     res.json({ 
       status: "ok", 
@@ -123,6 +125,7 @@ async function startServer() {
   });
 
   // Serve Frontend
+  console.log(`[Server] Serving frontend... Mode: ${process.env.NODE_ENV}`);
   if (process.env.NODE_ENV === "production" || process.env.VERCEL) {
     app.use(express.static(distPath));
     
@@ -136,7 +139,9 @@ async function startServer() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   } else {
+    console.log(`[Server] Initializing Vite middleware (dev mode)...`);
     const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
+    console.log(`[Server] Vite middleware ready.`);
     app.use(vite.middlewares);
   }
 

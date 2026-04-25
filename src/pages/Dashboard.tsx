@@ -468,6 +468,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       }
 
       try {
+        console.log("[Fetch] Loading cashbooks, entries and attachments...");
         const { data: cashbooks, error: cbError } = await supabase
           .from('cashbooks')
           .select('*, entries(*, attachments(*, images(*)), ai_attachments(*))')
@@ -477,22 +478,34 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         clearTimeout(fetchTimeout);
 
         if (cashbooks) {
+          console.log(`[Fetch] Found ${cashbooks.length} books.`);
           setBooks(cashbooks.map((cb: any) => ({
             ...cb,
             transactions: (cb.entries || []).map((t: any) => {
-              // Combine manual and AI attachments for the UI
-              const manualImgs = (t.attachments || []).map((a: any) => a.images?.image_url || a.file_url).filter(Boolean);
-              const manualThumbs = (t.attachments || []).map((a: any) => a.images?.thumbnail_url || a.images?.image_url || a.thumbnail_url || a.file_url).filter(Boolean);
-              const manualIds = (t.attachments || []).map((a: any) => a.image_id).filter(Boolean);
+              // Priority for images: 
+              // 1. Direct file_url from attachment
+              // 2. image_url from joined images table
+              const manualImgs = (t.attachments || []).map((a: any) => 
+                a.file_url || a.images?.image_url
+              ).filter(Boolean);
               
+              const manualThumbs = (t.attachments || []).map((a: any) => 
+                a.thumbnail_url || a.thumbnailUrl || a.file_url || a.images?.thumbnail_url || a.images?.image_url
+              ).filter(Boolean);
+              
+              const manualIds = (t.attachments || []).map((a: any) => a.image_id).filter(Boolean);
+
               const aiImgs = (t.ai_attachments || []).map((a: any) => a.file_url);
               const aiThumbs = (t.ai_attachments || []).map((a: any) => a.thumbnail_url || a.file_url);
-              
+
+              const allImages = Array.from(new Set([...manualImgs, ...aiImgs]));
+              const allThumbs = Array.from(new Set([...manualThumbs, ...aiThumbs]));
+
               return {
                 ...t,
                 date: t.date ? new Date(t.date) : new Date(),
-                images: [...manualImgs, ...aiImgs],
-                thumbnailUrls: [...manualThumbs, ...aiThumbs],
+                images: allImages,
+                thumbnailUrls: allThumbs,
                 imageIds: manualIds,
                 imageLayout: t.image_layout || 'split',
                 isAi: aiImgs.length > 0
@@ -881,41 +894,27 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               throw err;
             }
 
-            if (selectedImageIds.length > 0) {
-              console.log(`[Sync] Updating attachments for entry ${editingTransaction.id}. Count: ${selectedImageIds.length}`);
+            if (selectedImages.length > 0) {
+              console.log(`[Sync] ATTACHMENT EDIT START for entry ${editingTransaction.id}. Count: ${selectedImages.length}`);
               const { error: delError } = await supabase.from('attachments').delete().eq('entry_id', editingTransaction.id);
               if (delError) console.error("[Sync] Error clearing old attachments:", delError);
-
-              const attachmentInserts = selectedImageIds
-                .filter(imgId => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(imgId))
-                .map((imgId, idx) => ({
-                  entry_id: editingTransaction.id,
-                  user_id: session.user.id,
-                  image_id: imgId,
-                  user_name: userName || session.user.email || 'User'
-                }));
+              else console.log("[Sync] Old attachments cleared successfully.");
+ 
+              const attachmentInserts = selectedImages.map((url, idx) => ({
+                entry_id: editingTransaction.id,
+                user_id: session.user.id,
+                file_url: url,
+                file_name: `receipt_${idx + 1}.jpg`
+              }));
               
               if (attachmentInserts.length > 0) {
+                console.log(`[Sync] Attempting to insert ${attachmentInserts.length} updated attachments...`);
                 const { error: insError } = await supabase.from('attachments').insert(attachmentInserts);
                 if (insError) {
-                  console.error("[Supabase] Attachment (edit) insert error:", insError);
-                  const isMissingColumn = insError.code === '42703' || 
-                                         insError.message?.toLowerCase().includes('user_name') ||
-                                         insError.message?.toLowerCase().includes('column');
-                                         
-                  if (isMissingColumn) {
-                    console.warn("[Supabase] Retrying attachments (edit) without user_name column...");
-                    const fallbackInserts = attachmentInserts.map((item: any) => {
-                      const { user_name, ...rest } = item;
-                      return rest;
-                    });
-                    const { error: retryError } = await supabase.from('attachments').insert(fallbackInserts);
-                    if (retryError) throw retryError;
-                  } else {
-                    throw insError;
-                  }
+                  console.error("[Supabase] Attachment (edit) final error:", insError);
+                } else {
+                  console.log("[Sync] Attachments updated successfully!");
                 }
-                console.log("[Sync] Attachments updated successfully.");
               }
             }
           } catch (error: any) {
@@ -990,39 +989,23 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               throw err;
             }
 
-            if (selectedImageIds.length > 0) {
-              console.log(`[Sync] Creating attachments for new entry ${newTransaction.id}. Count: ${selectedImageIds.length}`);
-              const attachmentInserts = selectedImageIds
-                .filter(imgId => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(imgId))
-                .map((imgId, idx) => ({
-                  entry_id: newTransaction.id,
-                  user_id: session.user.id,
-                  image_id: imgId,
-                  user_name: userName || session.user.email || 'User'
-                }));
+            if (selectedImages.length > 0) {
+              console.log(`[Sync] Creating attachments for new entry ${newTransaction.id}. Count: ${selectedImages.length}`);
+              const attachmentInserts = selectedImages.map((url, idx) => ({
+                entry_id: newTransaction.id,
+                user_id: session.user.id,
+                file_url: url,
+                file_name: `receipt_${idx + 1}.jpg`
+              }));
 
               if (attachmentInserts.length > 0) {
+                console.log(`[Sync] Attempting to insert ${attachmentInserts.length} new attachments...`);
                 const { error: insError } = await supabase.from('attachments').insert(attachmentInserts);
-                
                 if (insError) {
                   console.error("[Supabase] Attachment insert error:", insError);
-                  const isMissingColumn = insError.code === '42703' || 
-                                         insError.message?.toLowerCase().includes('user_name') ||
-                                         insError.message?.toLowerCase().includes('column');
-                                         
-                  if (isMissingColumn) {
-                    console.warn("[Supabase] Retrying attachments without user_name column...");
-                    const fallbackInserts = attachmentInserts.map((item: any) => {
-                      const { user_name, ...rest } = item;
-                      return rest;
-                    });
-                    const { error: retryError } = await supabase.from('attachments').insert(fallbackInserts);
-                    if (retryError) throw retryError;
-                  } else {
-                    throw insError;
-                  }
+                } else {
+                  console.log("[Sync] Attachments created successfully!");
                 }
-                console.log("[Sync] Attachments created successfully.");
               }
             }
           } catch (error: any) {
@@ -1185,16 +1168,22 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         
         if (result.imageUrl || (result.urls && result.urls.length > 0)) {
           const url = result.imageUrl || result.urls[0];
+          const dbId = result.db_id;
+          
+          console.log(`[Upload] Image Success: ${url}, DB ID: ${dbId}`);
+          
           setSelectedImages(prev => [...prev, url]);
           setSelectedThumbnailUrls(prev => [...prev, result.thumbnailUrl || url]);
           
           // CRITICAL: We need the ID to link in the attachments table
-          // ONLY use the db_id (Supabase UUID). NEVER use Cloudinary path.
-          const dbId = result.db_id;
           if (dbId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(dbId)) {
             setSelectedImageIds(prev => [...prev, dbId]);
           } else {
-            console.warn("[Upload] No valid Supabase UUID received, image will be visible but not linked in attachments table.");
+            console.warn("[Upload] No valid Supabase UUID received for image_id, will use file_url only.");
+            // Push a placeholder or null to keep arrays in sync? No, better to keep them in sync.
+            // Actually, if we use file_url as fallback, we still want to keep the same number of elements if possible.
+            // But let's assume images table always returns a DB ID now.
+            setSelectedImageIds(prev => [...prev, dbId || '']); 
           }
         }
       }
@@ -1543,36 +1532,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 }
               }
 
-              if (newTransaction.imageIds && newTransaction.imageIds.length > 0) {
-                const attachmentInserts = newTransaction.imageIds
-                  .filter(imgId => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(imgId))
-                  .map(imgId => ({
-                    entry_id: newTransaction.id,
-                    user_id: session.user.id,
-                    image_id: imgId,
-                    user_name: userName || session.user.email || 'User'
-                  }));
+              if (newTransaction.images && newTransaction.images.length > 0) {
+                const attachmentInserts = newTransaction.images.map((url, idx) => ({
+                  entry_id: newTransaction.id,
+                  user_id: session.user.id,
+                  file_url: url,
+                  file_name: `ai_receipt_${idx + 1}.jpg`
+                }));
                 
                 if (attachmentInserts.length > 0) {
                   const { error: attachError } = await supabase.from('attachments').insert(attachmentInserts);
-                  
                   if (attachError) {
                     console.error("[Supabase] AI sync attachment error:", attachError);
-                    const isMissingColumn = attachError.code === '42703' || 
-                                           attachError.message?.toLowerCase().includes('user_name') ||
-                                           attachError.message?.toLowerCase().includes('column');
-                                           
-                    if (isMissingColumn) {
-                      console.warn("[Supabase] Retrying AI sync attachments without user_name column...");
-                      const fallbackInserts = attachmentInserts.map((item: any) => {
-                        const { user_name, ...rest } = item;
-                        return rest;
-                      });
-                      const { error: retryError } = await supabase.from('attachments').insert(fallbackInserts);
-                      if (retryError) throw retryError;
-                    } else {
-                      throw attachError;
-                    }
                   }
                 }
               }
@@ -1661,36 +1632,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     }
                   }
 
-                  if (newTransaction.imageIds && newTransaction.imageIds.length > 0) {
-                    const aiAttachmentInserts = newTransaction.imageIds
-                      .filter(imgId => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(imgId))
-                      .map(imgId => ({
-                        entry_id: newTransaction.id,
-                        user_id: session.user.id,
-                        image_id: imgId,
-                        user_name: userName || session.user.email || 'User'
-                      }));
+                  if (newTransaction.images && newTransaction.images.length > 0) {
+                    const aiAttachmentInserts = newTransaction.images.map((url, idx) => ({
+                      entry_id: newTransaction.id,
+                      user_id: session.user.id,
+                      file_url: url,
+                      file_name: `ai_receipt_${idx + 1}.jpg`
+                    }));
                     
                     if (aiAttachmentInserts.length > 0) {
                       const { error: aiAttachError } = await supabase.from('attachments').insert(aiAttachmentInserts);
-                      
                       if (aiAttachError) {
                         console.error("[Supabase] AI bulk attachment error:", aiAttachError);
-                        const isMissingColumn = aiAttachError.code === '42703' || 
-                                               aiAttachError.message?.toLowerCase().includes('user_name') ||
-                                               aiAttachError.message?.toLowerCase().includes('column');
-                                               
-                        if (isMissingColumn) {
-                          console.warn("[Supabase] Retrying AI bulk attachments without user_name column...");
-                          const fallbackInserts = aiAttachmentInserts.map((item: any) => {
-                            const { user_name, ...rest } = item;
-                            return rest;
-                          });
-                          const { error: retryError } = await supabase.from('attachments').insert(fallbackInserts);
-                          if (retryError) throw retryError;
-                        } else {
-                          throw aiAttachError;
-                        }
                       }
                     }
                   }
