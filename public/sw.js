@@ -1,4 +1,4 @@
-const CACHE_NAME = 'trackbook-v6';
+const CACHE_NAME = 'trackbook-v8';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',

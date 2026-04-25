@@ -22,41 +22,11 @@ const cloudName = process.env.CLOUDINARY_CLOUD_NAME || 'dd2kcpetc';
 const apiKey = process.env.CLOUDINARY_API_KEY || '758297935941252'; 
 const apiSecret = process.env.CLOUDINARY_API_SECRET || 'o-8jD_-3MuU2Ltq3JmQMRt56hd0'; 
 
-console.log('[Cloudinary] Config Initialized:', { cloudName, hasApiKey: !!apiKey, hasApiSecret: !!apiSecret });
-
 cloudinary.config({
   cloud_name: cloudName,
   api_key: apiKey,
   api_secret: apiSecret,
 });
-
-// Multer setup with memory storage and size limits
-const upload = multer({ 
-  storage: multer.memoryStorage(),
-  limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB limit per file
-    files: 5 // Max 5 files per request
-  }
-});
-
-/**
- * Helper to handle Multer errors gracefully
- */
-const handleUpload = (req: any, res: any, next: any) => {
-  const uploadHandler = upload.any();
-  uploadHandler(req, res, (err: any) => {
-    if (err instanceof multer.MulterError) {
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ error: "File too large. Max 10MB allowed." });
-      }
-      return res.status(400).json({ error: `Upload error: ${err.message}` });
-    } else if (err) {
-      console.error("[Multer] Error:", err);
-      return res.status(500).json({ error: "Server failed to process upload data." });
-    }
-    next();
-  });
-};
 
 async function startServer() {
   const app = express();

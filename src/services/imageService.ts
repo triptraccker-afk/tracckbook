@@ -14,12 +14,12 @@ export interface ImageRecord {
 
 // Cloudinary Config (Direct Upload)
 const CLOUDINARY_CLOUD_NAME = 'dd2kcpetc';
-const CLOUDINARY_UPLOAD_PRESET = 'trackbook_preset'; // You MUST create this as an "Unsigned" preset in Cloudinary Settings
+const CLOUDINARY_UPLOAD_PRESET = 'trackbook_preset';
 
 // Compression options for mobile stability
 const compressionOptions = {
-  maxSizeMB: 0.6, // Target ~600KB for better performance on mobile
-  maxWidthOrHeight: 1600, // Sufficient for receipt readability
+  maxSizeMB: 0.5, // Target ~500KB as requested
+  maxWidthOrHeight: 1600,
   useWebWorker: true,
   initialQuality: 0.7
 };
@@ -126,42 +126,54 @@ export interface UploadResponse {
 }
 
 /**
- * DIRECT UPLOAD TO CLOUDINARY
+ * DIRECT UPLOAD TO CLOUDINARY (No server-side file processing)
  */
 export async function uploadImage(file: File, options?: { userId?: string, userName?: string, userEmail?: string, folder?: string }): Promise<UploadResponse> {
+  const cloudinaryUrl = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`;
+  
+  console.log("UPLOAD URL:", cloudinaryUrl);
+  console.log(`[ImageService] >>> DIRECT UPLOAD START <<<`);
+  console.log(`[ImageService] Target URL: ${cloudinaryUrl}`);
+  console.log(`[ImageService] File: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
+
   // 1. Compress Client-Side
+  console.log(`[ImageService] Step 1: Compressing file...`);
   const compressedFile = await compressFile(file);
+  console.log(`[ImageService] Compressed size: ${(compressedFile.size / 1024).toFixed(1)} KB`);
   
   // 2. Prepare Direct Cloudinary Upload
+  console.log(`[ImageService] Step 2: Preparing FormData for Cloudinary...`);
   const formData = new FormData();
   formData.append('file', compressedFile);
   formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
   
-  // Optional: User-specific folder structure if preset allows
+  // Optional: User-specific folder structure
   if (options?.userId) {
     const sanitizedName = (options.userName || 'user').replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
-    formData.append('folder', `trackbook/users/${sanitizedName}_${options.userId.slice(0, 8)}/receipts`);
+    const folderPath = `trackbook/users/${sanitizedName}_${options.userId.slice(0, 8)}/receipts`;
+    formData.append('folder', folderPath);
+    console.log(`[ImageService] Target folder: ${folderPath}`);
   }
 
-  const cloudinaryUrl = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`;
-
   try {
-    console.log(`[ImageService] Direct uploading to Cloudinary...`);
+    console.log(`[ImageService] Step 3: Fetching to Cloudinary API...`);
     const response = await fetch(cloudinaryUrl, {
       method: 'POST',
       body: formData
+      // CRITICAL: NO custom headers (like Authorization) should be sent to Cloudinary for unsigned uploads
     });
 
     if (!response.ok) {
       const errorData = await response.json();
-      console.error('[ImageService] Cloudinary direct upload failed:', errorData);
-      throw new Error(`Direct upload failed: ${errorData.error?.message || 'Unknown Cloudinary error'}`);
+      console.error('[ImageService] Cloudinary API Error:', errorData);
+      throw new Error(`Cloudinary Error: ${errorData.error?.message || 'Upload failed'}`);
     }
 
     const data = await response.json();
-    console.log('[ImageService] Cloudinary SUCCESS:', data.secure_url);
+    console.log('[ImageService] Step 4: Cloudinary Success!', data.secure_url);
 
-    // 3. Register with our server for DB persistence (metadata only - no large file)
+    // 3. Register with our server for DB persistence (metadata only - tiny JSON)
+    console.log(`[ImageService] Step 5: Registering metadata with backend...`);
     const dbRecord = await registerImageWithServer(data.secure_url, data.public_id, options);
 
     return {
@@ -170,7 +182,7 @@ export async function uploadImage(file: File, options?: { userId?: string, userN
       db_id: dbRecord?.db_id || dbRecord?.id
     };
   } catch (error: any) {
-    console.error('[ImageService] Direct upload error:', error);
+    console.error('[ImageService] CRITICAL UPLOAD FAILURE:', error);
     throw error;
   }
 }

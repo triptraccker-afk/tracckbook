@@ -75,63 +75,6 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, [navigate, location.pathname]);
 
-  // Backend Health Check
-  useEffect(() => {
-    let checkCount = 0;
-    const maxChecks = 10;
-    
-    const checkBackend = async () => {
-      const isDevelopment = import.meta.env.DEV;
-      
-      try {
-        const apiUrl = getApiUrl(`/api/health?t=${Date.now()}`);
-        console.log(`[HealthCheck] Checking: ${apiUrl}`);
-        
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);
-        
-        const response = await fetch(apiUrl, {
-          method: 'GET',
-          headers: { 'Accept': 'application/json' },
-          signal: controller.signal
-        });
-        
-        clearTimeout(timeoutId);
-        const contentType = response.headers.get("content-type");
-        
-        if (response.status === 401) {
-          throw new Error('401: Vercel Deployment Protection is ON.');
-        }
-
-        if (response.ok && contentType?.includes("application/json")) {
-          const data = await response.json();
-          if (data && data.status === "ok") {
-            setBackendReady(true);
-            setBackendError(null);
-            return;
-          }
-        }
-        throw new Error(`Server returned ${response.status}`);
-      } catch (err: any) {
-        checkCount++;
-        const errorMsg = err.name === 'AbortError' ? 'Timeout' : err.message;
-        
-        if (isDevelopment) {
-          setBackendReady(true);
-          return;
-        }
-
-        if (checkCount < 5) { 
-          setTimeout(checkBackend, 2000);
-        } else {
-          setBackendError(`Backend Issue: ${errorMsg}`);
-        }
-      }
-    };
-    
-    checkBackend();
-  }, []);
-
   // Theme handling
   useEffect(() => {
     const root = window.document.documentElement;
@@ -149,12 +92,12 @@ export default function App() {
 
   // PWA Install Prompt handling
   useEffect(() => {
-    // Force cache clear for v8 update - critical for network fixes and cache purging
-    const CURRENT_VERSION = '8.0.0';
+    // Force cache clear for v8.1 update - critical for network fixes and cache purging
+    const CURRENT_VERSION = '8.1.0';
     const savedVersion = localStorage.getItem('app_version');
     
     if (savedVersion !== CURRENT_VERSION) {
-      console.log('New version detected (v8), clearing cache and local data...');
+      console.log('New version detected (v8.1), clearing cache and local data...');
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.getRegistrations().then(registrations => {
           for(let registration of registrations) registration.unregister();
