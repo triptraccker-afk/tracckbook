@@ -846,8 +846,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         category: finalCategory || 'General',
         mode: finalMode,
         date: dateObj,
-        images: selectedImages.length > 0 ? selectedImages : editingTransaction.images,
-        thumbnailUrls: selectedThumbnailUrls.length > 0 ? selectedThumbnailUrls : editingTransaction.thumbnailUrls,
+        images: selectedImages,
+        thumbnailUrls: selectedThumbnailUrls,
+        imageIds: selectedImageIds,
         imageLayout: imageLayout
       };
 
@@ -905,12 +906,13 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               throw err;
             }
 
+            // Always clear old attachments for this entry when syncing
+            console.log(`[Sync V6.2] ATTACHMENT SYNC for entry ${editingTransaction.id}. Count: ${selectedImages.length}`);
+            const { error: delError } = await supabase.from('attachments').delete().eq('entry_id', editingTransaction.id);
+            if (delError) console.error("[Sync V6.2] Error clearing old attachments:", delError);
+            else console.log("[Sync V6.2] Old attachments cleared successfully.");
+
             if (selectedImages.length > 0) {
-              console.log(`[Sync V6.2] ATTACHMENT EDIT START for entry ${editingTransaction.id}. Count: ${selectedImages.length}`);
-              const { error: delError } = await supabase.from('attachments').delete().eq('entry_id', editingTransaction.id);
-              if (delError) console.error("[Sync V6.2] Error clearing old attachments:", delError);
-              else console.log("[Sync V6.2] Old attachments cleared successfully.");
- 
               const attachmentInserts = selectedImages.map((url, idx) => ({
                 entry_id: editingTransaction.id,
                 user_id: session.user.id,
@@ -918,25 +920,23 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 file_name: `receipt_${idx + 1}.jpg`
               }));
               
-              if (attachmentInserts.length > 0) {
-                console.log(`[Sync V6.2] Attempting to insert ${attachmentInserts.length} updated attachments...`);
-                // Use a single batch insert, but wrap in try-catch for more info
-                try {
-                  const { error: insError } = await supabase.from('attachments').insert(attachmentInserts);
-                  if (insError) {
-                    console.error("[Supabase V6.2] Attachment (edit) final error:", insError);
-                    // Single fallback attempt if batch failed (might be a specific row issue)
-                    if (attachmentInserts.length > 1) {
-                        for (const item of attachmentInserts) {
-                            await supabase.from('attachments').insert([item]);
-                        }
-                    }
-                  } else {
-                    console.log("[Sync V6.2] Attachments updated successfully!");
+              console.log(`[Sync V6.2] Attempting to insert ${attachmentInserts.length} updated attachments...`);
+              // Use a single batch insert, but wrap in try-catch for more info
+              try {
+                const { error: insError } = await supabase.from('attachments').insert(attachmentInserts);
+                if (insError) {
+                  console.error("[Supabase V6.2] Attachment (edit) final error:", insError);
+                  // Single fallback attempt if batch failed (might be a specific row issue)
+                  if (attachmentInserts.length > 1) {
+                      for (const item of attachmentInserts) {
+                          await supabase.from('attachments').insert([item]);
+                      }
                   }
-                } catch (e) {
-                  console.error("[Sync V6.2] Fatal insert error:", e);
+                } else {
+                  console.log("[Sync V6.2] Attachments updated successfully!");
                 }
+              } catch (e) {
+                console.error("[Sync V6.2] Fatal insert error:", e);
               }
             }
           } catch (error: any) {
