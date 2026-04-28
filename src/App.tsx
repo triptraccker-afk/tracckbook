@@ -4,6 +4,7 @@ import { supabase } from './lib/supabase';
 import Dashboard from './pages/Dashboard';
 import Login from './pages/Login';
 import ResetPassword from './pages/ResetPassword';
+import EntryDetail from './pages/EntryDetail';
 import { Loader2, AlertCircle } from 'lucide-react';
 import { getApiUrl } from './lib/api';
 
@@ -171,6 +172,9 @@ export default function App() {
           path="/" 
           element={<Dashboard session={session} theme={theme} setTheme={setTheme} />} 
         />
+
+        {/* Entry Detail */}
+        <Route path="/entry/:id" element={<EntryDetail />} />
 
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/" replace />} />

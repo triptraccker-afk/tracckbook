@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Fragment, useState, useRef, useMemo, useEffect, Dispatch, SetStateAction, FormEvent, MouseEvent as ReactMouseEvent, ChangeEvent } from 'react';
 import { 
   Plus, 
@@ -62,6 +63,7 @@ import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import html2canvas from 'html2canvas';
+import { NotificationSystem } from '../components/NotificationSystem';
 
 interface Transaction {
   id: string;
@@ -431,6 +433,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const CATEGORIES = ['Food', 'Travel', 'Advance', 'Shopping', 'Custom'];
   const MODES = ['Card', 'UPI', 'Cash', 'Custom'];
   const DURATIONS = ['All', 'Today', 'Yesterday', 'Last Week'];
+
+  const [searchParams, setSearchParams] = useSearchParams();
 
   // Set user name from session
   useEffect(() => {
@@ -829,7 +833,66 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
   const handleAddTransaction = async (e: FormEvent) => {
     e.preventDefault();
-    if (!activeBookId || !showForm || !amount || !session) return;
+    if (!activeBookId || !showForm || !session) return;
+
+    // Trigger notifications for missing data even if we don't save (or before saving)
+    const validateAndNotify = async (entry_id?: string) => {
+      const activeBook = books.find(b => b.id === activeBookId);
+      const bookName = activeBook?.name || 'Cashbook';
+      const finalCategory = category === 'Custom' ? customCategory : category;
+      const notificationsToInsert = [];
+      const entryDesc = description || amount || 'New Entry';
+
+      if (selectedImages.length === 0) {
+        notificationsToInsert.push({
+          user_id: session.user.id,
+          message: `Missing Image in "${bookName}": No receipt attached for "${entryDesc}"`,
+          type: 'alert',
+          entry_id: entry_id,
+          is_read: false
+        });
+      }
+
+      if (!description || description.trim() === '') {
+        notificationsToInsert.push({
+          user_id: session.user.id,
+          message: `No Description in "${bookName}": Entry for ${amount || '0'} needs details`,
+          type: 'alert',
+          entry_id: entry_id,
+          is_read: false
+        });
+      }
+
+      if (finalCategory === 'General' || !finalCategory) {
+        notificationsToInsert.push({
+          user_id: session.user.id,
+          message: `Default Category in "${bookName}": Categorize your ${amount || '0'} entry`,
+          type: 'info',
+          entry_id: entry_id,
+          is_read: false
+        });
+      }
+
+      if (!amount || parseFloat(amount) === 0) {
+        notificationsToInsert.push({
+          user_id: session.user.id,
+          message: `Zero Amount in "${bookName}": Saving an entry with 0 or no amount`,
+          type: 'alert',
+          entry_id: entry_id,
+          is_read: false
+        });
+      }
+
+      if (notificationsToInsert.length > 0 && supabase) {
+        console.log(`[Notifications] Triggering ${notificationsToInsert.length} alerts`);
+        await supabase.from('notifications').insert(notificationsToInsert);
+      }
+    };
+
+    if (!amount) {
+      validateAndNotify();
+      return; 
+    }
 
     const finalCategory = category === 'Custom' ? customCategory : category;
     const finalMode = mode === 'Custom' ? customMode : mode;
@@ -905,6 +968,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               console.error('Detailed Supabase Update Error:', err);
               throw err;
             }
+
+            // [Notification Logic] Handled by validateAndNotify helper
+            await validateAndNotify(editingTransaction.id);
 
             // Always clear old attachments for this entry when syncing
             console.log(`[Sync V6.2] ATTACHMENT SYNC for entry ${editingTransaction.id}. Count: ${selectedImages.length}`);
@@ -1010,6 +1076,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               console.error('Detailed Supabase Insert Error:', err);
               throw err;
             }
+            
+            // [Notification Logic] Handled by validateAndNotify helper
+            await validateAndNotify(newTransaction.id);
 
             if (selectedImages.length > 0) {
               console.log(`[Sync V6.2] Creating attachments for new entry ${newTransaction.id}. Count: ${selectedImages.length}`);
@@ -1132,6 +1201,57 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     setSelectedImageIds(t.imageIds || []);
     setImageLayout(t.imageLayout || 'split');
   };
+
+  // Handle Edit/Focus from Notifications (moved here to have access to handleEditTransaction)
+  useEffect(() => {
+    const editEntryId = searchParams.get('editEntryId');
+    const focusField = searchParams.get('focusField');
+
+    if (editEntryId && books.length > 0) {
+      // Find the transaction in all books
+      let foundTransaction: Transaction | undefined;
+      for (const book of books) {
+        foundTransaction = book.transactions.find(t => t.id === editEntryId);
+        if (foundTransaction) {
+          setActiveBookId(book.id);
+          break;
+        }
+      }
+
+      if (foundTransaction) {
+        console.log(`[Notification Redirect] Opening edit for ${editEntryId}, focusing: ${focusField}`);
+        handleEditTransaction(foundTransaction);
+        
+        // Remove query parameters from URL without refreshing
+        setSearchParams({}, { replace: true });
+
+        // Wait for modal and fields to render
+        setTimeout(() => {
+          if (focusField === 'image') {
+            const el = document.getElementById('image-upload-section');
+            if (el) {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              el.classList.add('ring-2', 'ring-indigo-500', 'ring-offset-4', 'dark:ring-offset-zinc-950');
+              setTimeout(() => el.classList.remove('ring-2', 'ring-indigo-500', 'ring-offset-4'), 3000);
+            }
+          } else if (focusField === 'description') {
+            const el = document.getElementById('description-field') as HTMLTextAreaElement;
+            if (el) {
+              el.focus();
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+          } else if (focusField === 'category') {
+            const el = document.getElementById('category-select');
+            if (el) {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              el.classList.add('ring-2', 'ring-indigo-500');
+              setTimeout(() => el.classList.remove('ring-2', 'ring-indigo-500'), 3000);
+            }
+          }
+        }, 600);
+      }
+    }
+  }, [searchParams, books]);
 
   const toggleSelectTransaction = (id: string) => {
     setSelectedTransactions(prev => {
@@ -1783,8 +1903,11 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               </div>
             </div>
 
-            {/* Right: Mobile Search Icon + Profile Dropdown */}
+            {/* Right: Mobile Search Icon + Notifications + Profile Dropdown */}
             <div className="flex items-center gap-1 sm:gap-2">
+              {/* Notifications */}
+              <NotificationSystem userId={session?.user?.id || ''} />
+
               {/* Mobile Search Button (Right side) */}
               <button 
                 onClick={() => { vibrate(); setIsSearchExpanded(true); }}
@@ -3433,6 +3556,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   <div className="space-y-1.5">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Details</label>
                     <textarea
+                      id="description-field"
                       value={description}
                       onChange={(e) => setDescription(e.target.value)}
                       placeholder="Enter transaction details"
@@ -3450,6 +3574,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       <div className="space-y-2">
                         <div className="relative">
                           <select
+                            id="category-select"
                             value={category}
                             onChange={(e) => setCategory(e.target.value)}
                             className={cn(
@@ -3569,7 +3694,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                         </div>
                       )}
                     </div>
-                    <div className="space-y-3">
+                    <div id="image-upload-section" className="space-y-3">
                       {selectedImages.length > 0 && (
                         <div className="space-y-4">
                           {/* Merge Preview if selected */}
