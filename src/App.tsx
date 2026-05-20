@@ -1,33 +1,25 @@
-import { useState, useEffect } from 'react';
-import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from './lib/supabase';
 import Dashboard from './pages/Dashboard';
 import Login from './pages/Login';
 import ResetPassword from './pages/ResetPassword';
-import EntryDetail from './pages/EntryDetail';
-import { Loader2, AlertCircle } from 'lucide-react';
-import { getApiUrl } from './lib/api';
+import { Loader2 } from 'lucide-react';
+import { cn } from './lib/utils';
 
-export default function App() {
-  const [session, setSession] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [backendReady, setBackendReady] = useState(false);
-  const [backendError, setBackendError] = useState<string | null>(null);
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('theme');
-      if (saved === 'light' || saved === 'dark') return saved;
-      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    }
-    return 'light';
-  });
-
+function NavigationHandler({ 
+  session, 
+  setSession, 
+  setLoading 
+}: { 
+  session: any; 
+  setSession: (s: any) => void; 
+  setLoading: (l: boolean) => void;
+}) {
   const navigate = useNavigate();
   const location = useLocation();
 
   useEffect(() => {
-    console.log('App sequence starting (App.tsx)...');
-
     if (!supabase) {
       setLoading(false);
       return;
@@ -74,7 +66,22 @@ export default function App() {
     });
 
     return () => subscription.unsubscribe();
-  }, [navigate, location.pathname]);
+  }, [navigate, location.pathname, setSession, setLoading]);
+
+  return null;
+}
+
+export default function App() {
+  const [session, setSession] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('theme');
+      if (saved === 'light' || saved === 'dark') return saved;
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    return 'light';
+  });
 
   // Theme handling
   useEffect(() => {
@@ -83,31 +90,25 @@ export default function App() {
     root.classList.add(theme);
     root.style.colorScheme = theme;
     localStorage.setItem('theme', theme);
-    
-    // Update theme-color meta tag for mobile browser headers
-    const metaTheme = document.querySelector('meta[name="theme-color"]');
-    if (metaTheme) {
-      metaTheme.setAttribute('content', theme === 'dark' ? '#000000' : '#ffffff');
-    }
   }, [theme]);
 
   // PWA Install Prompt handling
   useEffect(() => {
-    // Force cache clear for v8.1 update - critical for network fixes and cache purging
-    const CURRENT_VERSION = '8.1.0';
+    // Force cache clear for v5 update
+    const CURRENT_VERSION = '5.0.0';
     const savedVersion = localStorage.getItem('app_version');
     
     if (savedVersion !== CURRENT_VERSION) {
-      console.log('New version detected (v8.1), clearing cache and local data...');
+      console.log('New version detected, clearing cache and local data...');
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.getRegistrations().then(registrations => {
           for(let registration of registrations) registration.unregister();
         });
       }
-      localStorage.clear();
+      localStorage.clear(); // Clear all potentially corrupt local storage
       localStorage.setItem('app_version', CURRENT_VERSION);
-      // Hard reload once to kill old control
-      setTimeout(() => window.location.reload(), 200);
+      // Hard reload once to kill old service worker control
+      setTimeout(() => window.location.reload(), 500);
     }
 
     const handleBeforeInstallPrompt = (e: any) => {
@@ -119,66 +120,47 @@ export default function App() {
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
 
-    // Global click listener for haptic feedback
-    const handleGlobalClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      // Broad selector for interactive elements
-      const clickable = target.closest('button, a, [role="button"], input[type="submit"], .cursor-pointer');
-      
-      // Also check computed style as a fallback for elements with "cursor-pointer" class or pointer style
-      const style = window.getComputedStyle(target);
-      const isPointer = style.cursor === 'pointer';
-
-      if (clickable || isPointer) {
-        import('./lib/utils').then(({ vibrate }) => {
-          vibrate(25); // Light subtle tap
-        });
-      }
-    };
-
-    window.addEventListener('click', handleGlobalClick);
-
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-      window.removeEventListener('click', handleGlobalClick);
     };
   }, []);
 
-  // Protected Route Rendering Logic
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
-        <div className="flex flex-col items-center gap-4">
-          <Loader2 className="animate-spin text-indigo-600" size={40} />
-          <p className="text-sm font-medium text-slate-500 animate-pulse">Initializing TrackBook...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!session && location.pathname !== '/login' && location.pathname !== '/resetpassword') {
-    return <Navigate to="/login" replace />;
-  }
-
   return (
-    <>
+    <Router>
+      <NavigationHandler 
+        session={session} 
+        setSession={setSession} 
+        setLoading={setLoading} 
+      />
+      
       <Routes>
         {/* Public Routes */}
         <Route path="/login" element={<Login theme={theme} />} />
         <Route path="/resetpassword" element={<ResetPassword />} />
 
-        {/* Home / Dashboard */}
+        {/* Protected Routes */}
         <Route 
           path="/" 
-          element={<Dashboard session={session} theme={theme} setTheme={setTheme} />} 
+          element={
+            session ? (
+              <Dashboard session={session} theme={theme} setTheme={setTheme} />
+            ) : (
+              // If we are still loading initial session, show a loader
+              loading ? (
+                <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
+                  <div className="flex flex-col items-center gap-4">
+                    <Loader2 className="animate-spin text-indigo-600" size={40} />
+                    <p className="text-sm font-medium text-slate-500 animate-pulse">Initializing app...</p>
+                  </div>
+                </div>
+              ) : <Navigate to="/login" replace />
+            )
+          } 
         />
-
-        {/* Entry Detail */}
-        <Route path="/entry/:id" element={<EntryDetail />} />
 
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-    </>
+    </Router>
   );
 }

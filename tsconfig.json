@@ -15,8 +15,6 @@
     "moduleDetection": "force",
     "allowJs": true,
     "jsx": "react-jsx",
-    "esModuleInterop": true,
-    "allowSyntheticDefaultImports": true,
     "paths": {
       "@/*": [
         "./*"
@@ -25,5 +23,17 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "exclude": ["node_modules", "supabase"]
+  "include": [
+    "src/main.tsx",
+    "src/App.tsx",
+    "src/components/Auth.tsx",
+    "src/components/ErrorBoundary.tsx",
+    "src/lib/supabase.ts",
+    "src/lib/utils.ts",
+    "src/pages/Dashboard.tsx",
+    "src/pages/Login.tsx",
+    "src/pages/ResetPassword.tsx",
+    "src/services/gemini.ts",
+    "vite.config.ts"
+  ]
 }

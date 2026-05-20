@@ -113,10 +113,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [isUploading, setIsUploading] = useState(false);
   const [uploadingMessage, setUploadingMessage] = useState('Detecting bill...');
   const [showAiWarning, setShowAiWarning] = useState(false);
-  const [aiConstructionModal, setAiConstructionModal] = useState<'upload' | 'ask' | null>(null);
+  const [showComingSoon, setShowComingSoon] = useState(false);
   const [showDropZone, setShowDropZone] = useState(false);
   const [aiMode, setAiMode] = useState<'split' | 'merge'>('split');
   const [error, setError] = useState<string | null>(null);
+
+  // Auto-clear API Key error if dummy/env key is now valid
+  useEffect(() => {
+    if (error === "API Key missing" && getApiKey()) {
+      setError(null);
+    }
+  }, [error]);
+
   const [transactionSearchQuery, setTransactionSearchQuery] = useState('');
   const [transactionTypeFilter, setTransactionTypeFilter] = useState<'all' | 'in' | 'out'>('all');
   const [transactionDurationFilter, setTransactionDurationFilter] = useState('All');
@@ -127,8 +135,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [selectedTransactions, setSelectedTransactions] = useState<Set<string>>(new Set());
   const [selectedBooks, setSelectedBooks] = useState<Set<string>>(new Set());
   const [showExitConfirm, setShowExitConfirm] = useState(false);
-  const [deleteConfirmed, setDeleteConfirmed] = useState(false);
-  const [animatingDeleteId, setAnimatingDeleteId] = useState<string | null>(null);
+  const [deleteTimer, setDeleteTimer] = useState(0);
   const longPressTimer = useRef<NodeJS.Timeout | null>(null);
   const bookLongPressTimer = useRef<NodeJS.Timeout | null>(null);
   
@@ -141,6 +148,17 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     }
     vibrate(30);
   };
+
+  // Delete Timer Effect
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (deleteTimer > 0) {
+      interval = setInterval(() => {
+        setDeleteTimer((prev) => prev - 1);
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [deleteTimer]);
 
   const handleTransactionPress = (id: string) => {
     if (selectedTransactions.size > 0) {
@@ -158,7 +176,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const onTouchStart = (id: string) => {
     longPressTimer.current = setTimeout(() => {
       handleTransactionLongPress(id);
-    }, 1200); // 1.2 seconds (or 1200ms) for long press on mobile/touch devices
+    }, 500); // 500ms for long press
   };
 
   const onTouchEnd = () => {
@@ -225,7 +243,6 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         setIsEditingName(false);
         setIsHelpOpen(false);
         setShowAiWarning(false);
-        setAiConstructionModal(null);
         setShowReportsMenu(false);
         setShowBulkDeleteConfirm(false);
         setShowExitConfirm(false);
@@ -259,7 +276,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       } else if (lastKey === 'A') {
         if (key === 'U' && activeBookId) {
           e.preventDefault();
-          setAiConstructionModal('upload');
+          setShowComingSoon(true);
           lastKey = '';
         }
       }
@@ -323,6 +340,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const multiFileInputRef = useRef<HTMLInputElement>(null);
+  const abortUploadRef = useRef(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const reportsRef = useRef<HTMLDivElement>(null);
 
@@ -364,20 +382,10 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const safeToDateTimeLocal = (date: Date | string | number) => {
     try {
       const d = new Date(date);
-      if (isNaN(d.getTime())) {
-        const now = new Date();
-        const offset = now.getTimezoneOffset();
-        const localized = new Date(now.getTime() - offset * 60 * 1000);
-        return localized.toISOString().slice(0, 16);
-      }
-      const offset = d.getTimezoneOffset();
-      const localized = new Date(d.getTime() - offset * 60 * 1000);
-      return localized.toISOString().slice(0, 16);
+      if (isNaN(d.getTime())) return new Date().toISOString().slice(0, 16);
+      return d.toISOString().slice(0, 16);
     } catch (e) {
-      const now = new Date();
-      const offset = now.getTimezoneOffset();
-      const localized = new Date(now.getTime() - offset * 60 * 1000);
-      return localized.toISOString().slice(0, 16);
+      return new Date().toISOString().slice(0, 16);
     }
   };
 
@@ -407,13 +415,21 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   // Fetch data from Supabase
   useEffect(() => {
     const fetchData = async () => {
+      // Safety timeout to ensure loading state clears even if query hangs
+      const fetchTimeout = setTimeout(() => {
+        console.warn('Data fetching taking too long, clearing loading state...');
+        setIsLoading(false);
+      }, 8000);
+
       if (!session) {
+        clearTimeout(fetchTimeout);
         setBooks([]);
         setIsLoading(false);
         return;
       }
 
       if (!supabase) {
+        clearTimeout(fetchTimeout);
         // Load from localStorage if Supabase is not configured
         const savedBooks = localStorage.getItem(`cashbooks_${session.user.id}`);
         if (savedBooks) {
@@ -442,6 +458,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           .eq('user_id', session.user.id);
 
         if (cbError) throw cbError;
+        clearTimeout(fetchTimeout);
 
         if (cashbooks) {
           setBooks(cashbooks.map((cb: any) => ({
@@ -463,6 +480,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           })));
         }
       } catch (error: any) {
+        clearTimeout(fetchTimeout);
         console.error('Error fetching data from Supabase:', error);
         setError(error.message || 'Failed to fetch data');
       } finally {
@@ -643,6 +661,31 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     setEditBookName('');
   };
 
+  const handleUpdateProfile = async () => {
+    if (!session || !supabase) {
+      setIsEditingName(false);
+      return;
+    }
+
+    setIsSubmitting(true);
+    setSubmittingMessage('Updating profile...');
+    
+    try {
+      const { error } = await supabase.auth.updateUser({
+        data: { full_name: userName }
+      });
+      
+      if (error) throw error;
+      
+    } catch (err: any) {
+      console.error('Error updating profile:', err);
+      setError(err.message || 'Failed to update profile');
+    } finally {
+      setIsSubmitting(false);
+      setIsEditingName(false);
+    }
+  };
+
   const handleAskAi = async () => {
     if (!helpQuery.trim()) return;
     setIsHelpLoading(true);
@@ -669,7 +712,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const handleDeleteBook = (id: string) => {
     vibrate(50);
     setDeleteConfirmId(id);
-    setDeleteConfirmed(false);
+    setDeleteTimer(5);
   };
 
   const confirmDeleteBook = async () => {
@@ -904,29 +947,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const handleDeleteTransaction = (id: string) => {
     vibrate(50);
     setTransactionToDelete(id);
-    setDeleteConfirmed(false);
+    setDeleteTimer(5);
   };
 
   const confirmDeleteTransaction = async () => {
     if (!activeBookId || !transactionToDelete || !session) return;
-
-    const idToDelete = transactionToDelete;
-
-    // Close the confirmation modal to keep UI responsive
-    setTransactionToDelete(null);
-
-    // Trigger delete animation
-    setAnimatingDeleteId(idToDelete);
-
-    // Wait for the animation (300ms)
-    await new Promise(resolve => setTimeout(resolve, 300));
 
     if (supabase) {
       try {
         const { error } = await supabase
           .from('entries')
           .delete()
-          .eq('id', idToDelete)
+          .eq('id', transactionToDelete)
           .eq('user_id', session.user.id);
         if (error) throw error;
       } catch (error) {
@@ -936,15 +968,15 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
     setBooks(books.map(b => 
       b.id === activeBookId 
-        ? { ...b, transactions: b.transactions.filter(t => t.id !== idToDelete) }
+        ? { ...b, transactions: b.transactions.filter(t => t.id !== transactionToDelete) }
         : b
     ));
     setSelectedTransactions(prev => {
       const next = new Set(prev);
-      next.delete(idToDelete);
+      next.delete(transactionToDelete);
       return next;
     });
-    setAnimatingDeleteId(null);
+    setTransactionToDelete(null);
   };
 
   const handleBulkDelete = async () => {
@@ -1041,7 +1073,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   };
 
   const exportToExcel = async () => {
-    if (!activeBook || reportLoading) return;
+    if (!activeBook) return;
     setReportLoading({ type: 'excel', progress: 0 });
     
     // Simulate progress
@@ -1100,26 +1132,21 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Transactions");
-    XLSX.writeFile(wb, `${activeBook.name}.xlsx`);
+    XLSX.writeFile(wb, `${activeBook.name}_Report.xlsx`);
     
     setReportLoading(null);
     setShowReportsMenu(false);
   };
 
   const exportToPDF = async () => {
-    if (!activeBook || reportLoading) return;
+    if (!activeBook) return;
     try {
       console.log("Starting PDF export...");
-      // Set initial minimal progress immediately to render the backdrop/popup
-      setReportLoading({ type: 'pdf', progress: 5 });
-      
-      // Yield to the browser main thread to render the loading backdrop/popup instantly
-      await new Promise(r => setTimeout(r, 60));
+      setReportLoading({ type: 'pdf', progress: 10 });
 
       const doc = new jsPDF();
       
-      setReportLoading({ type: 'pdf', progress: 10 });
-      await new Promise(r => setTimeout(r, 30));
+      setReportLoading({ type: 'pdf', progress: 40 });
 
       // Attachments only
       const transactionsWithImages = filteredTransactions.filter(t => t.images && t.images.length > 0);
@@ -1130,18 +1157,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         let isFirstPage = true;
 
         for (const t of transactionsWithImages) {
-          // Yield to let the main thread remain responsive when starting a transaction
-          await new Promise(r => setTimeout(r, 25));
-
           if (t.images) {
             const layout = t.imageLayout || 'split';
             
             if (layout === 'merge') {
               // Merge layout: 2 images per page side-by-side
               for (let i = 0; i < t.images.length; i += 2) {
-                // Yield before heavy canvas/imaging operations
-                await new Promise(r => setTimeout(r, 25));
-
                 if (!isFirstPage) doc.addPage();
                 isFirstPage = false;
 
@@ -1170,9 +1191,6 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 } catch (e) { console.error(e); }
                 processedImages++;
 
-                // Yield to process state changes and animation ticks smoothly
-                await new Promise(r => setTimeout(r, 25));
-
                 // Second image in pair (if exists)
                 if (i + 1 < t.images.length) {
                   try {
@@ -1186,15 +1204,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   processedImages++;
                 }
 
-                const imageProgress = 10 + (processedImages / totalImages) * 80;
-                setReportLoading({ type: 'pdf', progress: Math.min(92, Math.round(imageProgress)) });
+                const imageProgress = 40 + (processedImages / totalImages) * 50;
+                setReportLoading({ type: 'pdf', progress: Math.round(imageProgress) });
               }
             } else {
               // Split layout: 1 image per page (current behavior)
               for (const img of t.images) {
-                // Yield before heavy canvas/imaging operations
-                await new Promise(r => setTimeout(r, 25));
-
                 try {
                   if (!isFirstPage) doc.addPage();
                   isFirstPage = false;
@@ -1220,8 +1235,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 } catch (e) { console.error(e); }
                 
                 processedImages++;
-                const imageProgress = 10 + (processedImages / totalImages) * 80;
-                setReportLoading({ type: 'pdf', progress: Math.min(92, Math.round(imageProgress)) });
+                const imageProgress = 40 + (processedImages / totalImages) * 50;
+                setReportLoading({ type: 'pdf', progress: Math.round(imageProgress) });
               }
             }
           }
@@ -1229,22 +1244,16 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       } else {
         doc.setFontSize(12);
         doc.text("No attachments found in this book.", 14, 20);
-        await new Promise(r => setTimeout(r, 200));
       }
 
       setReportLoading({ type: 'pdf', progress: 95 });
-      await new Promise(r => setTimeout(r, 100));
+      await new Promise(r => setTimeout(r, 300));
       
-      const fileName = `${activeBook.name}.pdf`;
+      const fileName = `${activeBook.name.replace(/[^a-z0-9]/gi, '_')}_Report.pdf`;
       
       // Add page numbers and footer
       const totalPages = doc.getNumberOfPages();
       for (let i = 1; i <= totalPages; i++) {
-        // Yield occasionally on larger documents to prevent UI block on pagination tasks
-        if (i % 4 === 0) {
-          await new Promise(r => setTimeout(r, 15));
-        }
-        
         doc.setPage(i);
         doc.setFontSize(8);
         doc.setTextColor(150);
@@ -1253,14 +1262,11 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         doc.text(new Date().toLocaleDateString('en-IN'), doc.internal.pageSize.getWidth() - 30, doc.internal.pageSize.getHeight() - 5);
       }
 
-      // Final yield so the progress bar display matches actual performance state before disk writes
-      await new Promise(r => setTimeout(r, 50));
-
       doc.save(fileName);
       console.log("PDF saved successfully");
       
       setReportLoading({ type: 'pdf', progress: 100 });
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise(r => setTimeout(r, 300));
     } catch (error) {
       console.error("PDF Export failed:", error);
       alert("Failed to download PDF. Please try again.");
@@ -1277,6 +1283,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     const filesToProcess = Array.from(files).slice(0, 5) as File[];
 
     setIsUploading(true);
+    abortUploadRef.current = false;
     setUploadingMessage('Detecting bills...');
     try {
       if (aiMode === 'merge' && filesToProcess.length > 1) {
@@ -1284,6 +1291,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         const imagesData: { base64: string, mimeType: string, raw: string }[] = [];
         
         for (const file of filesToProcess) {
+          if (abortUploadRef.current) return;
           const base64 = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => resolve(reader.result as string);
@@ -1297,9 +1305,10 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           });
         }
 
+        if (abortUploadRef.current) return;
         const result = await parseMultipleReceipts(imagesData.map(img => ({ base64: img.base64, mimeType: img.mimeType })));
         
-        if (result) {
+        if (result && !abortUploadRef.current) {
           const newTransaction: Transaction = {
             id: safeUUID(),
             amount: result.amount,
@@ -1366,16 +1375,21 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         let completed = 0;
         const total = filesToProcess.length;
         for (const file of filesToProcess) {
+          if (abortUploadRef.current) return;
           setUploadingMessage(`Detecting bill ${completed}/${total}...`);
           await new Promise<void>((resolve, reject) => {
             const reader = new FileReader();
             reader.onerror = () => reject(new Error('File reading failed'));
             reader.onloadend = async () => {
               try {
+                if (abortUploadRef.current) {
+                  resolve();
+                  return;
+                }
                 const base64String = (reader.result as string).split(',')[1];
                 const result = await parseReceipt(base64String, file.type);
                 
-                if (result) {
+                if (result && !abortUploadRef.current) {
                   completed++;
                   setUploadingMessage(`Detected ${result.category} (${completed}/${total})! Syncing...`);
                   
@@ -1587,6 +1601,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                           "font-bold truncate transition-colors duration-300",
                           theme === 'dark' ? "text-slate-100" : "text-black"
                         )}>{userName}</p>
+                        <p className="text-[8px] text-slate-400 mt-1">App Version: 5.0.0</p>
                       </div>
 
                       <button 
@@ -1708,7 +1723,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 <div className="flex items-center gap-3 sm:gap-4">
                   {selectedBooks.size > 0 ? (
                     <button
-                      onClick={() => { vibrate(); setShowBulkDeleteConfirm(true); setDeleteConfirmed(false); }}
+                      onClick={() => { vibrate(); setShowBulkDeleteConfirm(true); setDeleteTimer(5); }}
                       className={cn(
                         "flex-1 sm:flex-none py-2 sm:py-2.5 px-4 sm:px-6 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold transition-all flex items-center justify-center gap-2 text-sm sm:text-base animate-in fade-in zoom-in duration-200",
                         theme === 'dark' ? "shadow-none" : "shadow-lg shadow-rose-100"
@@ -1827,13 +1842,13 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                           </div>
                         </div>
                       )}
-                      <div className="flex-grow flex-1 min-w-0 flex items-center gap-2 sm:gap-4 pr-1 sm:pr-2">
-                        <div className="p-2 sm:p-3 bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 rounded-xl sm:rounded-2xl group-hover:scale-110 transition-transform flex-shrink-0">
+                      <div className="flex items-center gap-3 sm:gap-4">
+                        <div className="p-2 sm:p-3 bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 rounded-xl sm:rounded-2xl group-hover:scale-110 transition-transform">
                           <BookOpen size={20} className="sm:w-6 sm:h-6" />
                         </div>
-                        <div className="min-w-0 flex-1">
+                        <div className="min-w-0">
                           <h4 className={cn(
-                            "font-bold text-sm sm:text-lg break-words whitespace-normal leading-tight transition-colors duration-300",
+                            "font-bold text-sm sm:text-lg truncate max-w-[120px] xs:max-w-[160px] sm:max-w-none transition-colors duration-300",
                             theme === 'dark' ? "text-slate-100" : "text-slate-800"
                           )}>{book.name}</h4>
                           <p className={cn(
@@ -1843,7 +1858,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                         </div>
                       </div>
                       
-                      <div className="flex items-center gap-2 sm:gap-6 flex-shrink-0 ml-3">
+                      <div className="flex items-center gap-2 sm:gap-6">
                         <div className="flex items-center gap-0.5 sm:gap-1 border-l border-slate-100 dark:border-slate-800 pl-1.5 sm:pl-4">
                           <button 
                             onClick={(e) => { e.stopPropagation(); setIsEditingBook(book.id); setEditBookName(book.name); }}
@@ -2071,7 +2086,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 </button>
                 <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
                   <button
-                    onClick={() => { vibrate(); setAiConstructionModal('upload'); }}
+                    onClick={() => { vibrate(); setShowComingSoon(true); }}
                     disabled={isUploading}
                     className={cn(
                       "group/shortcut relative flex-1 sm:flex-none flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-bold transition-all active:scale-95",
@@ -2080,7 +2095,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                         : "bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-50 shadow-sm shadow-indigo-100/20"
                     )}
                   >
-                    {isUploading ? <Loader2 size={20} className="animate-spin" /> : <Upload size={20} />}
+                    <Upload size={20} />
                     AI Upload
                     <span className="hidden lg:group-hover/shortcut:flex absolute -bottom-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-slate-800 text-white text-[10px] rounded shadow-lg whitespace-nowrap items-center gap-1 z-50">
                       Press <kbd className="bg-slate-700 px-1 rounded">A</kbd> + <kbd className="bg-slate-700 px-1 rounded">U</kbd>
@@ -2119,7 +2134,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   </button>
                   {selectedTransactions.size > 0 && (
                     <button
-                      onClick={() => { setShowBulkTransactionDeleteConfirm(true); setDeleteConfirmed(false); }}
+                      onClick={() => { setShowBulkTransactionDeleteConfirm(true); setDeleteTimer(5); }}
                       className={cn(
                         "flex items-center gap-2 px-4 py-2.5 sm:py-3 bg-rose-600 text-white rounded-xl font-bold hover:bg-rose-700 transition-all whitespace-nowrap text-xs sm:text-sm",
                         theme === 'dark' ? "shadow-none" : "shadow-lg shadow-rose-100"
@@ -2280,22 +2295,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                               .slice(0, globalIdx + 1)
                               .reduce((acc, curr) => acc + (curr.type === 'in' ? curr.amount : -curr.amount), 0);
 
-                            const isCurrentlyDeleting = animatingDeleteId === t.id;
-                            
                             return (
                               <motion.div
                                 key={t.id}
                                 initial={{ opacity: 0, y: 10 }}
-                                animate={isCurrentlyDeleting ? { opacity: 0, x: -100, scale: 0.9, height: 0, margin: 0, padding: 0 } : { opacity: 1, y: 0 }}
-                                transition={{ duration: 0.25 }}
+                                animate={{ opacity: 1, y: 0 }}
                                 onMouseDown={() => onTouchStart(t.id)}
                                 onMouseUp={onTouchEnd}
                                 onTouchStart={() => onTouchStart(t.id)}
                                 onTouchEnd={onTouchEnd}
                                 onClick={() => handleTransactionPress(t.id)}
                                 className={cn(
-                                  "rounded-xl border shadow-sm relative transition-all active:scale-[0.98] select-none overflow-hidden transition-colors duration-300 cursor-pointer",
-                                  isCurrentlyDeleting ? "border-transparent bg-transparent" : "p-2.5",
+                                  "rounded-xl border shadow-sm p-2.5 relative transition-all active:scale-[0.98] select-none overflow-hidden transition-colors duration-300 cursor-pointer",
                                   selectedTransactions.has(t.id) 
                                     ? (theme === 'dark' ? "border-indigo-500 ring-1 ring-indigo-500 bg-indigo-950/30" : "border-indigo-600 ring-1 ring-indigo-600 bg-indigo-50/30 shadow-lg") 
                                     : (theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-100")
@@ -2515,20 +2526,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                                 .slice(0, index + 1)
                                 .reduce((acc, curr) => acc + (curr.type === 'in' ? curr.amount : -curr.amount), 0);
 
-                            const isCurrentlyDeleting = animatingDeleteId === t.id;
-
-                            return (
-                              <motion.tr 
-                                key={t.id} 
-                                animate={isCurrentlyDeleting ? { opacity: 0, x: -50, scale: 0.95 } : { opacity: 1, x: 0, scale: 1 }}
-                                transition={{ duration: 0.25 }}
-                                className={cn(
+                              return (
+                                <tr key={t.id} className={cn(
                                   "group transition-colors",
                                   theme === 'dark' ? "hover:bg-slate-800/30" : "hover:bg-slate-50/50",
-                                  selectedTransactions.has(t.id) && (theme === 'dark' ? "bg-indigo-900/10" : "bg-indigo-50/50"),
-                                  isCurrentlyDeleting && "pointer-events-none opacity-50"
-                                )}
-                              >
+                                  selectedTransactions.has(t.id) && (theme === 'dark' ? "bg-indigo-900/10" : "bg-indigo-50/50")
+                                )}>
                                   <td className="px-3 sm:px-6 py-4">
                                     <button 
                                       onClick={() => toggleSelectTransaction(t.id)}
@@ -2650,7 +2653,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                                       </button>
                                     </div>
                                   </td>
-                                </motion.tr>
+                                </tr>
                               );
                             })
                           )}
@@ -2667,7 +2670,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 theme === 'dark' ? "bg-slate-900/80 border-slate-800" : "bg-white/80 border-slate-100"
               )}>
                 <button
-                  onClick={() => { vibrate(); setAiConstructionModal('upload'); }}
+                  onClick={() => { vibrate(); setShowAiWarning(true); }}
                   disabled={isUploading}
                   className={cn(
                     "w-full flex items-center justify-center gap-2 py-3 rounded-2xl font-black transition-all active:scale-95",
@@ -2743,34 +2746,23 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 <p className="text-slate-500 dark:text-slate-400 text-sm">
                   Are you sure you want to delete this book? This action cannot be undone and all transactions will be permanently lost.
                 </p>
-                <div className="pt-2 text-left flex justify-center">
-                  <label className="inline-flex items-center gap-2 cursor-pointer text-xs select-none">
-                    <input 
-                      type="checkbox" 
-                      checked={deleteConfirmed} 
-                      onChange={(e) => setDeleteConfirmed(e.target.checked)}
-                      className="rounded text-rose-600 focus:ring-rose-500 border-slate-300 dark:border-slate-800 w-4 h-4 cursor-pointer"
-                    />
-                    <span className="text-slate-500 dark:text-slate-400 font-bold">I confirm this deletion</span>
-                  </label>
-                </div>
               </div>
               <div className="flex gap-3">
                 <button 
-                  onClick={() => { setDeleteConfirmId(null); }}
-                  className="flex-1 py-3 border border-slate-200 dark:border-slate-800 rounded-xl font-bold text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all cursor-pointer"
+                  onClick={() => { setDeleteConfirmId(null); setDeleteTimer(0); }}
+                  className="flex-1 py-3 border border-slate-200 dark:border-slate-800 rounded-xl font-bold text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all"
                 >
                   Cancel
                 </button>
                 <button 
                   onClick={confirmDeleteBook}
-                  disabled={!deleteConfirmed}
+                  disabled={deleteTimer > 0}
                   className={cn(
-                    "flex-1 py-3 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer",
+                    "flex-1 py-3 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed",
                     theme === 'dark' ? "shadow-none" : "shadow-lg shadow-rose-100"
                   )}
                 >
-                  Delete
+                  {deleteTimer > 0 ? `Delete (${deleteTimer}s)` : 'Delete'}
                 </button>
               </div>
             </motion.div>
@@ -2808,34 +2800,23 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 <p className="text-slate-500 dark:text-slate-400 text-sm">
                   Are you sure you want to delete this entry? Once deleted, it cannot be recovered.
                 </p>
-                <div className="pt-2 text-left flex justify-center">
-                  <label className="inline-flex items-center gap-2 cursor-pointer text-xs select-none">
-                    <input 
-                      type="checkbox" 
-                      checked={deleteConfirmed} 
-                      onChange={(e) => setDeleteConfirmed(e.target.checked)}
-                      className="rounded text-rose-600 focus:ring-rose-500 border-slate-300 dark:border-slate-800 w-4 h-4 cursor-pointer"
-                    />
-                    <span className="text-slate-500 dark:text-slate-400 font-bold">I confirm this deletion</span>
-                  </label>
-                </div>
               </div>
               <div className="flex gap-3">
                 <button 
-                  onClick={() => { setTransactionToDelete(null); }}
-                  className="flex-1 py-3 border border-slate-200 dark:border-slate-800 rounded-xl font-bold text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all cursor-pointer"
+                  onClick={() => { setTransactionToDelete(null); setDeleteTimer(0); }}
+                  className="flex-1 py-3 border border-slate-200 dark:border-slate-800 rounded-xl font-bold text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all"
                 >
                   Cancel
                 </button>
                 <button 
                   onClick={confirmDeleteTransaction}
-                  disabled={!deleteConfirmed}
+                  disabled={deleteTimer > 0}
                   className={cn(
-                    "flex-1 py-3 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer",
+                    "flex-1 py-3 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed",
                     theme === 'dark' ? "shadow-none" : "shadow-lg shadow-rose-100"
                   )}
                 >
-                  Delete
+                  {deleteTimer > 0 ? `Delete (${deleteTimer}s)` : 'Delete'}
                 </button>
               </div>
             </motion.div>
@@ -2895,200 +2876,6 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   Proceed
                 </button>
               </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
-      {/* AI Under Construction Modal */}
-      <AnimatePresence>
-        {aiConstructionModal && (
-          <div 
-            onClick={() => setAiConstructionModal(null)}
-            className={cn(
-              "fixed inset-0 z-[400] flex items-center justify-center p-4 backdrop-blur-xl transition-colors duration-300",
-              theme === 'dark' ? "bg-slate-950/80" : "bg-slate-900/60"
-            )}
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 15 }}
-              transition={{ type: 'spring', damping: 25, stiffness: 250 }}
-              onClick={(e) => e.stopPropagation()}
-              className={cn(
-                "relative w-full max-w-sm rounded-[32px] p-6 sm:p-8 shadow-3xl text-center space-y-6 transition-colors duration-300 border overflow-hidden",
-                theme === 'dark' ? "bg-zinc-950 border-zinc-900 shadow-black/80" : "bg-white border-slate-100 shadow-slate-200/50"
-              )}
-            >
-              {/* Background Slowly Rotating Construction Gear */}
-              <div className="absolute inset-0 flex items-center justify-center overflow-hidden pointer-events-none select-none">
-                <motion.div
-                  animate={{ rotate: 360 }}
-                  transition={{ repeat: Infinity, duration: 25, ease: "linear" }}
-                  className={cn(
-                    "opacity-[0.03] dark:opacity-[0.04]",
-                    theme === 'dark' ? "text-indigo-400" : "text-indigo-900"
-                  )}
-                >
-                  <Settings size={280} strokeWidth={1} />
-                </motion.div>
-              </div>
-
-              {/* Close Button */}
-              <button 
-                onClick={() => { vibrate(); setAiConstructionModal(null); }}
-                className={cn(
-                  "absolute top-4 right-4 p-2 rounded-full border transition-all hover:scale-105 active:scale-95 cursor-pointer",
-                  theme === 'dark' 
-                    ? "border-zinc-800 hover:bg-zinc-900 text-slate-400 hover:text-white" 
-                    : "border-slate-100 hover:bg-slate-50 text-slate-500 hover:text-slate-800"
-                )}
-              >
-                <X size={16} />
-              </button>
-
-              {/* Glowing Dynamic Visual Header */}
-              <div className="relative w-24 h-24 mx-auto flex items-center justify-center mt-3">
-                {/* AI Glow/Pulse Rings */}
-                <motion.div 
-                  animate={{ scale: [1, 1.4, 1], opacity: [0.6, 0.15, 0.6] }}
-                  transition={{ repeat: Infinity, duration: 3, ease: "easeInOut" }}
-                  className="absolute inset-0 rounded-full bg-indigo-500/10 dark:bg-indigo-500/5"
-                />
-                <motion.div 
-                  animate={{ scale: [1, 1.25, 1], opacity: [0.8, 0.3, 0.8] }}
-                  transition={{ repeat: Infinity, duration: 2.5, ease: "easeInOut", delay: 0.5 }}
-                  className="absolute inset-2 rounded-full bg-indigo-500/15 dark:bg-indigo-500/10"
-                />
-                
-                {/* Central Icon Container */}
-                <div className={cn(
-                  "w-16 h-16 rounded-[22px] flex items-center justify-center relative shadow-xl",
-                  theme === 'dark' ? "bg-gradient-to-tr from-indigo-900/40 to-violet-800/20" : "bg-indigo-50"
-                )}>
-                  {/* Rotating small cog */}
-                  <motion.div
-                    animate={{ rotate: -360 }}
-                    transition={{ repeat: Infinity, duration: 6, ease: "linear" }}
-                    className="absolute -top-1 -right-1 text-indigo-500/40"
-                  >
-                    <Settings size={18} strokeWidth={2.5} />
-                  </motion.div>
-
-                  {/* Interactive Icon based on type */}
-                  <motion.div
-                    animate={aiConstructionModal === 'upload' ? { y: [-2, 2, -2] } : { scale: [0.95, 1.05, 0.95] }}
-                    transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
-                    className={theme === 'dark' ? "text-indigo-400" : "text-indigo-600"}
-                  >
-                    {aiConstructionModal === 'upload' ? (
-                      <Upload size={28} strokeWidth={2.2} />
-                    ) : (
-                      <MessageSquare size={28} strokeWidth={2.2} />
-                    )}
-                  </motion.div>
-                  
-                  {/* Sparkles overlay */}
-                  <motion.div 
-                    animate={{ opacity: [0.4, 1, 0.4], scale: [0.8, 1.1, 0.8] }}
-                    transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
-                    className="absolute bottom-1 right-1 text-amber-400"
-                  >
-                    <Sparkles size={14} fill="currentColor" />
-                  </motion.div>
-                </div>
-              </div>
-
-              {/* Title & Subtitle */}
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-center gap-1.5">
-                  <motion.div 
-                    animate={{ opacity: [0.3, 1, 0.3] }}
-                    transition={{ repeat: Infinity, duration: 1.5, delay: 0 }}
-                    className="w-1.5 h-1.5 rounded-full bg-emerald-500"
-                  />
-                  <span className="text-[10px] font-black uppercase tracking-widest text-emerald-500">Under Construction</span>
-                </div>
-                
-                <h3 className={cn(
-                  "text-xl font-bold tracking-tight transition-colors duration-300",
-                  theme === 'dark' ? "text-white" : "text-slate-900"
-                )}>
-                  {aiConstructionModal === 'upload' ? "AI Upload Coming Soon" : "Ask AI Coming Soon"}
-                </h3>
-                
-                <p className={cn(
-                  "text-sm leading-relaxed px-2 transition-colors duration-300 font-medium",
-                  theme === 'dark' ? "text-slate-400" : "text-slate-600"
-                )}>
-                  {aiConstructionModal === 'upload' 
-                    ? "This feature is currently under construction and will be available in a couple of days." 
-                    : "This AI feature is under development and will be released soon."}
-                </p>
-              </div>
-
-              {/* Progress and Construction indicators */}
-              <div className="space-y-2 pt-1">
-                <div className="flex items-center justify-between text-xs font-bold text-slate-400 px-1">
-                  <span>Development Progress</span>
-                  <span className="text-indigo-500 font-black">
-                    {aiConstructionModal === 'upload' ? "85%" : "78%"}
-                  </span>
-                </div>
-                
-                {/* Simulated Progress bar with shine */}
-                <div className={cn(
-                  "h-2 w-full rounded-full overflow-hidden relative",
-                  theme === 'dark' ? "bg-zinc-900" : "bg-slate-100"
-                )}>
-                  <motion.div 
-                    initial={{ width: "0%" }}
-                    animate={{ width: aiConstructionModal === 'upload' ? "85%" : "78%" }}
-                    transition={{ duration: 1.2, ease: "easeOut" }}
-                    className="h-full bg-gradient-to-r from-indigo-500 to-violet-600 rounded-full relative"
-                  >
-                    {/* Glowing scanning effect inside the progress bar */}
-                    <motion.div 
-                      initial={{ left: "-100%" }}
-                      animate={{ left: "100%" }}
-                      transition={{ duration: 1.8, repeat: Infinity, ease: "linear" }}
-                      className="absolute inset-y-0 w-24 bg-gradient-to-r from-transparent via-white/30 to-transparent skew-x-12"
-                    />
-                  </motion.div>
-                </div>
-                
-                {/* Bouncing loading indicator dots representing activity */}
-                <div className="flex justify-center items-center gap-1.5 pt-2">
-                  <span className="text-[10px] font-bold text-slate-400">Deploying updates</span>
-                  <div className="flex gap-1 items-center">
-                    {[0, 1, 2].map((i) => (
-                      <motion.div
-                        key={i}
-                        animate={{ y: [0, -3, 0] }}
-                        transition={{
-                          repeat: Infinity,
-                          duration: 1,
-                          delay: i * 0.18,
-                          ease: "easeInOut"
-                        }}
-                        className="w-1 h-1 rounded-full bg-indigo-500"
-                      />
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {/* Primary action close button */}
-              <button 
-                onClick={() => { vibrate(); setAiConstructionModal(null); }}
-                className={cn(
-                  "w-full py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-bold transition-all transform hover:scale-[1.02] active:scale-[0.98] cursor-pointer shadow-lg",
-                  theme === 'dark' ? "shadow-indigo-950/20" : "shadow-indigo-100"
-                )}
-              >
-                Awesome, I'll wait!
-              </button>
             </motion.div>
           </div>
         )}
@@ -3326,7 +3113,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   />
                 </div>
                 <button
-                  onClick={() => setIsEditingName(false)}
+                  onClick={handleUpdateProfile}
                   className={cn(
                     "w-full py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold transition-all",
                     theme === 'dark' ? "shadow-none" : "shadow-lg shadow-indigo-100"
@@ -3721,15 +3508,15 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-[200] flex items-center justify-center bg-indigo-600 text-white"
           >
-            <div className="text-center space-y-6 px-6">
+            <div className="text-center space-y-8 px-6 w-full max-w-sm">
               <div className="relative flex items-center justify-center">
                 <motion.div
                   animate={{ rotate: 360 }}
-                  transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
+                  transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
                   className="w-16 h-16 border-4 border-white/20 border-t-white rounded-full"
                 />
               </div>
-              <div className="space-y-2">
+              <div className="space-y-3">
                 <AnimatePresence mode="wait">
                   <motion.h3 
                     key={uploadingMessage}
@@ -3741,9 +3528,24 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     {uploadingMessage}
                   </motion.h3>
                 </AnimatePresence>
-                <p className="text-indigo-100/80 text-sm max-w-[280px] mx-auto">
+                <p className="text-indigo-100/80 text-sm">
                   AI is reading your receipt and extracting details
                 </p>
+              </div>
+
+              <div className="pt-4">
+                <button 
+                  onClick={() => {
+                    abortUploadRef.current = true;
+                    setIsUploading(false);
+                    setUploadingMessage('');
+                    if (fileInputRef.current) fileInputRef.current.value = '';
+                  }}
+                  className="px-8 py-3 bg-white/10 hover:bg-white/20 border border-white/20 rounded-2xl font-bold flex items-center justify-center gap-2 mx-auto transition-all active:scale-95"
+                >
+                  <ChevronLeft size={18} />
+                  Back to Dashboard
+                </button>
               </div>
             </div>
           </motion.div>
@@ -3883,233 +3685,57 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       <AnimatePresence>
         {reportLoading && (
           <div className={cn(
-            "fixed inset-0 z-[300] flex items-center justify-center backdrop-blur-xl transition-colors duration-300",
-            theme === 'dark' ? "bg-slate-950/80" : "bg-slate-900/60"
+            "fixed inset-0 z-[300] flex items-center justify-center backdrop-blur-md transition-colors duration-300",
+            theme === 'dark' ? "bg-black/80" : "bg-white/80"
           )}>
-            <motion.div 
-              initial={{ scale: 0.9, opacity: 0, y: 15 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.95, opacity: 0, y: 10 }}
-              className={cn(
-                "rounded-3xl shadow-2xl p-6 sm:p-8 max-w-sm w-full mx-4 border flex flex-col items-center text-center",
-                theme === 'dark' ? "bg-zinc-950 border-zinc-900 shadow-black/80" : "bg-white border-slate-100 shadow-slate-200/50"
-              )}
-            >
-              {/* Animated 3D-style Spreadsheet Graphic (for Excel) */}
-              {reportLoading.type === 'excel' && (
-                <div className="w-48 h-36 relative flex items-center justify-center mb-2 overflow-hidden">
-                  <motion.div 
-                    initial={{ rotateX: 12, rotateY: -12, scale: 0.85 }}
-                    animate={{ rotateX: [12, 8, 12], rotateY: [-12, -16, -12], scale: [0.85, 0.88, 0.85] }}
-                    transition={{ duration: 6, repeat: Infinity, ease: "easeInOut" }}
-                    style={{ transformStyle: "preserve-3d" }}
-                    className="w-36 h-26 bg-emerald-950/20 border-2 border-emerald-500/30 rounded-2xl relative p-3 shadow-2xl shadow-emerald-500/5 flex flex-col justify-between overflow-hidden"
-                  >
-                    {/* Shiny/glow effect scanning across sheet */}
-                    <motion.div 
-                      initial={{ left: "-150%" }}
-                      animate={{ left: "150%" }}
-                      transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
-                      className="absolute inset-y-0 w-12 bg-gradient-to-r from-transparent via-emerald-400/20 to-transparent -skew-x-12 z-10"
-                    />
-
-                    {/* Spreadsheet headers */}
-                    <div className="grid grid-cols-4 gap-1.5 border-b border-emerald-500/20 pb-2">
-                      <div className="h-1.5 rounded bg-emerald-500/40 col-span-1" />
-                      <div className="h-1.5 rounded bg-emerald-500/20 col-span-2" />
-                      <div className="h-1.5 rounded bg-emerald-500/30 col-span-1" />
-                    </div>
-
-                    {/* Spreadsheet Rows flying/entering */}
-                    <div className="flex-1 flex flex-col justify-center gap-2 pt-2">
-                      {[
-                        { delay: 0, width: "w-24", color: "bg-emerald-500/40" },
-                        { delay: 0.2, width: "w-16", color: "bg-emerald-500/25" },
-                        { delay: 0.4, width: "w-20", color: "bg-emerald-400/30" }
-                      ].map((row, idx) => (
-                        <motion.div
-                          key={idx}
-                          initial={{ x: -45, opacity: 0 }}
-                          animate={{ x: 0, opacity: 1 }}
-                          transition={{
-                            delay: row.delay,
-                            duration: 0.8,
-                            repeat: Infinity,
-                            repeatDelay: 1,
-                            ease: "easeOut"
-                          }}
-                          className={`h-2 rounded-full ${row.color} ${row.width}`}
-                        />
-                      ))}
-                    </div>
-
-                    {/* 3D floating Excel tag */}
-                    <motion.div
-                      animate={{ y: [-1, 2, -1], rotate: [0, 4, 0] }}
-                      transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
-                      className="absolute -right-1 -bottom-1 w-9 h-9 bg-emerald-600 text-white rounded-xl shadow-lg flex items-center justify-center border border-emerald-400/20 z-20"
-                    >
-                      <svg className="w-4 h-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M4 3h16a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" />
-                        <path d="M10 3v18M4 10h17" />
-                      </svg>
-                    </motion.div>
-                  </motion.div>
-                </div>
-              )}
-
-              {/* Animated 3D-style Document Stack Graphic (for PDF) */}
-              {reportLoading.type === 'pdf' && (
-                <div className="w-48 h-36 relative flex items-center justify-center mb-2 overflow-hidden">
-                  <div style={{ perspective: "800px" }} className="relative w-36 h-26">
-                    {/* Page 3 (Deepest) */}
-                    <motion.div 
-                      animate={{ rotate: [-6, -4, -6], y: [1, 0, 1] }}
-                      transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
-                      className="absolute inset-0 bg-indigo-950/5 border border-indigo-500/10 rounded-2xl transform translate-x-2 -translate-y-2 select-none pointer-events-none"
-                    />
-                    {/* Page 2 (Middle) */}
-                    <motion.div 
-                      animate={{ rotate: [-3, -1, -3], y: [-1, 0, -1] }}
-                      transition={{ duration: 4.5, repeat: Infinity, ease: "easeInOut" }}
-                      className="absolute inset-0 bg-indigo-950/10 border border-indigo-500/20 rounded-2xl transform translate-x-1 -translate-y-1 select-none pointer-events-none"
-                    />
-                    {/* Page 1 (Top Active Page) */}
-                    <motion.div 
-                      initial={{ rotate: 0, scale: 0.95 }}
-                      animate={{ rotate: [0, 1, 0], scale: [0.95, 0.97, 0.95] }}
-                      transition={{ duration: 5, repeat: Infinity, ease: "easeInOut" }}
-                      className="absolute inset-0 bg-indigo-950/15 border border-indigo-500/30 rounded-2xl p-2.5 flex flex-col gap-1.5 overflow-hidden shadow-2xl"
-                    >
-                      {/* Scan gradient sweep */}
-                      <motion.div 
-                        initial={{ top: "-150%" }}
-                        animate={{ top: "150%" }}
-                        transition={{ duration: 2.5, repeat: Infinity, ease: "easeInOut" }}
-                        className="absolute inset-x-0 h-8 bg-gradient-to-b from-transparent via-indigo-400/15 to-transparent -skew-y-3 z-10"
-                      />
-
-                      {/* Header layout */}
-                      <div className="flex gap-1.5 items-center">
-                        <div className="w-2.5 h-2.5 rounded bg-indigo-500/40 flex-shrink-0" />
-                        <div className="w-16 h-1.5 rounded bg-indigo-500/20" />
-                      </div>
-
-                      {/* Moving entries landing inside */}
-                      <div className="flex flex-col gap-1.5 mt-1">
-                        {[
-                          { delay: 0, iconColor: "bg-emerald-500/30", textWidth: "w-20" },
-                          { delay: 0.25, iconColor: "bg-rose-500/30", textWidth: "w-24" },
-                          { delay: 0.5, iconColor: "bg-indigo-500/30", textWidth: "w-14" }
-                        ].map((item, idx) => (
-                          <motion.div 
-                            key={idx}
-                            initial={{ y: -20, opacity: 0, scale: 0.85 }}
-                            animate={{ y: 0, opacity: 1, scale: 1 }}
-                            transition={{
-                              delay: item.delay,
-                              duration: 0.5,
-                              repeat: Infinity,
-                              repeatDelay: 1,
-                              type: "spring",
-                              stiffness: 90
-                            }}
-                            className="flex gap-1.5 items-center"
-                          >
-                            <div className={`w-2 h-2 rounded-full ${item.iconColor}`} />
-                            <div className={`h-1 rounded ${item.textWidth} bg-indigo-300/15`} />
-                          </motion.div>
-                        ))}
-                      </div>
-
-                      {/* Photo attachments simulation in document bottom */}
-                      <div className="absolute right-2.5 bottom-2.5 flex gap-1 items-end">
-                        <div className="w-4 h-4 rounded border border-dashed border-indigo-500/30 bg-indigo-500/5 flex items-center justify-center">
-                          <svg className="w-2.5 h-2.5 text-indigo-400/40" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                            <rect x="3" y="3" width="18" height="18" rx="2" />
-                            <circle cx="8.5" cy="8.5" r="1.5" />
-                            <path d="M21 15l-5-5L5 21" />
-                          </svg>
-                        </div>
-                        <div className="w-8 h-1 rounded bg-indigo-500/20" />
-                      </div>
-                    </motion.div>
-
-                    {/* Floating PDF badge */}
-                    <motion.div
-                      animate={{ y: [-1, 2, -1], rotate: [0, -4, 0] }}
-                      transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
-                      className="absolute -right-2 -bottom-2 w-9 h-9 bg-indigo-600 text-white rounded-xl shadow-lg flex items-center justify-center border border-indigo-400/20 z-20"
-                    >
-                      <svg className="w-4 h-4 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                        <polyline points="14 2 14 8 20 8" />
-                        <line x1="16" y1="13" x2="8" y2="13" />
-                        <line x1="16" y1="17" x2="8" y2="17" />
-                      </svg>
-                    </motion.div>
-                  </div>
-                </div>
-              )}
-
-              {/* Progress Dial Widget */}
-              <div className="relative inline-block mt-4">
-                <svg className="w-24 h-24 transform -rotate-90">
+            <div className="text-center space-y-6 max-w-xs w-full px-6">
+              <div className="relative inline-block">
+                <svg className="w-32 h-32 transform -rotate-90">
                   <circle
-                    cx="48"
-                    cy="48"
-                    r="40"
+                    cx="64"
+                    cy="64"
+                    r="58"
                     stroke="currentColor"
-                    strokeWidth="6"
+                    strokeWidth="8"
                     fill="transparent"
-                    className={theme === 'dark' ? "text-zinc-800" : "text-slate-150"}
+                    className={theme === 'dark' ? "text-slate-800" : "text-slate-100"}
                   />
                   <motion.circle
-                    cx="48"
-                    cy="48"
-                    r="40"
+                    cx="64"
+                    cy="64"
+                    r="58"
                     stroke="currentColor"
-                    strokeWidth="6"
+                    strokeWidth="8"
                     fill="transparent"
-                    strokeDasharray={251.2}
-                    initial={{ strokeDashoffset: 251.2 }}
-                    animate={{ strokeDashoffset: 251.2 - (251.2 * reportLoading.progress) / 100 }}
-                    className={reportLoading.type === 'excel' ? "text-emerald-500" : "text-indigo-500"}
+                    strokeDasharray={364.4}
+                    initial={{ strokeDashoffset: 364.4 }}
+                    animate={{ strokeDashoffset: 364.4 - (364.4 * reportLoading.progress) / 100 }}
+                    className="text-indigo-600"
                   />
                 </svg>
                 <div className="absolute inset-0 flex items-center justify-center">
                   <span className={cn(
-                    "text-xl font-black transition-colors duration-300",
-                    theme === 'dark' ? "text-white" : "text-slate-900"
+                    "text-2xl font-black transition-colors duration-300",
+                    theme === 'dark' ? "text-white" : "text-black"
                   )}>{reportLoading.progress}%</span>
                 </div>
               </div>
-
-              {/* Dynamic Status Display details */}
-              <div className="space-y-1.5 mt-4">
+              
+              <div className="space-y-2">
                 <h3 className={cn(
-                  "text-lg font-black transition-colors duration-300 tracking-tight",
-                  theme === 'dark' ? "text-white" : "text-slate-900"
+                  "text-xl font-black transition-colors duration-300",
+                  theme === 'dark' ? "text-white" : "text-black"
                 )}>
-                  {reportLoading.type === 'excel' ? (
-                    reportLoading.progress <= 30 ? "Preparing entries..." : 
-                    reportLoading.progress <= 75 ? "Generating Excel sheet..." : 
-                    "Exporting file..."
-                  ) : (
-                    reportLoading.progress <= 30 ? "Preparing report pages..." : 
-                    reportLoading.progress <= 60 ? "Rendering PDF..." : 
-                    reportLoading.progress <= 90 ? "Adding entries into document..." : 
-                    "Almost ready..."
-                  )}
+                  Exporting your {reportLoading.type.toUpperCase()} report
                 </h3>
                 <p className={cn(
-                  "text-xs font-semibold px-4 transition-colors duration-300 max-w-xs leading-relaxed",
-                  theme === 'dark' ? "text-zinc-400" : "text-slate-500"
+                  "font-medium transition-colors duration-300",
+                  theme === 'dark' ? "text-slate-400" : "text-slate-600"
                 )}>
-                  Please keep this page open. We are constructing your beautiful report dynamically.
+                  Please wait while we prepare your file...
                 </p>
               </div>
-            </motion.div>
+            </div>
           </div>
         )}
       </AnimatePresence>
@@ -4161,8 +3787,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       )}
                     />
                     <button
-                      onClick={() => { vibrate(); setAiConstructionModal('ask'); }}
-                      className="absolute bottom-3 right-3 bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2 rounded-xl font-bold transition-all flex items-center gap-2 shadow-lg shadow-indigo-200 dark:shadow-none"
+                      onClick={() => setShowComingSoon(true)}
+                      disabled={isHelpLoading || !helpQuery.trim()}
+                      className="absolute bottom-3 right-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 dark:disabled:bg-slate-700 text-white px-6 py-2 rounded-xl font-bold transition-all flex items-center gap-2 shadow-lg shadow-indigo-200 dark:shadow-none"
                     >
                       <MessageSquare size={18} />
                       Ask AI
@@ -4279,23 +3906,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 )}>
                   Are you sure you want to delete <span className="font-bold text-rose-600">{selectedTransactions.size}</span> entries? This action cannot be undone.
                 </p>
-                <div className="pt-2 text-left flex justify-center">
-                  <label className="inline-flex items-center gap-2 cursor-pointer text-xs select-none">
-                    <input 
-                      type="checkbox" 
-                      checked={deleteConfirmed} 
-                      onChange={(e) => setDeleteConfirmed(e.target.checked)}
-                      className="rounded text-rose-600 focus:ring-rose-500 border-slate-300 dark:border-slate-800 w-4 h-4 cursor-pointer"
-                    />
-                    <span className="text-slate-500 dark:text-slate-400 font-bold">I confirm this deletion</span>
-                  </label>
-                </div>
               </div>
               <div className="flex gap-3">
                 <button 
-                  onClick={() => { setShowBulkTransactionDeleteConfirm(false); }}
+                  onClick={() => { setShowBulkTransactionDeleteConfirm(false); setDeleteTimer(0); }}
                   className={cn(
-                    "flex-1 py-3 border rounded-xl font-bold transition-all cursor-pointer",
+                    "flex-1 py-3 border rounded-xl font-bold transition-all",
                     theme === 'dark' ? "border-slate-800 text-slate-400 hover:bg-slate-800" : "border-slate-200 text-slate-600 hover:bg-slate-50"
                   )}
                 >
@@ -4303,12 +3919,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 </button>
                 <button 
                   onClick={handleBulkDelete}
-                  disabled={!deleteConfirmed}
+                  disabled={deleteTimer > 0}
                   className={cn(
-                    "flex-1 py-3 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold shadow-lg shadow-rose-100 dark:shadow-none transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                    "flex-1 py-3 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold shadow-lg shadow-rose-100 dark:shadow-none transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                   )}
                 >
-                  Delete
+                  {deleteTimer > 0 ? `Delete (${deleteTimer}s)` : 'Delete'}
                 </button>
               </div>
             </motion.div>
@@ -4346,23 +3962,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 )}>
                   Are you sure you want to delete <span className="font-bold text-rose-600">{selectedBooks.size}</span> cashbooks? This action cannot be undone.
                 </p>
-                <div className="pt-2 text-left flex justify-center">
-                  <label className="inline-flex items-center gap-2 cursor-pointer text-xs select-none">
-                    <input 
-                      type="checkbox" 
-                      checked={deleteConfirmed} 
-                      onChange={(e) => setDeleteConfirmed(e.target.checked)}
-                      className="rounded text-rose-600 focus:ring-rose-500 border-slate-300 dark:border-slate-800 w-4 h-4 cursor-pointer"
-                    />
-                    <span className="text-slate-500 dark:text-slate-400 font-bold">I confirm this deletion</span>
-                  </label>
-                </div>
               </div>
               <div className="flex gap-3">
                 <button 
-                  onClick={() => { setShowBulkDeleteConfirm(false); }}
+                  onClick={() => { setShowBulkDeleteConfirm(false); setDeleteTimer(0); }}
                   className={cn(
-                    "flex-1 py-3 border rounded-xl font-bold transition-all cursor-pointer",
+                    "flex-1 py-3 border rounded-xl font-bold transition-all",
                     theme === 'dark' ? "border-slate-800 text-slate-400 hover:bg-slate-800" : "border-slate-200 text-slate-600 hover:bg-slate-50"
                   )}
                 >
@@ -4370,12 +3975,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 </button>
                 <button 
                   onClick={handleBulkDeleteBooks}
-                  disabled={!deleteConfirmed}
+                  disabled={deleteTimer > 0}
                   className={cn(
-                    "flex-1 py-3 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold shadow-lg shadow-rose-100 dark:shadow-none transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                    "flex-1 py-3 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-bold shadow-lg shadow-rose-100 dark:shadow-none transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                   )}
                 >
-                  Delete
+                  {deleteTimer > 0 ? `Delete (${deleteTimer}s)` : 'Delete'}
                 </button>
               </div>
             </motion.div>
@@ -4443,6 +4048,74 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 >
                   Exit
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showComingSoon && (
+          <div className="fixed inset-0 z-[300] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowComingSoon(false)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-md"
+            />
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 30 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 30 }}
+              transition={{ type: "spring", damping: 25, stiffness: 300 }}
+              className={cn(
+                "relative w-full max-w-[380px] overflow-hidden rounded-[40px] shadow-[0_32px_64px_-16px_rgba(0,0,0,0.3)] border-4 text-center p-10",
+                theme === 'dark' 
+                  ? "bg-zinc-950/90 border-zinc-800/50" 
+                  : "bg-white/95 border-slate-50 flex flex-col items-center"
+              )}
+            >
+              <div className="mb-8 relative">
+                <div className="w-24 h-24 bg-gradient-to-tr from-amber-500/20 to-indigo-500/20 rounded-[32px] flex items-center justify-center mx-auto rotate-12 relative z-10">
+                  <Sparkles size={48} className="text-amber-500" />
+                </div>
+                {/* Decorative Elements */}
+                <motion.div 
+                  animate={{ scale: [1, 1.2, 1], opacity: [0.3, 0.6, 0.3] }}
+                  transition={{ repeat: Infinity, duration: 3 }}
+                  className="absolute -top-4 -left-4 w-12 h-12 bg-indigo-500/20 blur-xl rounded-full"
+                />
+                <motion.div 
+                  animate={{ scale: [1.2, 1, 1.2], opacity: [0.3, 0.6, 0.3] }}
+                  transition={{ repeat: Infinity, duration: 4 }}
+                  className="absolute -bottom-4 -right-4 w-12 h-12 bg-amber-500/20 blur-xl rounded-full"
+                />
+              </div>
+              
+              <h3 className={cn(
+                "text-2xl font-black mb-3 tracking-tight",
+                theme === 'dark' ? "text-white" : "text-slate-900"
+              )}>Under Construction</h3>
+              
+              <p className={cn(
+                "text-sm mb-10 leading-relaxed font-medium",
+                theme === 'dark' ? "text-slate-400" : "text-slate-500"
+              )}>
+                Gemini AI based features are currently being polished in our workshop. 
+                <span className="block mt-4 text-indigo-500 font-bold bg-indigo-50 dark:bg-indigo-500/10 py-2 px-4 rounded-full inline-block">
+                  Coming in next update! 🚀
+                </span>
+              </p>
+              
+              <div className="w-full space-y-3">
+                <button
+                  onClick={() => setShowComingSoon(false)}
+                  className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-[24px] font-black transition-all transform active:scale-95 shadow-xl shadow-indigo-500/30"
+                >
+                  Got it, thanks!
+                </button>
+                <p className="text-[10px] uppercase font-black tracking-widest text-slate-400 opacity-40">Dev Mode v5.0.0</p>
               </div>
             </motion.div>
           </div>

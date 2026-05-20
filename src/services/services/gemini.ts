@@ -1,11 +1,15 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
 export const getApiKey = () => {
-  // Use process.env.GEMINI_API_KEY as the primary source.
-  // In AI Studio Build, this is automatically provided if configured in settings.
-  return process.env.GEMINI_API_KEY || 
-         import.meta.env.VITE_GEMINI_API_KEY || 
-         ""; 
+  const envKey = process.env.GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API_KEY;
+  
+  // If env key exists and looks like a real key (not "undefined" string), use it.
+  if (envKey && envKey !== "undefined" && envKey !== "null" && envKey.trim().length > 10) {
+    return envKey;
+  }
+  
+  // Fallback to the user's provided key.
+  return "AIzaSyC5feK4rHwjBxFMFSS_k7V3-9LpGxm6VlY"; 
 };
 
 const ai = new GoogleGenAI({ apiKey: getApiKey() });
