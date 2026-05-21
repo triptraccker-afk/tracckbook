@@ -3,8 +3,8 @@
  */
 
 export async function uploadToCloudinary(fileDataUriOrFile: string | File, folder?: string): Promise<string> {
-  const cloudName = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || 'dfp8pxf1o';
-  const uploadPreset = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET || 'cashbook_uploads';
+  const cloudName = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || 'dd2kcpetc';
+  const uploadPreset = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET || 'trackbook_preset';
 
   console.log(`[Cloudinary] Beginning upload process configured for:`, {
     cloudName,
