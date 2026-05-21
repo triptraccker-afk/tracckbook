@@ -29,3 +29,13 @@
     @apply w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-zinc-900 bg-white dark:bg-zinc-950 focus:ring-2 focus:ring-indigo-500 outline-none transition-all dark:text-white;
   }
 }
+
+@keyframes progressMoving {
+  0% { left: -40%; }
+  100% { left: 100%; }
+}
+
+.animate-progress-smooth {
+  animation: progressMoving 1.5s infinite ease-in-out;
+}
+

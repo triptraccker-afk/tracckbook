@@ -83,6 +83,60 @@ interface Cashbook {
   createdAt: Date;
 }
 
+// Compress image before client-side direct upload (limit max width/height to 1600px, quality 0.85)
+async function compressImage(file: File): Promise<Blob> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+        const maxWidth = 1600;
+
+        if (width > maxWidth) {
+          height = (height * maxWidth) / width;
+          width = maxWidth;
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, width, height);
+          canvas.toBlob((blob) => {
+            if (blob) {
+              resolve(blob);
+            } else {
+              resolve(file);
+            }
+          }, 'image/jpeg', 0.85);
+        } else {
+          resolve(file);
+        }
+      };
+      img.onerror = () => resolve(file);
+      img.src = event.target?.result as string;
+    };
+    reader.onerror = () => resolve(file);
+    reader.readAsDataURL(file);
+  });
+}
+
+// Generate lightweight thumbnail URL for Cloudinary images (w_200,q_auto,f_auto)
+function getCloudinaryThumbnail(url: string): string {
+  if (!url || typeof url !== 'string') return url;
+  if (url.startsWith('blob:')) return url; // Let blob URLs render directly
+  if (url.includes('res.cloudinary.com') && url.includes('/upload/')) {
+    if (!url.includes('/w_200')) {
+      return url.replace('/upload/', '/upload/w_200,q_auto,f_auto/');
+    }
+  }
+  return url;
+}
+
 export default function Dashboard({ session, theme, setTheme }: { session: any, theme: 'light' | 'dark', setTheme: React.Dispatch<React.SetStateAction<'light' | 'dark'>> }) {
   // Global State
   const [userName, setUserName] = useState('Siva');
@@ -132,6 +186,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [animatingDeleteId, setAnimatingDeleteId] = useState<string | null>(null);
   const [isEntriesLoading, setIsEntriesLoading] = useState(false);
   const [visibleCount, setVisibleCount] = useState(30);
+  const [uploadStatuses, setUploadStatuses] = useState<Record<string, {
+    status: 'uploading' | 'success' | 'failed';
+    error?: string;
+    progress?: number;
+  }>>({});
+  const imageFilesRef = useRef<Record<string, File>>({});
   const longPressTimer = useRef<NodeJS.Timeout | null>(null);
   const bookLongPressTimer = useRef<NodeJS.Timeout | null>(null);
   
@@ -832,6 +892,87 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     setShowBulkDeleteConfirm(false);
   };
 
+  const uploadSingleImageInBackground = async (blobUrl: string, transactionId: string, folderName: string) => {
+    const file = imageFilesRef.current[blobUrl];
+    if (!file) {
+      console.warn('[BackgroundUpload] No file found in registry for blobUrl:', blobUrl);
+      return;
+    }
+
+    setUploadStatuses(prev => ({
+      ...prev,
+      [blobUrl]: { status: 'uploading' }
+    }));
+
+    try {
+      // 1. Compress image in background
+      console.log('[BackgroundUpload] Compressing image...', file.name);
+      const compressedBlob = await compressImage(file);
+      const compressedFile = new File([compressedBlob], file.name || 'compressed.jpg', { type: 'image/jpeg' });
+
+      // 2. Upload to Cloudinary
+      console.log('[BackgroundUpload] Uploading compressed file to Cloudinary...', file.name);
+      const cloudUrl = await uploadToCloudinary(compressedFile, folderName);
+      console.log('[BackgroundUpload] Upload completed successfully:', cloudUrl);
+
+      // 3. Save into Supabase 'attachments' table permanently
+      if (supabase && session) {
+        console.log('[BackgroundUpload] Saving attachment metadata to database...', { transactionId, file_url: cloudUrl });
+        const { error: insertError } = await supabase
+          .from('attachments')
+          .insert([{
+            entry_id: transactionId,
+            user_id: session.user.id,
+            file_url: cloudUrl,
+            file_name: file.name || 'manual_upload',
+            file_type: 'image'
+          }]);
+        if (insertError) throw insertError;
+      }
+
+      // 4. Update local transaction images list: replace local blob URL with permanent Cloudinary URL
+      setBooks(prevBooks => prevBooks.map(b => {
+        if (b.id !== activeBookId) return b;
+        return {
+          ...b,
+          transactions: b.transactions.map(t => {
+            if (t.id !== transactionId) return t;
+            const updatedImages = (t.images || []).map(img => img === blobUrl ? cloudUrl : img);
+            return {
+              ...t,
+              images: updatedImages
+            };
+          })
+        };
+      }));
+
+      // Update status to success
+      setUploadStatuses(prev => ({
+        ...prev,
+        [blobUrl]: { status: 'success' }
+      }));
+
+      // Clean up the URL object reference
+      try {
+        URL.revokeObjectURL(blobUrl);
+      } catch (err) {}
+      delete imageFilesRef.current[blobUrl];
+
+    } catch (err: any) {
+      console.error('[BackgroundUpload] Failed to process background upload:', err);
+      setUploadStatuses(prev => ({
+        ...prev,
+        [blobUrl]: { status: 'failed', error: err.message || 'Upload failed' }
+      }));
+    }
+  };
+
+  const handleRetryUpload = (blobUrl: string, transactionId: string) => {
+    const userIdentifier = session?.user?.email || session?.user?.id || 'anonymous';
+    const cloudinaryFolder = `trackbook/${userIdentifier}`;
+    uploadSingleImageInBackground(blobUrl, transactionId, cloudinaryFolder);
+  };
+
   const handleAddTransaction = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeBookId || !showForm || !amount || !session) return;
@@ -849,26 +990,38 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
     try {
       if (editingTransaction) {
-        console.log('[handleAddTransaction] Mode: Editing existing transaction with ID:', editingTransaction.id);
-        
-        // 1. Process and upload photos to Cloudinary if they are new (base64)
-        const finalImageUrls: string[] = [];
-        for (const img of selectedImages) {
-          if (img.startsWith('data:')) {
-            console.log('[handleAddTransaction] Uploading new edit image to Cloudinary...');
-            try {
-              const cloudUrl = await uploadToCloudinary(img, cloudinaryFolder);
-              finalImageUrls.push(cloudUrl);
-            } catch (err: any) {
-              console.error('[handleAddTransaction] Cloudinary edit upload failed:', err);
-              throw new Error(`Cloudinary upload failed: ${err.message || err}`);
-            }
-          } else {
-            // Keep existing image as-is
-            finalImageUrls.push(img);
-          }
-        }
+        console.log('[handleAddTransaction] Optimistic Edit Mode for existing ID:', editingTransaction.id);
 
+        // Keep local state up-to-date instantly with current selectedImages which includes blob URLs for instant rendering.
+        const updatedTransaction: Transaction = {
+          ...editingTransaction,
+          amount: amountNum,
+          type: showForm,
+          description: description,
+          category: finalCategory || 'General',
+          mode: finalMode,
+          date: dateObj,
+          images: selectedImages,
+          imageLayout: imageLayout
+        };
+
+        // Update the books local cache state instantly
+        setBooks(prevBooks => prevBooks.map(b => 
+          b.id === activeBookId 
+            ? { 
+                ...b, 
+                transactions: b.transactions.map(t => t.id === editingTransaction.id ? updatedTransaction : t)
+              }
+            : b
+        ));
+
+        // Let form shut down instantly!
+        setShowForm(null);
+        setEditingTransaction(null);
+        resetForm();
+        setIsSubmitting(false);
+
+        // Run direct database updates on textual metadata in background
         if (supabase) {
           const payload: any = {
             amount: amountNum,
@@ -879,117 +1032,82 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             date: safeToISOString(dateObj)
           };
 
-          console.log('[handleAddTransaction] Saving entry updates in Supabase...');
-          // Update entry in Supabase
-          try {
-            const { error: entryError } = await supabase
-              .from('entries')
-              .update({ ...payload, image_layout: imageLayout })
-              .eq('id', editingTransaction.id)
-              .eq('user_id', session.user.id);
-            
-            if (entryError) {
-              // Check fallback if image_layout isn't defined
-              if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist')) {
-                console.warn('[handleAddTransaction] image_layout missing in schema, falling back to payload without it...');
-                const { error: retryError } = await supabase
-                  .from('entries')
-                  .update(payload)
-                  .eq('id', editingTransaction.id)
-                  .eq('user_id', session.user.id);
-                if (retryError) throw retryError;
-              } else {
-                throw entryError;
-              }
-            }
-          } catch (err: any) {
-            console.error('[handleAddTransaction] Supabase update entry SQL failure:', err);
-            throw new Error(`Database transaction update failed: ${err.message || err}`);
-          }
-
-          // Replace attachments in Supabase
-          try {
-            console.log('[handleAddTransaction] Replacing attachments array in supabase with size:', finalImageUrls.length);
-            const { error: deleteError } = await supabase
-              .from('attachments')
-              .delete()
-              .eq('entry_id', editingTransaction.id);
-            if (deleteError) {
-              console.error('[handleAddTransaction] Warning: attachment deletion error:', deleteError);
-            }
-
-            if (finalImageUrls.length > 0) {
-              const attachmentInserts = finalImageUrls.map(url => ({
-                entry_id: editingTransaction.id,
-                user_id: session.user.id,
-                file_url: url,
-                file_name: 'manual_upload',
-                file_type: 'image'
-              }));
-              const { error: insertError } = await supabase
-                .from('attachments')
-                .insert(attachmentInserts);
-              if (insertError) throw insertError;
-            }
-          } catch (err: any) {
-            console.error('[handleAddTransaction] Supabase attachments sync failure:', err);
-            throw new Error(`Database attachments sync failed: ${err.message || err}`);
-          }
-
-          // Fetch fresh updated state directly from Supabase before we close the form or update the UI!
-          console.log('[handleAddTransaction] Successfully saved to DB, starting data refetch...');
-          await fetchData();
-        } else {
-          // LocalStorage fallback
-          const updatedTransaction: Transaction = {
-            ...editingTransaction,
-            amount: amountNum,
-            type: showForm,
-            description: description,
-            category: finalCategory || 'General',
-            mode: finalMode,
-            date: dateObj,
-            images: finalImageUrls.length > 0 ? finalImageUrls : undefined,
-            imageLayout: imageLayout
-          };
-          setBooks(books.map(b => 
-            b.id === activeBookId 
-              ? { 
-                  ...b, 
-                  transactions: b.transactions.map(t => t.id === editingTransaction.id ? updatedTransaction : t)
+          (async () => {
+            try {
+              console.log('[BackgroundSave] Updating entry fields in Supabase...');
+              const { error: entryError } = await supabase
+                .from('entries')
+                .update({ ...payload, image_layout: imageLayout })
+                .eq('id', editingTransaction.id)
+                .eq('user_id', session.user.id);
+              
+              if (entryError) {
+                if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist')) {
+                  console.warn('[BackgroundSave] image_layout missing in schema, retrying text-only...');
+                  const { error: retryError } = await supabase
+                    .from('entries')
+                    .update(payload)
+                    .eq('id', editingTransaction.id)
+                    .eq('user_id', session.user.id);
+                  if (retryError) throw retryError;
+                } else {
+                  throw entryError;
                 }
-              : b
-          ));
+              }
+
+              // Remove from attachments table those that were removed in UI editor (images not present in selectedImages)
+              const keptImages = selectedImages.filter((img) => !img.startsWith('blob:') && !img.startsWith('data:'));
+              console.log('[BackgroundSave] Removing deleted attachments from database. Remaining Cloudinary count:', keptImages.length);
+              let deleteQuery = supabase.from('attachments').delete().eq('entry_id', editingTransaction.id);
+              if (keptImages.length > 0) {
+                deleteQuery = deleteQuery.not('file_url', 'in', `(${keptImages.map(x => `"${x}"`).join(',')})`);
+              }
+              const { error: deleteError } = await deleteQuery;
+              if (deleteError) {
+                console.error('[BackgroundSave] Warning: attachments sync error:', deleteError);
+              }
+
+              // Start background parallel upload triggers for newly added local blob URLs
+              const newBlobs = selectedImages.filter(img => img.startsWith('blob:'));
+              newBlobs.forEach(blobUrl => {
+                uploadSingleImageInBackground(blobUrl, editingTransaction.id, cloudinaryFolder);
+              });
+            } catch (err: any) {
+              console.error('[BackgroundSave] Supabase sync failure on edit:', err);
+            }
+          })();
         }
 
-        // Finish state reset and form closing
-        setShowForm(null);
-        setEditingTransaction(null);
-        resetForm();
-        setIsSubmitting(false);
-
       } else {
-        console.log('[handleAddTransaction] Mode: Creating standard transaction...');
+        console.log('[handleAddTransaction] Optimistic Creation Mode...');
         
         const tempId = safeUUID();
 
-        // 1. Process files upload to Cloudinary before database insertion
-        const finalImageUrls: string[] = [];
-        for (const img of selectedImages) {
-          if (img.startsWith('data:')) {
-            console.log('[handleAddTransaction] Uploading form image to Cloudinary...');
-            try {
-              const cloudUrl = await uploadToCloudinary(img, cloudinaryFolder);
-              finalImageUrls.push(cloudUrl);
-            } catch (err: any) {
-              console.error('[handleAddTransaction] Cloudinary add upload failed:', err);
-              throw new Error(`Cloudinary upload failed: ${err.message || err}`);
-            }
-          } else {
-            finalImageUrls.push(img);
-          }
-        }
+        // 1. Instantly render new row in client UI viewport (Optimistic Rendering)
+        const newTransaction: Transaction = {
+          id: tempId,
+          amount: amountNum,
+          type: showForm,
+          description: description,
+          category: finalCategory || 'General',
+          mode: finalMode,
+          date: dateObj,
+          images: selectedImages,
+          imageLayout: imageLayout
+        };
 
+        setBooks(prevBooks => prevBooks.map(b => 
+          b.id === activeBookId 
+            ? { ...b, transactions: [newTransaction, ...b.transactions] }
+            : b
+        ));
+
+        // Shutdown popup form immediately, giving an incredibly fast, instant UI visual feel!
+        setShowForm(null);
+        resetForm();
+        setIsSubmitting(false);
+
+        // 2. Perform background DB core insertion & attachments pipeline
         if (supabase) {
           const payload: any = {
             id: tempId,
@@ -1003,80 +1121,48 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             date: safeToISOString(dateObj)
           };
 
-          console.log('[handleAddTransaction] Writing new transaction entry into Supabase:', { id: tempId });
-          // Insert entry in Supabase
-          try {
-            const { error: entryError } = await supabase
-              .from('entries')
-              .insert([{ ...payload, image_layout: imageLayout }]);
-            
-            if (entryError) {
-              if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist')) {
-                console.warn('[handleAddTransaction] image_layout missing in schema, falling back to payload...');
-                const { error: retryError } = await supabase
-                  .from('entries')
-                  .insert([payload]);
-                if (retryError) throw retryError;
-              } else {
-                throw entryError;
-              }
-            }
-          } catch (err: any) {
-            console.error('[handleAddTransaction] Supabase insert entry SQL failure:', err);
-            throw new Error(`Database entry insertion failed: ${err.message || err}`);
-          }
-
-          // Insert attachments in Supabase
-          if (finalImageUrls.length > 0) {
-            console.log('[handleAddTransaction] Saving entry image attachments rows to Supabase...');
+          (async () => {
             try {
-              const attachmentInserts = finalImageUrls.map(url => ({
-                entry_id: tempId,
-                user_id: session.user.id,
-                file_url: url,
-                file_name: 'manual_upload',
-                file_type: 'image'
-              }));
-              const { error: insertError } = await supabase
-                .from('attachments')
-                .insert(attachmentInserts);
-              if (insertError) throw insertError;
+              console.log('[BackgroundSave] Inserting new entry core into Supabase:', tempId);
+              const { error: entryError } = await supabase
+                .from('entries')
+                .insert([{ ...payload, image_layout: imageLayout }]);
+              
+              if (entryError) {
+                if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist')) {
+                  console.warn('[BackgroundSave] image_layout missing in schema, falling back to schema fields only...');
+                  const { error: retryError } = await supabase
+                    .from('entries')
+                    .insert([payload]);
+                  if (retryError) throw retryError;
+                } else {
+                  throw entryError;
+                }
+              }
+
+              // Start parallel background upload tasks for selected local blob images
+              const newBlobs = selectedImages.filter(img => img.startsWith('blob:'));
+              newBlobs.forEach(blobUrl => {
+                uploadSingleImageInBackground(blobUrl, tempId, cloudinaryFolder);
+              });
             } catch (err: any) {
-              console.error('[handleAddTransaction] Supabase attachments insert SQL failure:', err);
-              throw new Error(`Database attachments insertion failed: ${err.message || err}`);
+              console.error('[BackgroundSave] Supabase insert transaction background sync failure:', err);
             }
-          }
-
-          // Fetch fresh verified state directly from Supabase before closing the form!
-          console.log('[handleAddTransaction] Successfully saved new entry to DB, re-fetching...');
-          await fetchData();
+          })();
         } else {
-          // LocalStorage fallback
-          const newTransaction: Transaction = {
-            id: tempId,
-            amount: amountNum,
-            type: showForm,
-            description: description,
-            category: finalCategory || 'General',
-            mode: finalMode,
-            date: dateObj,
-            images: finalImageUrls.length > 0 ? finalImageUrls : undefined,
-            imageLayout: imageLayout
-          };
-          setBooks(books.map(b => 
-            b.id === activeBookId 
-              ? { ...b, transactions: [newTransaction, ...b.transactions] }
-              : b
-          ));
+          // If no Supabase (offline/localStorage mode), clean cache
+          selectedImages.forEach(blobUrl => {
+            if (blobUrl.startsWith('blob:')) {
+              try {
+                URL.revokeObjectURL(blobUrl);
+              } catch (e) {}
+              delete imageFilesRef.current[blobUrl];
+            }
+          });
         }
-
-        // Reset and close form
-        setShowForm(null);
-        resetForm();
-        setIsSubmitting(false);
       }
     } catch (error: any) {
-      console.error('[handleAddTransaction] Error in transaction submission timeline:', error);
+      console.error('[handleAddTransaction] Error in optimistic transaction flow:', error);
       setError(error.message || 'Transaction submission failed');
       setIsSubmitting(false);
     }
@@ -1210,15 +1296,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     const filesArray = Array.from(files).slice(0, 5 - selectedImages.length) as File[];
 
     filesArray.forEach(file => {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        newImages.push(reader.result as string);
-        if (newImages.length === filesArray.length + selectedImages.length) {
-          setSelectedImages(newImages);
-        }
-      };
-      reader.readAsDataURL(file);
+      const blobUrl = URL.createObjectURL(file);
+      imageFilesRef.current[blobUrl] = file;
+      newImages.push(blobUrl);
     });
+
+    setSelectedImages(newImages);
   };
 
   const exportToExcel = async () => {
@@ -2108,10 +2191,20 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -20 }}
-              className="w-full space-y-4 sm:space-y-6 pb-24 sm:pb-0"
+              className="w-full space-y-4 sm:space-y-6 pb-[180px] lg:pb-0"
             >
-              {/* Header Actions */}
-              <div className="flex items-center justify-between">
+              {/* STICKY TOP CONTROLS SECTION */}
+              <div className={cn(
+                "lg:sticky lg:top-0 z-30 transition-colors duration-300 border-b",
+                "-mt-2 pt-2 -mx-2 px-2 pb-3 mb-2",
+                "sm:-mt-4 sm:pt-4 sm:-mx-4 sm:px-4 sm:pb-4 sm:mb-4",
+                "lg:-mt-6 lg:pt-6 lg:-mx-6 lg:px-6 lg:pb-5 lg:mb-5",
+                "xl:-mx-10 xl:px-10",
+                "space-y-2.5 sm:space-y-4 shadow-sm",
+                theme === 'dark' ? "bg-black/95 backdrop-blur-md border-zinc-900" : "bg-slate-50/95 backdrop-blur-md border-slate-200"
+              )}>
+                {/* Header Actions */}
+                <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 sm:gap-4">
                   <button 
                     onClick={() => setActiveBookId(null)}
@@ -2169,31 +2262,31 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
               {/* Mobile Summary Card (Reference Image Style) */}
               <div className={cn(
-                "sm:hidden rounded-3xl border shadow-sm overflow-hidden transition-colors duration-300",
+                "sm:hidden rounded-2xl border shadow-sm overflow-hidden transition-colors duration-300",
                 theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-100"
               )}>
-                <div className="p-5 space-y-4">
+                <div className="p-3 px-4 space-y-2.5">
                   <div className="flex items-center justify-between">
                     <h3 className={cn(
-                      "text-lg font-bold transition-colors duration-300",
+                      "text-sm font-bold transition-colors duration-300",
                       theme === 'dark' ? "text-slate-100" : "text-black"
                     )}>Net Balance</h3>
                     <p className={cn(
                       "font-black transition-colors duration-300",
                       theme === 'dark' ? "text-slate-100" : "text-black",
-                      "text-lg"
+                      "text-sm"
                     )}>
                       {formatCurrency(totals.net)}
                     </p>
                   </div>
                   
                   <div className={cn(
-                    "space-y-2 pt-2 border-t transition-colors duration-300",
+                    "space-y-1.5 pt-1.5 border-t transition-colors duration-300",
                     theme === 'dark' ? "border-zinc-800" : "border-slate-50"
                   )}>
                     <div className="flex items-center justify-between">
                       <p className={cn(
-                        "text-sm font-bold transition-colors duration-300",
+                        "text-xs font-bold transition-colors duration-300",
                         theme === 'dark' ? "text-slate-400" : "text-slate-500"
                       )}>Total In (+)</p>
                       <p className={cn(
@@ -2203,7 +2296,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     </div>
                     <div className="flex items-center justify-between">
                       <p className={cn(
-                        "text-sm font-bold transition-colors duration-300",
+                        "text-xs font-bold transition-colors duration-300",
                         theme === 'dark' ? "text-slate-400" : "text-slate-500"
                       )}>Total Out (-)</p>
                       <p className={cn(
@@ -2325,7 +2418,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     value={transactionSearchQuery}
                     onChange={(e) => setTransactionSearchQuery(e.target.value)}
                     className={cn(
-                      "w-full pl-10 pr-4 py-2.5 sm:py-3 border rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-sm",
+                      "w-full pl-10 pr-4 py-2 sm:py-3 border rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-sm",
                       theme === 'dark' ? "bg-zinc-900 border-zinc-800 text-slate-100" : "bg-white border-slate-200 text-black"
                     )}
                   />
@@ -2334,7 +2427,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   <button
                     onClick={toggleSelectAll}
                     className={cn(
-                      "hidden lg:flex items-center gap-2 px-4 py-2.5 sm:py-3 rounded-xl font-bold transition-all text-[10px] sm:text-sm whitespace-nowrap cursor-pointer",
+                      "hidden lg:flex items-center gap-2 px-4 py-2 sm:py-3 rounded-xl font-bold transition-all text-[10px] sm:text-sm whitespace-nowrap cursor-pointer",
                       selectedTransactions.size === filteredTransactions.length && filteredTransactions.length > 0
                         ? (theme === 'dark' ? "bg-indigo-600 text-white shadow-none" : "bg-indigo-600 text-white shadow-lg shadow-indigo-100")
                         : theme === 'dark' ? "bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800" : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
@@ -2347,7 +2440,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     <button
                       onClick={() => { setShowBulkTransactionDeleteConfirm(true); setDeleteConfirmed(false); }}
                       className={cn(
-                        "flex items-center gap-2 px-4 py-2.5 sm:py-3 bg-rose-600 text-white rounded-xl font-bold hover:bg-rose-700 transition-all whitespace-nowrap text-xs sm:text-sm",
+                        "flex items-center gap-2 px-4 py-2 sm:py-3 bg-rose-600 text-white rounded-xl font-bold hover:bg-rose-700 transition-all whitespace-nowrap text-xs sm:text-sm",
                         theme === 'dark' ? "shadow-none" : "shadow-lg shadow-rose-100"
                       )}
                     >
@@ -2360,7 +2453,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       value={transactionTypeFilter}
                       onChange={(e) => setTransactionTypeFilter(e.target.value as any)}
                       className={cn(
-                        "w-full pl-3 sm:pl-4 pr-8 sm:pr-10 py-2.5 sm:py-3 border rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-[10px] sm:text-sm font-bold appearance-none",
+                        "w-full pl-3 sm:pl-4 pr-8 sm:pr-10 py-2 sm:py-3 border rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-[10px] sm:text-sm font-bold appearance-none",
                         theme === 'dark' ? "bg-slate-900 border-slate-800 text-white" : "bg-white border-slate-200 text-black"
                       )}
                     >
@@ -2375,7 +2468,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       value={transactionDurationFilter}
                       onChange={(e) => setTransactionDurationFilter(e.target.value)}
                       className={cn(
-                        "w-full pl-3 sm:pl-4 pr-8 sm:pr-10 py-2.5 sm:py-3 border rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-[10px] sm:text-sm font-bold appearance-none",
+                        "w-full pl-3 sm:pl-4 pr-8 sm:pr-10 py-2 sm:py-3 border rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-[10px] sm:text-sm font-bold appearance-none",
                         theme === 'dark' ? "bg-slate-900 border-slate-800 text-white" : "bg-white border-slate-200 text-black"
                       )}
                     >
@@ -2460,6 +2553,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   </div>
                 </div>
               </div>
+              </div> {/* Close STICKY TOP CONTROLS SECTION */}
 
               {/* Transaction List Section */}
               <div className="space-y-4">
@@ -2601,24 +2695,70 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                                   theme === 'dark' ? "border-slate-800" : "border-slate-50"
                                 )}>
                                   <div className="flex items-center gap-2">
-                                    {t.images && t.images.length > 0 ? (
-                                      <button 
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          setPreviewImages(t.images!);
-                                          setPreviewIndex(0);
-                                          setPreviewRotation(0);
-                                          setPreviewZoom(1);
-                                        }}
-                                        className={cn(
-                                          "flex items-center gap-1 transition-colors duration-300",
-                                          theme === 'dark' ? "text-indigo-400" : "text-indigo-600"
-                                        )}
-                                      >
-                                        <Paperclip size={10} />
-                                        <span className="text-[8px] font-bold">{t.images.length}</span>
-                                      </button>
-                                    ) : (
+                                    {t.images && t.images.length > 0 ? (() => {
+                                      const isUploading = t.images.some(img => {
+                                        const status = uploadStatuses[img]?.status;
+                                        return status === 'uploading' || (img.startsWith('blob:') && status !== 'failed' && status !== 'success');
+                                      });
+                                      
+                                      const isFailed = t.images.some(img => uploadStatuses[img]?.status === 'failed');
+                                      
+                                      return (
+                                        <div className="relative inline-block group/mobile-attach py-1">
+                                          {isFailed ? (
+                                            <button 
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                t.images!.forEach(img => {
+                                                  if (uploadStatuses[img]?.status === 'failed') {
+                                                    handleRetryUpload(img, t.id);
+                                                  }
+                                                });
+                                              }}
+                                              className="flex items-center gap-1 text-[8px] font-black tracking-wider text-rose-500 hover:text-rose-600 transition-colors cursor-pointer"
+                                            >
+                                              <RotateCw size={8} className="animate-pulse" />
+                                              <span>RETRY UPLOAD</span>
+                                            </button>
+                                          ) : (
+                                            <button 
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                if (!isUploading) {
+                                                  setPreviewImages(t.images!);
+                                                  setPreviewIndex(0);
+                                                  setPreviewRotation(0);
+                                                  setPreviewZoom(1);
+                                                }
+                                              }}
+                                              disabled={isUploading}
+                                              className={cn(
+                                                "flex items-center gap-1 transition-colors duration-300 text-[8px] font-bold cursor-pointer",
+                                                isUploading 
+                                                  ? "text-emerald-500 dark:text-emerald-400 animate-pulse pointer-events-none" 
+                                                  : (theme === 'dark' ? "text-indigo-400 hover:text-indigo-300" : "text-indigo-600 hover:text-indigo-700")
+                                              )}
+                                            >
+                                              <Paperclip size={9} className={isUploading ? "animate-bounce" : ""} />
+                                              <span>
+                                                {isUploading 
+                                                  ? "Syncing attachments..." 
+                                                  : `${t.images.length} ${t.images.length === 1 ? 'Attachment' : 'Attachments'}`}
+                                              </span>
+                                            </button>
+                                          )}
+                                          
+                                          {/* Animated progress bar underneath the link */}
+                                          {isUploading && (
+                                            <div className="absolute left-0 right-0 bottom-0 h-[1.5px] bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden mt-0.5">
+                                              <div className="absolute top-0 bottom-0 w-[40%] bg-emerald-500 rounded-full animate-progress-smooth" />
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })() : (
                                       <div className={cn(
                                         "flex items-center gap-1 transition-colors duration-300",
                                         theme === 'dark' ? "text-slate-700" : "text-slate-200"
@@ -2851,23 +2991,79 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                                     )}>{t.mode}</p>
                                   </td>
                                   <td className="px-3 sm:px-6 py-4 whitespace-nowrap">
-                                    {t.images && t.images.length > 0 ? (
-                                      <button 
-                                        onClick={() => {
-                                          setPreviewImages(t.images!);
-                                          setPreviewIndex(0);
-                                          setPreviewRotation(0);
-                                          setPreviewZoom(1);
-                                        }}
-                                        className="flex items-center gap-2 text-slate-500 hover:text-indigo-600 transition-colors group/bill cursor-pointer"
-                                      >
-                                        <Paperclip size={16} />
-                                        <div className="text-left">
-                                          <p className="text-[10px] font-black leading-none">{t.images.length}</p>
-                                          <p className="text-[10px] font-bold text-slate-400 group-hover/bill:text-indigo-400">Attachments</p>
+                                    {t.images && t.images.length > 0 ? (() => {
+                                      const isUploading = t.images.some(img => {
+                                        const status = uploadStatuses[img]?.status;
+                                        return status === 'uploading' || (img.startsWith('blob:') && status !== 'failed' && status !== 'success');
+                                      });
+                                      
+                                      const isFailed = t.images.some(img => uploadStatuses[img]?.status === 'failed');
+                                      
+                                      return (
+                                        <div className="relative inline-block group/desktop-attach py-1">
+                                          {isFailed ? (
+                                            <button 
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                t.images!.forEach(img => {
+                                                  if (uploadStatuses[img]?.status === 'failed') {
+                                                    handleRetryUpload(img, t.id);
+                                                  }
+                                                });
+                                              }}
+                                              className="flex items-center gap-1.5 text-[10px] font-black tracking-wider text-rose-500 hover:text-rose-600 transition-colors cursor-pointer"
+                                            >
+                                              <RotateCw size={11} className="animate-pulse" />
+                                              <div className="text-left">
+                                                <p className="text-[10px] font-black leading-none">RETRY UPLOAD</p>
+                                                <p className="text-[8px] font-bold text-rose-400 mt-0.5">Some uploads failed</p>
+                                              </div>
+                                            </button>
+                                          ) : (
+                                            <button 
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                if (!isUploading) {
+                                                  setPreviewImages(t.images!);
+                                                  setPreviewIndex(0);
+                                                  setPreviewRotation(0);
+                                                  setPreviewZoom(1);
+                                                }
+                                              }}
+                                              disabled={isUploading}
+                                              className={cn(
+                                                "flex items-center gap-2 text-left transition-all cursor-pointer group/bill",
+                                                isUploading 
+                                                  ? "text-emerald-500 dark:text-emerald-400 animate-pulse pointer-events-none" 
+                                                  : "text-slate-500 hover:text-indigo-600"
+                                              )}
+                                            >
+                                              <Paperclip size={14} className={isUploading ? "animate-bounce" : ""} />
+                                              <div className="text-left">
+                                                <p className="text-[10px] font-black leading-none">
+                                                  {isUploading ? "Syncing..." : t.images.length}
+                                                </p>
+                                                <p className={cn(
+                                                  "text-[10px] font-bold transition-colors mt-0.5",
+                                                  isUploading ? "text-emerald-400" : "text-slate-400 group-hover/bill:text-indigo-400"
+                                                )}>
+                                                  {isUploading ? "Uploading attachments..." : `${t.images.length === 1 ? 'Attachment' : 'Attachments'}`}
+                                                </p>
+                                              </div>
+                                            </button>
+                                          )}
+                                          
+                                          {/* Animated progress bar underneath the link */}
+                                          {isUploading && (
+                                            <div className="absolute left-0 right-0 bottom-0 h-[2px] bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden mt-1">
+                                              <div className="absolute top-0 bottom-0 w-[40%] bg-emerald-500 rounded-full animate-progress-smooth" />
+                                            </div>
+                                          )}
                                         </div>
-                                      </button>
-                                    ) : null}
+                                      );
+                                    })() : null}
                                   </td>
                                   <td className={cn(
                                     "px-3 sm:px-6 py-4 text-right font-black whitespace-nowrap tabular-nums",
