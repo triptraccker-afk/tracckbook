@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef, useMemo, useEffect } from 'react';
+import React, { useState, useRef, useMemo, useEffect, useCallback } from 'react';
 import { 
   Plus, 
   Minus, 
@@ -57,6 +57,7 @@ import ReactMarkdown from 'react-markdown';
 import { cn, formatCurrency, vibrate } from '../lib/utils';
 import { parseReceipt, parseMultipleReceipts, getApiKey } from '../services/gemini';
 import { supabase } from '../lib/supabase';
+import { uploadToCloudinary } from '../services/cloudinary';
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -129,6 +130,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [showExitConfirm, setShowExitConfirm] = useState(false);
   const [deleteConfirmed, setDeleteConfirmed] = useState(false);
   const [animatingDeleteId, setAnimatingDeleteId] = useState<string | null>(null);
+  const [isEntriesLoading, setIsEntriesLoading] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(30);
   const longPressTimer = useRef<NodeJS.Timeout | null>(null);
   const bookLongPressTimer = useRef<NodeJS.Timeout | null>(null);
   
@@ -404,74 +407,165 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     }
   }, [session]);
 
-  // Fetch data from Supabase
+  // Pre-load from localStorage cache on mount/session ready to render UI instantly!
   useEffect(() => {
-    const fetchData = async () => {
-      if (!session) {
-        setBooks([]);
-        setIsLoading(false);
-        return;
+    if (session) {
+      const savedBooks = localStorage.getItem(`cashbooks_${session.user.id}`);
+      if (savedBooks) {
+        try {
+          const parsed = JSON.parse(savedBooks);
+          setBooks(parsed.map((b: any) => ({
+            ...b,
+            transactions: (b.transactions || []).map((t: any) => ({
+              ...t,
+              date: new Date(t.date),
+              images: t.images || []
+            })),
+            createdAt: new Date(b.created_at || b.createdAt)
+          })));
+        } catch (e) {
+          console.error('Error pre-loading from cache:', e);
+        }
       }
+      setIsLoading(false); // Enable immediate frame rendering!
+    }
+  }, [session]);
 
-      if (!supabase) {
-        // Load from localStorage if Supabase is not configured
-        const savedBooks = localStorage.getItem(`cashbooks_${session.user.id}`);
-        if (savedBooks) {
-          try {
-            const parsed = JSON.parse(savedBooks);
-            setBooks(parsed.map((b: any) => ({
-              ...b,
-              transactions: (b.transactions || []).map((t: any) => ({
-                ...t,
-                date: new Date(t.date)
-              })),
-              createdAt: new Date(b.createdAt)
-            })));
-          } catch (e) {
-            console.error('Error parsing saved books:', e);
+  // Stable component-level data fetch and sync function
+  const fetchData = useCallback(async () => {
+    if (!session) {
+      setBooks([]);
+      setIsLoading(false);
+      return;
+    }
+
+    if (!supabase) {
+      return;
+    }
+
+    try {
+      if (activeBookId) {
+        setIsEntriesLoading(true);
+      }
+      console.log('[fetchData] Refreshing books from Supabase...');
+      const { data: cashbooks, error: cbError } = await supabase
+        .from('cashbooks')
+        .select('id, name, created_at, user_id')
+        .eq('user_id', session.user.id);
+
+      if (cbError) throw cbError;
+
+      if (cashbooks) {
+        let activeBookEntries: any[] = [];
+        if (activeBookId) {
+          console.log('[fetchData] Fetching required columns for active book:', activeBookId);
+          const { data: entries, error: entError } = await supabase
+            .from('entries')
+            .select('id, amount, type, description, category, mode, date, image_layout, cashbook_id, user_id')
+            .eq('cashbook_id', activeBookId)
+            .eq('user_id', session.user.id)
+            .order('date', { ascending: false });
+
+          if (entError) throw entError;
+          if (entries) {
+            activeBookEntries = entries;
           }
         }
-        setIsLoading(false);
-        return;
-      }
 
-      try {
-        const { data: cashbooks, error: cbError } = await supabase
-          .from('cashbooks')
-          .select('*, entries(*, attachments(*), ai_attachments(*))')
-          .eq('user_id', session.user.id);
+        setBooks(prevBooks => {
+          // Keep loaded images/attachments mapping to prevent flashing and re-loading
+          const existingBook = prevBooks.find(b => b.id === activeBookId);
+          const existingImagesMap = new Map<string, { images: string[], isAi: boolean }>();
+          if (existingBook?.transactions) {
+            existingBook.transactions.forEach((t: any) => {
+              if (t.images && t.images.length > 0) {
+                existingImagesMap.set(t.id, { images: t.images, isAi: !!t.isAi });
+              }
+            });
+          }
 
-        if (cbError) throw cbError;
+          return cashbooks.map((cb: any) => {
+            const isCurrentActive = cb.id === activeBookId;
+            const entriesToUse = isCurrentActive ? activeBookEntries : [];
+            
+            return {
+              ...cb,
+              transactions: entriesToUse.map((t: any) => {
+                const existing = existingImagesMap.get(t.id);
+                return {
+                  ...t,
+                  date: t.date ? new Date(t.date) : new Date(),
+                  images: existing ? existing.images : [],
+                  imageLayout: t.image_layout || 'split',
+                  isAi: existing ? existing.isAi : false
+                };
+              }),
+              createdAt: cb.created_at ? new Date(cb.created_at) : (cb.createdAt ? new Date(cb.createdAt) : new Date())
+            };
+          });
+        });
 
-        if (cashbooks) {
-          setBooks(cashbooks.map((cb: any) => ({
-            ...cb,
-            transactions: (cb.entries || []).map((t: any) => {
-              // Combine manual and AI attachments for the UI
-              const manualImgs = (t.attachments || []).map((a: any) => a.file_url);
-              const aiImgs = (t.ai_attachments || []).map((a: any) => a.file_url);
-              
-              return {
-                ...t,
-                date: t.date ? new Date(t.date) : new Date(),
-                images: [...manualImgs, ...aiImgs],
-                imageLayout: t.image_layout || 'split',
-                isAi: aiImgs.length > 0
-              };
-            }).sort((a: any, b: any) => b.date.getTime() - a.date.getTime()),
-            createdAt: cb.created_at ? new Date(cb.created_at) : (cb.createdAt ? new Date(cb.createdAt) : new Date())
-          })));
+        // Progressive, asynchronous lazy-loading of attachments to keep page responsive
+        if (activeBookId && activeBookEntries && activeBookEntries.length > 0) {
+          const entryIds = activeBookEntries.map(e => e.id);
+          
+          (async () => {
+            try {
+              const [attachmentsRes, aiAttachmentsRes] = await Promise.all([
+                supabase.from('attachments').select('entry_id, file_url').in('entry_id', entryIds),
+                supabase.from('ai_attachments').select('entry_id, file_url').in('entry_id', entryIds)
+              ]);
+
+              const attachments = attachmentsRes.data || [];
+              const aiAttachments = aiAttachmentsRes.data || [];
+
+              const manualMap = new Map<string, string[]>();
+              attachments.forEach((a: any) => {
+                const list = manualMap.get(a.entry_id) || [];
+                list.push(a.file_url);
+                manualMap.set(a.entry_id, list);
+              });
+
+              const aiMap = new Map<string, string[]>();
+              aiAttachments.forEach((a: any) => {
+                const list = aiMap.get(a.entry_id) || [];
+                list.push(a.file_url);
+                aiMap.set(a.entry_id, list);
+              });
+
+              setBooks(prevBooks => prevBooks.map(b => b.id === activeBookId ? {
+                ...b,
+                transactions: b.transactions.map((t: any) => {
+                  const manualImgs = (manualMap.get(t.id) || []).slice(0, 20);
+                  const aiImgs = (aiMap.get(t.id) || []).slice(0, 20);
+                  return {
+                    ...t,
+                    images: [...manualImgs, ...aiImgs],
+                    isAi: aiImgs.length > 0
+                  };
+                })
+              } : b));
+            } catch (err) {
+              console.error('[fetchData] Background images lazy-fetch error:', err);
+            }
+          })();
         }
-      } catch (error: any) {
-        console.error('Error fetching data from Supabase:', error);
-        setError(error.message || 'Failed to fetch data');
-      } finally {
-        setIsLoading(false);
-      }
-    };
 
+        console.log('[fetchData] Refresh completed loaded. Books count:', cashbooks.length);
+      }
+    } catch (error: any) {
+      console.error('Error fetching data from Supabase:', error);
+      setError(error.message || 'Failed to fetch data');
+    } finally {
+      setIsLoading(false);
+      setIsEntriesLoading(false);
+    }
+  }, [session, activeBookId]);
+
+  // Fetch data from Supabase init
+  useEffect(() => {
     fetchData();
-  }, [session]);
+  }, [session, fetchData]);
 
   // Save to localStorage as fallback (without heavy images to avoid quota errors)
   useEffect(() => {
@@ -579,6 +673,28 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       return sortDirection === 'asc' ? comparison : -comparison;
     });
   }, [activeBook, transactionSearchQuery, transactionTypeFilter, transactionCategoryFilter, transactionDurationFilter, sortColumn, sortDirection]);
+
+  // Reset visibleCount whenever the selected book or filters change to keep viewport neat and clean
+  useEffect(() => {
+    setVisibleCount(30);
+  }, [activeBookId, transactionSearchQuery, transactionTypeFilter, transactionCategoryFilter, transactionDurationFilter]);
+
+  // Pre-calculate running balances for transaction list items in a single O(N) pass instead of O(N^2)
+  const runningBalancesMap = useMemo(() => {
+    const map = new Map<string, number>();
+    let current = 0;
+    for (let i = 0; i < filteredTransactions.length; i++) {
+      const t = filteredTransactions[i];
+      current += (t.type === 'in' ? t.amount : -t.amount);
+      map.set(t.id, current);
+    }
+    return map;
+  }, [filteredTransactions]);
+
+  // Sliced set of transactions currently visible in the UI viewport
+  const pagedTransactions = useMemo(() => {
+    return filteredTransactions.slice(0, visibleCount);
+  }, [filteredTransactions, visibleCount]);
 
   const handleCreateBook = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -725,180 +841,245 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     const amountNum = parseFloat(amount);
     const dateObj = new Date(transactionDate);
 
-    if (editingTransaction) {
-      // Optimistic update for editing
-      const updatedTransaction: Transaction = {
-        ...editingTransaction,
-        amount: amountNum,
-        type: showForm,
-        description: description,
-        category: finalCategory || 'General',
-        mode: finalMode,
-        date: dateObj,
-        images: selectedImages.length > 0 ? selectedImages : editingTransaction.images,
-        imageLayout: imageLayout
-      };
+    setIsSubmitting(true);
+    setError(null);
 
-      setBooks(books.map(b => 
-        b.id === activeBookId 
-          ? { 
-              ...b, 
-              transactions: b.transactions.map(t => t.id === editingTransaction.id ? updatedTransaction : t)
-            }
-          : b
-      ));
+    const userIdentifier = session?.user?.email || session?.user?.id || 'anonymous';
+    const cloudinaryFolder = `trackbook/${userIdentifier}`;
 
-      // Close form immediately for speed
-      setShowForm(null);
-      setEditingTransaction(null);
-      setIsSubmitting(false);
-
-      if (supabase) {
-        // Run database update in background
-        (async () => {
-          try {
-            const payload: any = {
-                amount: amountNum,
-                type: showForm,
-                description: description,
-                category: finalCategory || 'General',
-                mode: finalMode,
-                date: safeToISOString(dateObj)
-            };
-
+    try {
+      if (editingTransaction) {
+        console.log('[handleAddTransaction] Mode: Editing existing transaction with ID:', editingTransaction.id);
+        
+        // 1. Process and upload photos to Cloudinary if they are new (base64)
+        const finalImageUrls: string[] = [];
+        for (const img of selectedImages) {
+          if (img.startsWith('data:')) {
+            console.log('[handleAddTransaction] Uploading new edit image to Cloudinary...');
             try {
-              // Try with image_layout first
-              const { error } = await supabase
-                .from('entries')
-                .update({ ...payload, image_layout: imageLayout })
-                .eq('id', editingTransaction.id)
-                .eq('user_id', session.user.id);
-              
-              if (error) {
-                // Check if it's a column missing error
-                if (error.code === '42703' || error.message?.includes('column "image_layout" does not exist')) {
-                  console.warn('Supabase: column "image_layout" missing, retrying without it...');
-                  const { error: retryError } = await supabase
-                    .from('entries')
-                    .update(payload)
-                    .eq('id', editingTransaction.id)
-                    .eq('user_id', session.user.id);
-                  if (retryError) throw retryError;
-                } else {
-                  throw error;
-                }
+              const cloudUrl = await uploadToCloudinary(img, cloudinaryFolder);
+              finalImageUrls.push(cloudUrl);
+            } catch (err: any) {
+              console.error('[handleAddTransaction] Cloudinary edit upload failed:', err);
+              throw new Error(`Cloudinary upload failed: ${err.message || err}`);
+            }
+          } else {
+            // Keep existing image as-is
+            finalImageUrls.push(img);
+          }
+        }
+
+        if (supabase) {
+          const payload: any = {
+            amount: amountNum,
+            type: showForm,
+            description: description,
+            category: finalCategory || 'General',
+            mode: finalMode,
+            date: safeToISOString(dateObj)
+          };
+
+          console.log('[handleAddTransaction] Saving entry updates in Supabase...');
+          // Update entry in Supabase
+          try {
+            const { error: entryError } = await supabase
+              .from('entries')
+              .update({ ...payload, image_layout: imageLayout })
+              .eq('id', editingTransaction.id)
+              .eq('user_id', session.user.id);
+            
+            if (entryError) {
+              // Check fallback if image_layout isn't defined
+              if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist')) {
+                console.warn('[handleAddTransaction] image_layout missing in schema, falling back to payload without it...');
+                const { error: retryError } = await supabase
+                  .from('entries')
+                  .update(payload)
+                  .eq('id', editingTransaction.id)
+                  .eq('user_id', session.user.id);
+                if (retryError) throw retryError;
+              } else {
+                throw entryError;
               }
-            } catch (err) {
-              console.error('Detailed Supabase Update Error:', err);
-              throw err;
+            }
+          } catch (err: any) {
+            console.error('[handleAddTransaction] Supabase update entry SQL failure:', err);
+            throw new Error(`Database transaction update failed: ${err.message || err}`);
+          }
+
+          // Replace attachments in Supabase
+          try {
+            console.log('[handleAddTransaction] Replacing attachments array in supabase with size:', finalImageUrls.length);
+            const { error: deleteError } = await supabase
+              .from('attachments')
+              .delete()
+              .eq('entry_id', editingTransaction.id);
+            if (deleteError) {
+              console.error('[handleAddTransaction] Warning: attachment deletion error:', deleteError);
             }
 
-            if (selectedImages.length > 0) {
-              await supabase.from('attachments').delete().eq('entry_id', editingTransaction.id);
-              const attachmentInserts = selectedImages.map(url => ({
+            if (finalImageUrls.length > 0) {
+              const attachmentInserts = finalImageUrls.map(url => ({
                 entry_id: editingTransaction.id,
                 user_id: session.user.id,
                 file_url: url,
                 file_name: 'manual_upload',
                 file_type: 'image'
               }));
-              await supabase.from('attachments').insert(attachmentInserts);
+              const { error: insertError } = await supabase
+                .from('attachments')
+                .insert(attachmentInserts);
+              if (insertError) throw insertError;
             }
-          } catch (error: any) {
-            console.error('Detailed Supabase Update Error:', error);
-            const msg = error.message || 'Unknown error';
-            setError(`Failed to sync update: ${msg}. If you added decimals, please ensure your Supabase "amount" column supports them.`);
+          } catch (err: any) {
+            console.error('[handleAddTransaction] Supabase attachments sync failure:', err);
+            throw new Error(`Database attachments sync failed: ${err.message || err}`);
           }
-        })();
-      }
-    } else {
-      // Add new transaction
-      const newTransaction: Transaction = {
-        id: safeUUID(),
-        amount: amountNum,
-        type: showForm,
-        description: description,
-        category: finalCategory || 'General',
-        mode: finalMode,
-        date: dateObj,
-        images: selectedImages.length > 0 ? selectedImages : undefined,
-        imageLayout: imageLayout
-      };
 
-      // Optimistic update
-      setBooks(books.map(b => 
-        b.id === activeBookId 
-          ? { ...b, transactions: [newTransaction, ...b.transactions] }
-          : b
-      ));
-
-      // Close form immediately for speed
-      setShowForm(null);
-      setIsSubmitting(false);
-
-      if (supabase) {
-        // Run database insert in background
-        (async () => {
-          try {
-            const payload: any = {
-                id: newTransaction.id,
-                cashbook_id: activeBookId,
-                user_id: session.user.id,
-                amount: newTransaction.amount,
-                type: newTransaction.type,
-                description: newTransaction.description,
-                category: newTransaction.category,
-                mode: newTransaction.mode,
-                date: safeToISOString(newTransaction.date)
-            };
-
-            try {
-              // Try with image_layout first
-              const { error } = await supabase
-                .from('entries')
-                .insert([{ ...payload, image_layout: imageLayout }]);
-              
-              if (error) {
-                if (error.code === '42703' || error.message?.includes('column "image_layout" does not exist')) {
-                  console.warn('Supabase: column "image_layout" missing, retrying without it...');
-                  const { error: retryError } = await supabase
-                    .from('entries')
-                    .insert([payload]);
-                  if (retryError) throw retryError;
-                } else {
-                  throw error;
+          // Fetch fresh updated state directly from Supabase before we close the form or update the UI!
+          console.log('[handleAddTransaction] Successfully saved to DB, starting data refetch...');
+          await fetchData();
+        } else {
+          // LocalStorage fallback
+          const updatedTransaction: Transaction = {
+            ...editingTransaction,
+            amount: amountNum,
+            type: showForm,
+            description: description,
+            category: finalCategory || 'General',
+            mode: finalMode,
+            date: dateObj,
+            images: finalImageUrls.length > 0 ? finalImageUrls : undefined,
+            imageLayout: imageLayout
+          };
+          setBooks(books.map(b => 
+            b.id === activeBookId 
+              ? { 
+                  ...b, 
+                  transactions: b.transactions.map(t => t.id === editingTransaction.id ? updatedTransaction : t)
                 }
-              }
-            } catch (err) {
-              console.error('Detailed Supabase Insert Error:', err);
-              throw err;
-            }
+              : b
+          ));
+        }
 
-            if (newTransaction.images && newTransaction.images.length > 0) {
-              const attachmentInserts = newTransaction.images.map(url => ({
-                entry_id: newTransaction.id,
+        // Finish state reset and form closing
+        setShowForm(null);
+        setEditingTransaction(null);
+        resetForm();
+        setIsSubmitting(false);
+
+      } else {
+        console.log('[handleAddTransaction] Mode: Creating standard transaction...');
+        
+        const tempId = safeUUID();
+
+        // 1. Process files upload to Cloudinary before database insertion
+        const finalImageUrls: string[] = [];
+        for (const img of selectedImages) {
+          if (img.startsWith('data:')) {
+            console.log('[handleAddTransaction] Uploading form image to Cloudinary...');
+            try {
+              const cloudUrl = await uploadToCloudinary(img, cloudinaryFolder);
+              finalImageUrls.push(cloudUrl);
+            } catch (err: any) {
+              console.error('[handleAddTransaction] Cloudinary add upload failed:', err);
+              throw new Error(`Cloudinary upload failed: ${err.message || err}`);
+            }
+          } else {
+            finalImageUrls.push(img);
+          }
+        }
+
+        if (supabase) {
+          const payload: any = {
+            id: tempId,
+            cashbook_id: activeBookId,
+            user_id: session.user.id,
+            amount: amountNum,
+            type: showForm,
+            description: description,
+            category: finalCategory || 'General',
+            mode: finalMode,
+            date: safeToISOString(dateObj)
+          };
+
+          console.log('[handleAddTransaction] Writing new transaction entry into Supabase:', { id: tempId });
+          // Insert entry in Supabase
+          try {
+            const { error: entryError } = await supabase
+              .from('entries')
+              .insert([{ ...payload, image_layout: imageLayout }]);
+            
+            if (entryError) {
+              if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist')) {
+                console.warn('[handleAddTransaction] image_layout missing in schema, falling back to payload...');
+                const { error: retryError } = await supabase
+                  .from('entries')
+                  .insert([payload]);
+                if (retryError) throw retryError;
+              } else {
+                throw entryError;
+              }
+            }
+          } catch (err: any) {
+            console.error('[handleAddTransaction] Supabase insert entry SQL failure:', err);
+            throw new Error(`Database entry insertion failed: ${err.message || err}`);
+          }
+
+          // Insert attachments in Supabase
+          if (finalImageUrls.length > 0) {
+            console.log('[handleAddTransaction] Saving entry image attachments rows to Supabase...');
+            try {
+              const attachmentInserts = finalImageUrls.map(url => ({
+                entry_id: tempId,
                 user_id: session.user.id,
                 file_url: url,
                 file_name: 'manual_upload',
                 file_type: 'image'
               }));
-              await supabase.from('attachments').insert(attachmentInserts);
+              const { error: insertError } = await supabase
+                .from('attachments')
+                .insert(attachmentInserts);
+              if (insertError) throw insertError;
+            } catch (err: any) {
+              console.error('[handleAddTransaction] Supabase attachments insert SQL failure:', err);
+              throw new Error(`Database attachments insertion failed: ${err.message || err}`);
             }
-          } catch (error: any) {
-            console.error('Error creating entry in Supabase:', error);
-            setError(`Failed to sync transaction: ${error.message || 'Unknown error'}. Please ensure your Supabase "amount" column supports decimals.`);
-            // Rollback
-            setBooks(prevBooks => prevBooks.map(b => 
-              b.id === activeBookId 
-                ? { ...b, transactions: b.transactions.filter(t => t.id !== newTransaction.id) }
-                : b
-            ));
           }
-        })();
-      }
-    }
 
-    resetForm();
+          // Fetch fresh verified state directly from Supabase before closing the form!
+          console.log('[handleAddTransaction] Successfully saved new entry to DB, re-fetching...');
+          await fetchData();
+        } else {
+          // LocalStorage fallback
+          const newTransaction: Transaction = {
+            id: tempId,
+            amount: amountNum,
+            type: showForm,
+            description: description,
+            category: finalCategory || 'General',
+            mode: finalMode,
+            date: dateObj,
+            images: finalImageUrls.length > 0 ? finalImageUrls : undefined,
+            imageLayout: imageLayout
+          };
+          setBooks(books.map(b => 
+            b.id === activeBookId 
+              ? { ...b, transactions: [newTransaction, ...b.transactions] }
+              : b
+          ));
+        }
+
+        // Reset and close form
+        setShowForm(null);
+        resetForm();
+        setIsSubmitting(false);
+      }
+    } catch (error: any) {
+      console.error('[handleAddTransaction] Error in transaction submission timeline:', error);
+      setError(error.message || 'Transaction submission failed');
+      setIsSubmitting(false);
+    }
   };
 
   const handleDeleteTransaction = (id: string) => {
@@ -1273,11 +1454,16 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const processFiles = async (files: FileList | File[]) => {
     if (!files || files.length === 0 || !activeBookId) return;
 
+    const userIdentifier = session?.user?.email || session?.user?.id || 'anonymous';
+    const cloudinaryFolder = `trackbook/${userIdentifier}`;
+
     // Limit to 5 images as per user request
     const filesToProcess = Array.from(files).slice(0, 5) as File[];
 
     setIsUploading(true);
-    setUploadingMessage('Detecting bills...');
+    setUploadingMessage('Detecting bills with Gemini...');
+    setError(null);
+
     try {
       if (aiMode === 'merge' && filesToProcess.length > 1) {
         setUploadingMessage('Merging and detecting bills...');
@@ -1297,41 +1483,40 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           });
         }
 
+        console.log('[processFiles] Querying Gemini receipt parser for merged receipts...');
         const result = await parseMultipleReceipts(imagesData.map(img => ({ base64: img.base64, mimeType: img.mimeType })));
         
         if (result) {
-          const newTransaction: Transaction = {
-            id: safeUUID(),
-            amount: result.amount,
-            type: result.type,
-            description: result.description,
-            category: result.category,
-            mode: 'Online',
-            date: parseAIDate(result.date),
-            images: imagesData.map(img => img.raw),
-            isAi: true,
-            imageLayout: 'merge'
-          };
+          setUploadingMessage('Uploading merged bills to Cloudinary...');
+          console.log('[processFiles] Uploading receipt documents to Cloudinary store...');
+          
+          const cloudinaryUrls: string[] = [];
+          for (const img of imagesData) {
+            try {
+              const u = await uploadToCloudinary(img.raw, cloudinaryFolder);
+              cloudinaryUrls.push(u);
+            } catch (err: any) {
+              console.error('[processFiles] Merged Cloudinary upload error:', err);
+              throw new Error(`Cloudinary upload failed: ${err.message || err}`);
+            }
+          }
 
-          // Optimistic update
-          setBooks(prev => prev.map(b => 
-            b.id === activeBookId 
-              ? { ...b, transactions: [newTransaction, ...b.transactions] }
-              : b
-          ));
+          const newTransactionId = safeUUID();
 
           if (supabase && session) {
+            setUploadingMessage('Registering transaction in database...');
+            console.log('[processFiles] Inserting entry to database:', { id: newTransactionId });
             try {
               const payload: any = {
-                id: newTransaction.id,
+                id: newTransactionId,
                 cashbook_id: activeBookId,
                 user_id: session.user.id,
-                amount: newTransaction.amount,
-                type: newTransaction.type,
-                description: newTransaction.description,
-                category: newTransaction.category,
-                mode: newTransaction.mode,
-                date: safeToISOString(newTransaction.date)
+                amount: result.amount,
+                type: result.type,
+                description: result.description,
+                category: result.category,
+                mode: 'Online',
+                date: safeToISOString(parseAIDate(result.date))
               };
 
               // Try with image_layout first
@@ -1339,6 +1524,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               
               if (entryError) {
                 if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist')) {
+                  console.warn('[processFiles] image_layout missing in schema, retrying fallback...');
                   const { error: retryError } = await supabase.from('entries').insert([payload]);
                   if (retryError) throw retryError;
                 } else {
@@ -1346,71 +1532,91 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 }
               }
 
-              const aiAttachmentInserts = imagesData.map(img => ({
-                entry_id: newTransaction.id,
-                user_id: session.user.id,
-                file_url: img.raw,
-                file_name: 'ai_merged_bill',
-                file_type: 'image'
-              }));
-              const { error: attachError } = await supabase.from('ai_attachments').insert(aiAttachmentInserts);
-              if (attachError) throw attachError;
+              if (cloudinaryUrls.length > 0) {
+                console.log('[processFiles] Saving AI attachments rows...');
+                const aiAttachmentInserts = cloudinaryUrls.map(url => ({
+                  entry_id: newTransactionId,
+                  user_id: session.user.id,
+                  file_url: url,
+                  file_name: 'ai_merged_bill',
+                  file_type: 'image'
+                }));
+                const { error: attachError } = await supabase.from('ai_attachments').insert(aiAttachmentInserts);
+                if (attachError) throw attachError;
+              }
+
+              console.log('[processFiles] Completed insertions, triggering database refetch...');
+              await fetchData();
             } catch (error: any) {
-              console.error('Error syncing merged AI entry (detailed):', error);
+              console.error('[processFiles] Error syncing merged AI entry (detailed):', error);
               const msg = error.message || 'Unknown error';
-              setError(`Sync Error: ${msg}. Please ensure your Supabase "amount" column supports decimals.`);
+              setError(`Database Sync Error: ${msg}. Please ensure your Supabase "amount" column supports decimals.`);
             }
+          } else {
+            // Local fallback
+            const newTransaction: Transaction = {
+              id: newTransactionId,
+              amount: result.amount,
+              type: result.type,
+              description: result.description,
+              category: result.category,
+              mode: 'Online',
+              date: parseAIDate(result.date),
+              images: cloudinaryUrls,
+              isAi: true,
+              imageLayout: 'merge'
+            };
+            setBooks(prev => prev.map(b => 
+              b.id === activeBookId 
+                ? { ...b, transactions: [newTransaction, ...b.transactions] }
+                : b
+            ));
           }
         }
       } else {
         let completed = 0;
         const total = filesToProcess.length;
+        
         for (const file of filesToProcess) {
-          setUploadingMessage(`Detecting bill ${completed}/${total}...`);
+          setUploadingMessage(`Detecting bill ${completed + 1}/${total}...`);
+          
           await new Promise<void>((resolve, reject) => {
             const reader = new FileReader();
             reader.onerror = () => reject(new Error('File reading failed'));
             reader.onloadend = async () => {
               try {
                 const base64String = (reader.result as string).split(',')[1];
+                console.log(`[processFiles] Uploading file ${completed + 1}/${total} to Gemini...`);
                 const result = await parseReceipt(base64String, file.type);
                 
                 if (result) {
-                  completed++;
-                  setUploadingMessage(`Detected ${result.category} (${completed}/${total})! Syncing...`);
+                  setUploadingMessage(`Uploading receipt ${completed + 1}/${total} to Cloudinary...`);
+                  console.log(`[processFiles] Uploading file ${completed + 1}/${total} to Cloudinary...`);
                   
-                  const newTransaction: Transaction = {
-                    id: safeUUID(),
-                    amount: result.amount,
-                    type: result.type,
-                    description: result.description,
-                    category: result.category,
-                    mode: 'Online',
-                    date: parseAIDate(result.date),
-                    images: [reader.result as string],
-                    isAi: true,
-                    imageLayout: 'split'
-                  };
+                  let cloudinaryUrl = '';
+                  try {
+                    cloudinaryUrl = await uploadToCloudinary(reader.result as string, cloudinaryFolder);
+                  } catch (err: any) {
+                    console.error('[processFiles] Single Cloudinary upload failed:', err);
+                    throw new Error(`Cloudinary file upload failed: ${err.message || err}`);
+                  }
 
-                  // Optimistic update
-                  setBooks(prev => prev.map(b => 
-                    b.id === activeBookId 
-                      ? { ...b, transactions: [newTransaction, ...b.transactions] }
-                      : b
-                  ));
-
+                  const newTransactionId = safeUUID();
+                  completed++;
+                  
                   if (supabase && session) {
+                    setUploadingMessage(`Saving bill ${completed}/${total} (SQL)...`);
                     try {
                       const payload: any = {
-                        id: newTransaction.id,
+                        id: newTransactionId,
                         cashbook_id: activeBookId,
                         user_id: session.user.id,
-                        amount: newTransaction.amount,
-                        type: newTransaction.type,
-                        description: newTransaction.description,
-                        category: newTransaction.category,
-                        mode: newTransaction.mode,
-                        date: safeToISOString(newTransaction.date)
+                        amount: result.amount,
+                        type: result.type,
+                        description: result.description,
+                        category: result.category,
+                        mode: 'Online',
+                        date: safeToISOString(parseAIDate(result.date))
                       };
 
                       // Try with image_layout first
@@ -1425,28 +1631,41 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                         }
                       }
 
-                      if (newTransaction.images && newTransaction.images.length > 0) {
-                        const aiAttachmentInserts = newTransaction.images.map(url => ({
-                          entry_id: newTransaction.id,
-                          user_id: session.user.id,
-                          file_url: url,
-                          file_name: 'ai_detected_bill',
-                          file_type: 'image'
-                        }));
-                        const { error: attachError } = await supabase.from('ai_attachments').insert(aiAttachmentInserts);
-                        if (attachError) throw attachError;
-                      }
+                      console.log('[processFiles] Saving single AI image attachment row...');
+                      const aiAttachmentInserts = [{
+                        entry_id: newTransactionId,
+                        user_id: session.user.id,
+                        file_url: cloudinaryUrl,
+                        file_name: 'ai_detected_bill',
+                        file_type: 'image'
+                      }];
+                      const { error: attachError } = await supabase.from('ai_attachments').insert(aiAttachmentInserts);
+                      if (attachError) throw attachError;
+                      
                     } catch (error: any) {
-                      console.error('Error syncing AI entry:', error);
+                      console.error('[processFiles] Error syncing AI entry:', error);
                       const msg = error.message || 'Unknown error';
                       setError(`AI Sync Error: ${msg}. Your Supabase "amount" column likely needs to be changed to DECIMAL.`);
-                      // Rollback local state on failure
-                      setBooks(prev => prev.map(b => 
-                        b.id === activeBookId 
-                          ? { ...b, transactions: b.transactions.filter(t => t.id !== newTransaction.id) }
-                          : b
-                      ));
                     }
+                  } else {
+                    // Local fallback
+                    const newTransaction: Transaction = {
+                      id: newTransactionId,
+                      amount: result.amount,
+                      type: result.type,
+                      description: result.description,
+                      category: result.category,
+                      mode: 'Online',
+                      date: parseAIDate(result.date),
+                      images: [cloudinaryUrl],
+                      isAi: true,
+                      imageLayout: 'split'
+                    };
+                    setBooks(prev => prev.map(b => 
+                      b.id === activeBookId 
+                        ? { ...b, transactions: [newTransaction, ...b.transactions] }
+                        : b
+                    ));
                   }
                 }
                 resolve();
@@ -1458,14 +1677,21 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             reader.readAsDataURL(file);
           });
         }
+
+        // Fetch everything freshly to finalize the batch update
+        if (supabase && session && completed > 0) {
+          setUploadingMessage('Syncing backend changes...');
+          await fetchData();
+        }
       }
+
       setIsUploading(false);
       setShowDropZone(false);
     } catch (error: any) {
-      console.error("Upload failed", error);
+      console.error("[processFiles] Upload/AI chain failed:", error);
       setIsUploading(false);
       setShowDropZone(false);
-      setError(error.message || 'Upload failed');
+      setError(error.message || 'Processing failed');
     }
     // Reset input
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -2239,7 +2465,23 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               <div className="space-y-4">
                 {/* Mobile Transaction List (Card Based) */}
                 <div className="lg:hidden space-y-3">
-                  {filteredTransactions.length === 0 ? (
+                  {isEntriesLoading && filteredTransactions.length === 0 ? (
+                    <div className="space-y-3 py-6 animate-pulse">
+                      {[1, 2, 3, 4].map(n => (
+                        <div key={n} className={cn(
+                          "p-4 rounded-2xl border space-y-3",
+                          theme === 'dark' ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
+                        )}>
+                          <div className="flex justify-between">
+                            <div className="h-3 bg-slate-200 dark:bg-slate-800 rounded w-1/3" />
+                            <div className="h-3 bg-slate-200 dark:bg-slate-800 rounded w-1/4" />
+                          </div>
+                          <div className="h-4 bg-slate-200 dark:bg-slate-800 rounded w-2/3" />
+                          <div className="h-3 bg-slate-200 dark:bg-slate-800 rounded w-1/2" />
+                        </div>
+                      ))}
+                    </div>
+                  ) : filteredTransactions.length === 0 ? (
                     <div className={cn(
                       "py-12 text-center rounded-3xl border transition-colors duration-300",
                       theme === 'dark' ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
@@ -2257,7 +2499,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     (() => {
                       // Group transactions by date for headers
                       const groups: { [key: string]: Transaction[] } = {};
-                      filteredTransactions.forEach(t => {
+                      pagedTransactions.forEach(t => {
                         const dateStr = t.date.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
                         if (!groups[dateStr]) groups[dateStr] = [];
                         groups[dateStr].push(t);
@@ -2274,11 +2516,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                           </div>
                           
                           {transactions.map((t, idx) => {
-                            // Calculate running balance for this specific transaction
-                            const globalIdx = filteredTransactions.findIndex(ft => ft.id === t.id);
-                            const runningBalance = filteredTransactions
-                              .slice(0, globalIdx + 1)
-                              .reduce((acc, curr) => acc + (curr.type === 'in' ? curr.amount : -curr.amount), 0);
+                            // Pre-calculated O(1) constant running balance lookup
+                            const runningBalance = runningBalancesMap.get(t.id) || 0;
 
                             const isCurrentlyDeleting = animatingDeleteId === t.id;
                             
@@ -2492,7 +2731,24 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                           "divide-y transition-colors duration-300",
                           theme === 'dark' ? "divide-slate-800" : "divide-slate-50"
                         )}>
-                          {filteredTransactions.length === 0 ? (
+                          {isEntriesLoading && filteredTransactions.length === 0 ? (
+                            <tr>
+                              <td colSpan={9} className="px-6 py-4">
+                                <div className="space-y-3 py-6">
+                                  {[1, 2, 3, 4, 5].map(n => (
+                                    <div key={n} className="flex items-center space-x-4 animate-pulse">
+                                      <div className="h-4 bg-slate-200 dark:bg-slate-800 rounded w-1/12" />
+                                      <div className="h-4 bg-slate-200 dark:bg-slate-800 rounded w-2/12" />
+                                      <div className="h-4 bg-slate-200 dark:bg-slate-800 rounded w-4/12" />
+                                      <div className="h-4 bg-slate-200 dark:bg-slate-800 rounded w-2/12" />
+                                      <div className="h-4 bg-slate-200 dark:bg-slate-800 rounded w-1/12" />
+                                      <div className="h-4 bg-slate-200 dark:bg-slate-800 rounded w-2/12" />
+                                    </div>
+                                  ))}
+                                </div>
+                              </td>
+                            </tr>
+                          ) : filteredTransactions.length === 0 ? (
                             <tr>
                               <td colSpan={9} className="px-6 py-20 text-center">
                                 <div className="flex flex-col items-center justify-center space-y-3">
@@ -2510,10 +2766,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                               </td>
                             </tr>
                           ) : (
-                            filteredTransactions.map((t, index) => {
-                              const runningBalance = filteredTransactions
-                                .slice(0, index + 1)
-                                .reduce((acc, curr) => acc + (curr.type === 'in' ? curr.amount : -curr.amount), 0);
+                            pagedTransactions.map((t, index) => {
+                              // Pre-calculated O(1) constant running balance lookup
+                              const runningBalance = runningBalancesMap.get(t.id) || 0;
 
                             const isCurrentlyDeleting = animatingDeleteId === t.id;
 
@@ -2659,6 +2914,22 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     </div>
                   </div>
                 </div>
+
+                {filteredTransactions.length > visibleCount && (
+                  <div className="flex justify-center pt-6 pb-2">
+                    <button
+                      onClick={() => setVisibleCount(prev => prev + 30)}
+                      className={cn(
+                        "px-6 py-2.5 rounded-full text-xs font-black tracking-wider transition-all hover:scale-105 active:scale-95 cursor-pointer shadow-sm border",
+                        theme === 'dark'
+                          ? "bg-slate-900 border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800"
+                          : "bg-white border-slate-200 text-slate-700 hover:text-black hover:bg-slate-50"
+                      )}
+                    >
+                      LOAD MORE ENTRIES ({filteredTransactions.length - visibleCount} REMAINING)
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Mobile Sticky Bottom Buttons */}
