@@ -137,6 +137,629 @@ function getCloudinaryThumbnail(url: string): string {
   return url;
 }
 
+// Persistent caching for cashbooks list
+let cachedCashbooks: any[] | null = null;
+// Persistent caching for transaction entries: cashbook_id -> Transaction[]
+const entriesCache = new Map<string, any[]>();
+// Persistent caching for entry fetch timers: cashbook_id -> timestamp
+const lastFetchTimeCache = new Map<string, number>();
+// Persistent caching for attachments (images): entry_id -> { images: string[], isAi: boolean }
+const attachmentCache = new Map<string, { images: string[], isAi: boolean }>();
+
+// Core micro-elements and memoized sub-components
+const AttachmentCell = React.memo(({
+  images,
+  transactionId,
+  uploadStatuses,
+  handleRetryUpload,
+  setPreviewImages,
+  setPreviewIndex,
+  setPreviewRotation,
+  setPreviewZoom,
+  theme
+}: {
+  images: string[] | undefined;
+  transactionId: string;
+  uploadStatuses: any;
+  handleRetryUpload: (blobUrl: string, transactionId: string) => void;
+  setPreviewImages: (imgs: string[]) => void;
+  setPreviewIndex: (idx: number) => void;
+  setPreviewRotation: (deg: number) => void;
+  setPreviewZoom: (zoom: number) => void;
+  theme: string;
+}) => {
+  if (!images || images.length === 0) return null;
+  
+  const isUploading = images.some(img => {
+    const status = uploadStatuses[img]?.status;
+    return status === 'uploading' || (img.startsWith('blob:') && status !== 'failed' && status !== 'success');
+  });
+  
+  const isFailed = images.some(img => uploadStatuses[img]?.status === 'failed');
+  
+  return (
+    <div className="relative inline-block group/desktop-attach py-1">
+      {isFailed ? (
+        <button 
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            images.forEach(img => {
+              if (uploadStatuses[img]?.status === 'failed') {
+                handleRetryUpload(img, transactionId);
+              }
+            });
+          }}
+          className="flex items-center gap-1.5 text-[10px] font-black tracking-wider text-rose-500 hover:text-rose-600 transition-colors cursor-pointer"
+        >
+          <RotateCw size={11} className="animate-pulse" />
+          <div className="text-left">
+            <p className="text-[10px] font-black leading-none">RETRY UPLOAD</p>
+            <p className="text-[8px] font-bold text-rose-400 mt-0.5">Some uploads failed</p>
+          </div>
+        </button>
+      ) : (
+        <button 
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (!isUploading) {
+              setPreviewImages(images);
+              setPreviewIndex(0);
+              setPreviewRotation(0);
+              setPreviewZoom(1);
+            }
+          }}
+          disabled={isUploading}
+          className={cn(
+            "flex items-center gap-2 text-left transition-all cursor-pointer group/bill",
+            isUploading 
+              ? "text-emerald-500 dark:text-emerald-400 animate-pulse pointer-events-none" 
+              : "text-slate-500 hover:text-indigo-600"
+          )}
+        >
+          <Paperclip size={14} className={isUploading ? "animate-bounce" : ""} />
+          <div className="text-left">
+            <p className="text-[10px] font-black leading-none">
+              {isUploading ? "Syncing..." : images.length}
+            </p>
+            <p className={cn(
+              "text-[10px] font-bold transition-colors mt-0.5",
+              isUploading ? "text-emerald-400" : "text-slate-400 group-hover/bill:text-indigo-400"
+            )}>
+              {isUploading ? "Uploading attachments..." : `${images.length === 1 ? 'Attachment' : 'Attachments'}`}
+            </p>
+          </div>
+        </button>
+      )}
+      
+      {isUploading && (
+        <div className="absolute left-0 right-0 bottom-0 h-[2px] bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden mt-1">
+          <div className="absolute top-0 bottom-0 w-[40%] bg-emerald-500 rounded-full animate-progress-smooth" />
+        </div>
+      )}
+    </div>
+  );
+});
+AttachmentCell.displayName = 'AttachmentCell';
+
+const MobileTransactionRow = React.memo(({
+  t,
+  runningBalance,
+  selected,
+  isCurrentlyDeleting,
+  onTouchStart,
+  onTouchEnd,
+  onClick,
+  uploadStatuses,
+  handleRetryUpload,
+  setPreviewImages,
+  setPreviewIndex,
+  setPreviewRotation,
+  setPreviewZoom,
+  handleEditTransaction,
+  handleDeleteTransaction,
+  theme
+}: {
+  t: Transaction;
+  runningBalance: number;
+  selected: boolean;
+  isCurrentlyDeleting: boolean;
+  onTouchStart: (id: string) => void;
+  onTouchEnd: () => void;
+  onClick: (id: string) => void;
+  uploadStatuses: any;
+  handleRetryUpload: (blobUrl: string, transactionId: string) => void;
+  setPreviewImages: (imgs: string[]) => void;
+  setPreviewIndex: (idx: number) => void;
+  setPreviewRotation: (deg: number) => void;
+  setPreviewZoom: (zoom: number) => void;
+  handleEditTransaction: (t: Transaction) => void;
+  handleDeleteTransaction: (id: string) => void;
+  theme: string;
+}) => {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={isCurrentlyDeleting ? { opacity: 0, x: -100, scale: 0.9, height: 0, margin: 0, padding: 0 } : { opacity: 1, y: 0 }}
+      transition={{ duration: 0.25 }}
+      onMouseDown={() => onTouchStart(t.id)}
+      onMouseUp={onTouchEnd}
+      onTouchStart={() => onTouchStart(t.id)}
+      onTouchEnd={onTouchEnd}
+      onClick={() => onClick(t.id)}
+      className={cn(
+        "rounded-xl border shadow-sm relative transition-all active:scale-[0.98] select-none overflow-hidden transition-colors duration-300 cursor-pointer",
+        isCurrentlyDeleting ? "border-transparent bg-transparent" : "p-2.5",
+        selected
+          ? (theme === 'dark' ? "border-indigo-500 ring-1 ring-indigo-500 bg-indigo-950/30" : "border-indigo-600 ring-1 ring-indigo-600 bg-indigo-50/30 shadow-lg") 
+          : (theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-100")
+      )}
+    >
+      <div className="flex justify-between items-start mb-1.5">
+        <div className="flex flex-wrap gap-1">
+          <span className={cn(
+            "px-1.5 py-0.5 text-[8px] font-bold rounded-md transition-colors duration-300",
+            theme === 'dark' ? "bg-indigo-900/40 text-indigo-400" : "bg-indigo-50 text-indigo-600"
+          )}>
+            {t.category}
+          </span>
+          <span className={cn(
+            "px-1.5 py-0.5 text-[8px] font-bold rounded-md transition-colors duration-300",
+            theme === 'dark' ? "bg-slate-800 text-slate-400" : "bg-slate-50 text-slate-500"
+          )}>
+            {t.mode}
+          </span>
+        </div>
+        <div className="text-right">
+          <p className={cn(
+            "text-sm font-black",
+            t.type === 'in' ? "text-emerald-600" : "text-rose-600"
+          )}>
+            {formatCurrency(t.amount)}
+          </p>
+          <p className={cn(
+            "text-[8px] font-bold leading-none transition-colors duration-300",
+            theme === 'dark' ? "text-slate-500" : "text-slate-400"
+          )}>
+            Bal: {formatCurrency(runningBalance)}
+          </p>
+        </div>
+      </div>
+
+      <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
+        <p className={cn(
+          "text-[11px] font-bold line-clamp-1 transition-colors duration-300",
+          theme === 'dark' ? "text-slate-100" : "text-black"
+        )}>
+          {t.description || 'No details provided'}
+        </p>
+         {t.isAi && (
+          <div className="bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 text-[8px] font-black px-1.5 py-0.5 rounded-md flex items-center gap-0.5 shadow-sm">
+            <Sparkles size={8} />
+            AI
+          </div>
+        )}
+        {t.imageLayout && (
+          <div className={cn(
+            "text-[8px] font-black px-1.5 py-0.5 rounded-md shadow-sm uppercase",
+            t.imageLayout === 'merge' 
+              ? (theme === 'dark' ? "bg-indigo-900/30 text-indigo-400" : "bg-indigo-50 text-indigo-600")
+              : (theme === 'dark' ? "bg-slate-800 text-slate-400" : "bg-slate-50 text-slate-600")
+          )}>
+            {t.imageLayout}
+          </div>
+        )}
+      </div>
+
+      <div className={cn(
+        "flex items-center justify-between pt-1.5 border-t transition-colors duration-300",
+        theme === 'dark' ? "border-slate-800" : "border-slate-50"
+      )}>
+        <div className="flex items-center gap-2">
+          {t.images && t.images.length > 0 ? (() => {
+            const isUploading = t.images.some(img => {
+              const status = uploadStatuses[img]?.status;
+              return status === 'uploading' || (img.startsWith('blob:') && status !== 'failed' && status !== 'success');
+            });
+            const isFailed = t.images.some(img => uploadStatuses[img]?.status === 'failed');
+            
+            return (
+              <div className="relative inline-block group/mobile-attach py-1">
+                {isFailed ? (
+                  <button 
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      t.images!.forEach(img => {
+                        if (uploadStatuses[img]?.status === 'failed') {
+                          handleRetryUpload(img, t.id);
+                        }
+                      });
+                    }}
+                    className="flex items-center gap-1 text-[8px] font-black tracking-wider text-rose-500 hover:text-rose-600 transition-colors cursor-pointer"
+                  >
+                    <RotateCw size={8} className="animate-pulse" />
+                    <span>RETRY UPLOAD</span>
+                  </button>
+                ) : (
+                  <button 
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!isUploading) {
+                        setPreviewImages(t.images!);
+                        setPreviewIndex(0);
+                        setPreviewRotation(0);
+                        setPreviewZoom(1);
+                      }
+                    }}
+                    disabled={isUploading}
+                    className={cn(
+                      "flex items-center gap-1 transition-colors duration-300 text-[8px] font-bold cursor-pointer",
+                      isUploading 
+                        ? "text-emerald-500 dark:text-emerald-400 animate-pulse pointer-events-none" 
+                        : (theme === 'dark' ? "text-indigo-400 hover:text-indigo-300" : "text-indigo-600 hover:text-indigo-700")
+                    )}
+                  >
+                    <Paperclip size={9} className={isUploading ? "animate-bounce" : ""} />
+                    <span>
+                      {isUploading 
+                        ? "Syncing attachments..." 
+                        : `${t.images.length} ${t.images.length === 1 ? 'Attachment' : 'Attachments'}`}
+                    </span>
+                  </button>
+                )}
+                
+                {isUploading && (
+                  <div className="absolute left-0 right-0 bottom-0 h-[1.5px] bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden mt-0.5">
+                    <div className="absolute top-0 bottom-0 w-[40%] bg-emerald-500 rounded-full animate-progress-smooth" />
+                  </div>
+                )}
+              </div>
+            );
+          })() : (
+            <div className={cn(
+              "flex items-center gap-1 transition-colors duration-300",
+              theme === 'dark' ? "text-slate-700" : "text-slate-200"
+            )}>
+              <Paperclip size={10} />
+              <span className="text-[8px] font-bold">0</span>
+            </div>
+          )}
+          <span className={cn(
+            "transition-colors duration-300",
+            theme === 'dark' ? "text-slate-800" : "text-slate-200"
+          )}>•</span>
+          <span className={cn(
+            "text-[8px] font-bold tracking-tight transition-colors duration-300",
+            theme === 'dark' ? "text-slate-500" : "text-slate-400"
+          )}>
+            {t.date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-1">
+          <button 
+            onClick={(e) => { e.stopPropagation(); handleEditTransaction(t); }}
+            className={cn(
+              "p-1 rounded-md transition-all cursor-pointer",
+              theme === 'dark' ? "bg-slate-800 text-slate-400 hover:text-indigo-400" : "bg-slate-50 text-slate-400 hover:text-indigo-600"
+            )}
+          >
+            <Pencil size={10} />
+          </button>
+          <button 
+            onClick={(e) => { e.stopPropagation(); handleDeleteTransaction(t.id); }}
+            className={cn(
+              "p-1 rounded-md transition-all cursor-pointer",
+              theme === 'dark' ? "bg-rose-900/20 text-rose-400 hover:text-rose-500" : "bg-rose-50 text-rose-400 hover:text-rose-600"
+            )}
+          >
+            <Trash2 size={10} />
+          </button>
+        </div>
+      </div>
+    </motion.div>
+  );
+});
+MobileTransactionRow.displayName = 'MobileTransactionRow';
+
+const DesktopTransactionRow = React.memo(({
+  t,
+  runningBalance,
+  selected,
+  isCurrentlyDeleting,
+  toggleSelectTransaction,
+  handleEditTransaction,
+  handleDeleteTransaction,
+  handleRetryUpload,
+  uploadStatuses,
+  setPreviewImages,
+  setPreviewIndex,
+  setPreviewRotation,
+  setPreviewZoom,
+  theme
+}: {
+  t: Transaction;
+  runningBalance: number;
+  selected: boolean;
+  isCurrentlyDeleting: boolean;
+  toggleSelectTransaction: (id: string) => void;
+  handleEditTransaction: (t: any) => void;
+  handleDeleteTransaction: (id: string) => void;
+  handleRetryUpload: (blobUrl: string, transactionId: string) => void;
+  uploadStatuses: any;
+  setPreviewImages: (imgs: string[]) => void;
+  setPreviewIndex: (idx: number) => void;
+  setPreviewRotation: (deg: number) => void;
+  setPreviewZoom: (zoom: number) => void;
+  theme: string;
+}) => {
+  return (
+    <motion.tr 
+      animate={isCurrentlyDeleting ? { opacity: 0, x: -50, scale: 0.95 } : { opacity: 1, x: 0, scale: 1 }}
+      transition={{ duration: 0.25 }}
+      className={cn(
+        "group transition-colors",
+        theme === 'dark' ? "hover:bg-slate-800/30" : "hover:bg-slate-50/50",
+        selected && (theme === 'dark' ? "bg-indigo-900/10" : "bg-indigo-50/50"),
+        isCurrentlyDeleting && "pointer-events-none opacity-50"
+      )}
+    >
+      <td className="px-3 sm:px-6 py-4">
+        <button 
+          type="button"
+          onClick={() => toggleSelectTransaction(t.id)}
+          className={cn(
+            "w-5 h-5 rounded border-2 flex items-center justify-center transition-colors",
+            selected
+              ? "bg-indigo-600 border-indigo-600 text-white"
+              : "border-slate-300 dark:border-slate-700 group-hover:border-indigo-500"
+          )}
+        >
+          {selected && <CheckSquare size={14} />}
+        </button>
+      </td>
+      <td className="px-3 sm:px-6 py-4 whitespace-nowrap">
+        <p className={cn(
+          "font-bold text-sm",
+          theme === 'dark' ? "text-slate-200" : "text-slate-800"
+        )}>
+          {t.date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+        </p>
+        <p className={cn(
+          "text-[10px] font-bold uppercase tracking-tight",
+          theme === 'dark' ? "text-slate-400" : "text-slate-500"
+        )}>
+          {t.date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })}
+        </p>
+      </td>
+      <td className="px-3 sm:px-6 py-4 min-w-[120px]">
+        <div className="flex items-center gap-2">
+          <p className={cn(
+            "text-sm font-bold transition-colors duration-300",
+            theme === 'dark' ? "text-slate-300" : "text-black"
+          )}>{t.description || '--'}</p>
+          {t.isAi && (
+            <span className={cn(
+              "px-1.5 py-0.5 text-[9px] font-black rounded-full flex items-center gap-0.5 border",
+              theme === 'dark' ? "bg-amber-900/40 text-amber-400 border-amber-800" : "bg-amber-50 text-amber-600 border-amber-200"
+            )}>
+              <Sparkles size={10} />
+              AI
+            </span>
+          )}
+          {t.imageLayout && (
+            <span className={cn(
+              "px-1.5 py-0.5 text-[9px] font-black rounded-full border uppercase",
+              t.imageLayout === 'merge'
+                ? (theme === 'dark' ? "bg-indigo-900/40 text-indigo-400" : "bg-indigo-50 text-indigo-600 border-indigo-200")
+                : (theme === 'dark' ? "bg-slate-800 text-slate-400 border-slate-700" : "bg-slate-50 text-slate-500 border-slate-200")
+            )}>
+              {t.imageLayout}
+            </span>
+          )}
+        </div>
+      </td>
+      <td className="px-3 sm:px-6 py-4 whitespace-nowrap">
+        <p className={cn(
+          "text-sm font-bold transition-colors duration-300",
+          theme === 'dark' ? "text-slate-300" : "text-black"
+        )}>{t.category}</p>
+      </td>
+      <td className="px-3 sm:px-6 py-4 whitespace-nowrap">
+        <p className={cn(
+          "text-sm font-bold transition-colors duration-300",
+          theme === 'dark' ? "text-slate-300" : "text-black"
+        )}>{t.mode}</p>
+      </td>
+      <td className="px-3 sm:px-6 py-4 whitespace-nowrap">
+        <AttachmentCell
+          images={t.images}
+          transactionId={t.id}
+          uploadStatuses={uploadStatuses}
+          handleRetryUpload={handleRetryUpload}
+          setPreviewImages={setPreviewImages}
+          setPreviewIndex={setPreviewIndex}
+          setPreviewRotation={setPreviewRotation}
+          setPreviewZoom={setPreviewZoom}
+          theme={theme}
+        />
+      </td>
+      <td className={cn(
+        "px-3 sm:px-6 py-4 text-right font-black whitespace-nowrap tabular-nums",
+        t.type === 'in' ? "text-emerald-600" : "text-rose-600",
+        "text-xs sm:text-sm"
+      )}>
+        {formatCurrency(t.amount)}
+      </td>
+      <td className={cn(
+        "px-3 sm:px-6 py-4 text-right font-black transition-colors duration-300 whitespace-nowrap tabular-nums",
+        theme === 'dark' ? "text-slate-100" : "text-black",
+        "text-xs sm:text-sm"
+      )}>
+        <span>{formatCurrency(runningBalance)}</span>
+      </td>
+      <td className="px-3 sm:px-6 py-4">
+        <div className="flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button 
+            type="button"
+            onClick={() => handleEditTransaction(t)}
+            className={cn(
+              "p-1.5 text-slate-400 rounded-lg transition-all cursor-pointer",
+              theme === 'dark' ? "hover:text-indigo-400 hover:bg-indigo-900/20" : "hover:text-indigo-600 hover:bg-indigo-50"
+            )}
+          >
+            <Pencil size={16} />
+          </button>
+          <button 
+            type="button"
+            onClick={() => handleDeleteTransaction(t.id)}
+            className={cn(
+              "p-1.5 text-slate-400 rounded-lg transition-all cursor-pointer",
+              theme === 'dark' ? "hover:text-rose-400 hover:bg-rose-900/20" : "hover:text-rose-600 hover:bg-rose-50"
+            )}
+          >
+            <Trash2 size={16} />
+          </button>
+        </div>
+      </td>
+    </motion.tr>
+  );
+});
+DesktopTransactionRow.displayName = 'DesktopTransactionRow';
+
+const SummaryCards = React.memo(({ totals, theme }: { totals: { in: number; out: number; net: number }; theme: string }) => {
+  return (
+    <>
+      {/* Mobile Summary Card (Reference Image Style) */}
+      <div className={cn(
+        "sm:hidden rounded-2xl border shadow-sm overflow-hidden transition-colors duration-300",
+        theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-100"
+      )}>
+        <div className="p-3 px-4 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <h3 className={cn(
+              "text-sm font-bold transition-colors duration-300",
+              theme === 'dark' ? "text-slate-100" : "text-black"
+            )}>Net Balance</h3>
+            <p className={cn(
+              "font-black transition-colors duration-300",
+              theme === 'dark' ? "text-slate-100" : "text-black",
+              "text-sm"
+            )}>
+              {formatCurrency(totals.net)}
+            </p>
+          </div>
+          
+          <div className={cn(
+            "space-y-1.5 pt-1.5 border-t transition-colors duration-300",
+            theme === 'dark' ? "border-zinc-800" : "border-slate-50"
+          )}>
+            <div className="flex items-center justify-between">
+              <p className={cn(
+                "text-xs font-bold transition-colors duration-300",
+                theme === 'dark' ? "text-slate-400" : "text-slate-500"
+              )}>Total In (+)</p>
+              <p className={cn(
+                "font-black text-emerald-600",
+                "text-xs"
+              )}>{formatCurrency(totals.in)}</p>
+            </div>
+            <div className="flex items-center justify-between">
+              <p className={cn(
+                "text-xs font-bold transition-colors duration-300",
+                theme === 'dark' ? "text-slate-400" : "text-slate-500"
+              )}>Total Out (-)</p>
+              <p className={cn(
+                "font-black text-rose-600",
+                "text-xs"
+              )}>{formatCurrency(totals.out)}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Balance Cards Row (Desktop Only) */}
+      <div className="hidden lg:grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6">
+        <div className={cn(
+          "p-6 rounded-3xl border flex items-center gap-4 shadow-sm transition-colors duration-300",
+          theme === 'dark' ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
+        )}>
+          <div className={cn(
+            "p-3 rounded-2xl",
+            theme === 'dark' ? "bg-emerald-900/20 text-emerald-400" : "bg-emerald-50 text-emerald-600"
+          )}>
+            <Plus size={24} />
+          </div>
+          <div>
+            <p className={cn(
+              "text-sm font-bold uppercase tracking-wider",
+              theme === 'dark' ? "text-slate-400" : "text-slate-500"
+            )}>Cash In</p>
+            <p className={cn(
+              "font-black text-emerald-600 dark:text-emerald-400",
+              "text-xl"
+            )}>
+              {formatCurrency(totals.in)}
+            </p>
+          </div>
+        </div>
+
+        <div className={cn(
+          "p-6 rounded-3xl border flex items-center gap-4 shadow-sm transition-colors duration-300",
+          theme === 'dark' ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
+        )}>
+          <div className={cn(
+            "p-3 rounded-2xl",
+            theme === 'dark' ? "bg-rose-900/20 text-rose-400" : "bg-rose-50 text-rose-600"
+          )}>
+            <Minus size={24} />
+          </div>
+          <div>
+            <p className={cn(
+              "text-sm font-bold uppercase tracking-wider",
+              theme === 'dark' ? "text-slate-400" : "text-slate-500"
+            )}>Cash Out</p>
+            <p className={cn(
+              "font-black text-rose-600 dark:text-rose-400",
+              "text-xl"
+            )}>
+              {formatCurrency(totals.out)}
+            </p>
+          </div>
+        </div>
+
+        <div className={cn(
+          "p-6 rounded-3xl border flex items-center gap-4 shadow-sm transition-colors duration-300",
+          theme === 'dark' ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
+        )}>
+          <div className={cn(
+            "p-3 rounded-2xl",
+            theme === 'dark' ? "bg-indigo-900/20 text-indigo-400" : "bg-indigo-50 text-indigo-600"
+          )}>
+            <Wallet size={24} />
+          </div>
+          <div>
+            <p className={cn(
+              "text-sm font-bold uppercase tracking-wider",
+              theme === 'dark' ? "text-slate-400" : "text-slate-500"
+            )}>Net Balance</p>
+            <p className={cn(
+              "font-black text-indigo-600 dark:text-indigo-400",
+              "text-xl"
+            )}>
+              {formatCurrency(totals.net)}
+            </p>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+});
+SummaryCards.displayName = 'SummaryCards';
+
 export default function Dashboard({ session, theme, setTheme }: { session: any, theme: 'light' | 'dark', setTheme: React.Dispatch<React.SetStateAction<'light' | 'dark'>> }) {
   // Global State
   const [userName, setUserName] = useState('Siva');
@@ -149,6 +772,11 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [isLoading, setIsLoading] = useState(true);
   const [activeBookId, setActiveBookId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  
+  // Quick Add State and Refs
+  const [submitAndAddNew, setSubmitAndAddNew] = useState(false);
+  const [quickAddSuccess, setQuickAddSuccess] = useState(false);
+  const descriptionInputRef = useRef<HTMLTextAreaElement>(null);
   
   // UI State
   const [isSearchExpanded, setIsSearchExpanded] = useState(false);
@@ -503,8 +1131,50 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       return;
     }
 
+    const now = Date.now();
+
+    // 1. STALE-WHILE-REVALIDATE: Instantly render from cache if available
+    if (cachedCashbooks) {
+      setBooks(prevBooks => {
+        return cachedCashbooks!.map((cb: any) => {
+          const isCurrentActive = cb.id === activeBookId;
+          const entriesToUse = isCurrentActive ? (entriesCache.get(activeBookId) || []) : [];
+          return {
+            ...cb,
+            transactions: entriesToUse.map((t: any) => {
+              const cachedImg = attachmentCache.get(t.id);
+              return {
+                ...t,
+                date: t.date ? new Date(t.date) : new Date(),
+                images: cachedImg ? cachedImg.images : (t.images || []),
+                imageLayout: t.image_layout || t.imageLayout || 'split',
+                isAi: cachedImg ? cachedImg.isAi : (t.isAi || false)
+              };
+            }),
+            createdAt: cb.created_at ? new Date(cb.created_at) : (cb.createdAt ? new Date(cb.createdAt) : new Date())
+          };
+        });
+      });
+      if (activeBookId && entriesCache.has(activeBookId)) {
+        setIsEntriesLoading(false);
+        setIsLoading(false);
+      }
+    }
+
+    // 2. CACHE FRESHNESS CHECK: Skip remote call completely if book was loaded < 15 seconds ago
+    if (activeBookId) {
+      const lastFetch = lastFetchTimeCache.get(activeBookId) || 0;
+      const isCacheFresh = (now - lastFetch) < 15000; // 15 seconds threshold
+      if (isCacheFresh && entriesCache.has(activeBookId)) {
+        console.log('[fetchData] Skipping remote fetch because cache is fresh for active book:', activeBookId);
+        setIsEntriesLoading(false);
+        setIsLoading(false);
+        return;
+      }
+    }
+
     try {
-      if (activeBookId) {
+      if (activeBookId && !entriesCache.has(activeBookId)) {
         setIsEntriesLoading(true);
       }
       console.log('[fetchData] Refreshing books from Supabase...');
@@ -516,9 +1186,11 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       if (cbError) throw cbError;
 
       if (cashbooks) {
+        cachedCashbooks = cashbooks;
         let activeBookEntries: any[] = [];
         if (activeBookId) {
           console.log('[fetchData] Fetching required columns for active book:', activeBookId);
+          // PART 2: Select ONLY required columns! Optimize queries aggressively!
           const { data: entries, error: entError } = await supabase
             .from('entries')
             .select('id, amount, type, description, category, mode, date, image_layout, cashbook_id, user_id')
@@ -529,6 +1201,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           if (entError) throw entError;
           if (entries) {
             activeBookEntries = entries;
+            entriesCache.set(activeBookId, entries);
+            lastFetchTimeCache.set(activeBookId, Date.now());
           }
         }
 
@@ -551,7 +1225,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             return {
               ...cb,
               transactions: entriesToUse.map((t: any) => {
-                const existing = existingImagesMap.get(t.id);
+                const cached = attachmentCache.get(t.id);
+                const existing = existingImagesMap.get(t.id) || cached;
+                if (existing) {
+                  // Keep it in cache
+                  attachmentCache.set(t.id, existing);
+                }
                 return {
                   ...t,
                   date: t.date ? new Date(t.date) : new Date(),
@@ -593,18 +1272,36 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 aiMap.set(a.entry_id, list);
               });
 
-              setBooks(prevBooks => prevBooks.map(b => b.id === activeBookId ? {
-                ...b,
-                transactions: b.transactions.map((t: any) => {
-                  const manualImgs = (manualMap.get(t.id) || []).slice(0, 20);
-                  const aiImgs = (aiMap.get(t.id) || []).slice(0, 20);
-                  return {
-                    ...t,
-                    images: [...manualImgs, ...aiImgs],
-                    isAi: aiImgs.length > 0
-                  };
-                })
-              } : b));
+              let cacheChanged = false;
+              entryIds.forEach(id => {
+                const manualImgs = (manualMap.get(id) || []).slice(0, 20);
+                const aiImgs = (aiMap.get(id) || []).slice(0, 20);
+                const combinedImgs = [...manualImgs, ...aiImgs];
+                const isAi = aiImgs.length > 0;
+                
+                const cached = attachmentCache.get(id);
+                if (!cached || JSON.stringify(cached.images) !== JSON.stringify(combinedImgs) || cached.isAi !== isAi) {
+                  attachmentCache.set(id, { images: combinedImgs, isAi });
+                  cacheChanged = true;
+                }
+              });
+
+              if (cacheChanged) {
+                setBooks(prevBooks => prevBooks.map(b => b.id === activeBookId ? {
+                  ...b,
+                  transactions: b.transactions.map((t: any) => {
+                    const cached = attachmentCache.get(t.id);
+                    if (cached) {
+                      return {
+                        ...t,
+                        images: cached.images,
+                        isAi: cached.isAi
+                      };
+                    }
+                    return t;
+                  })
+                } : b));
+              }
             } catch (err) {
               console.error('[fetchData] Background images lazy-fetch error:', err);
             }
@@ -626,6 +1323,15 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   useEffect(() => {
     fetchData();
   }, [session, fetchData]);
+
+  // Autofocus description when form is shown
+  useEffect(() => {
+    if (showForm) {
+      setTimeout(() => {
+        descriptionInputRef.current?.focus();
+      }, 120);
+    }
+  }, [showForm]);
 
   // Save to localStorage as fallback (without heavy images to avoid quota errors)
   useEffect(() => {
@@ -1005,6 +1711,21 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           imageLayout: imageLayout
         };
 
+        // Update entriesCache
+        const currCached = entriesCache.get(activeBookId);
+        if (currCached) {
+          entriesCache.set(activeBookId, currCached.map(t => t.id === editingTransaction.id ? { 
+            ...t, 
+            amount: amountNum, 
+            type: showForm, 
+            description: description, 
+            category: finalCategory || 'General', 
+            mode: finalMode, 
+            date: dateObj, 
+            image_layout: imageLayout 
+          } : t));
+        }
+
         // Update the books local cache state instantly
         setBooks(prevBooks => prevBooks.map(b => 
           b.id === activeBookId 
@@ -1096,16 +1817,47 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           imageLayout: imageLayout
         };
 
+        // Instantly save images in attachmentCache so they persist even if user switches or scrolls immediately
+        attachmentCache.set(tempId, { images: selectedImages, isAi: false });
+
+        // Update entriesCache
+        const currCached = entriesCache.get(activeBookId) || [];
+        entriesCache.set(activeBookId, [{ 
+          id: tempId, 
+          amount: amountNum, 
+          type: showForm, 
+          description: description, 
+          category: finalCategory || 'General', 
+          mode: finalMode, 
+          date: dateObj, 
+          image_layout: imageLayout,
+          user_id: session.user.id,
+          cashbook_id: activeBookId
+        }, ...currCached]);
+
         setBooks(prevBooks => prevBooks.map(b => 
           b.id === activeBookId 
             ? { ...b, transactions: [newTransaction, ...b.transactions] }
             : b
         ));
 
-        // Shutdown popup form immediately, giving an incredibly fast, instant UI visual feel!
-        setShowForm(null);
-        resetForm();
-        setIsSubmitting(false);
+        // Let field inputs reset while keeping the form open or closed based on submitAndAddNew state
+        if (submitAndAddNew) {
+          resetFormFields(true); // reset inputs but preserve mode
+          setQuickAddSuccess(true);
+          setTimeout(() => setQuickAddSuccess(false), 1500);
+          setIsSubmitting(false);
+
+          // Focus description right after reset
+          setTimeout(() => {
+            descriptionInputRef.current?.focus();
+          }, 80);
+        } else {
+          // Shutdown popup form immediately, giving an incredibly fast, instant UI visual feel!
+          setShowForm(null);
+          resetForm();
+          setIsSubmitting(false);
+        }
 
         // 2. Perform background DB core insertion & attachments pipeline
         if (supabase) {
@@ -1201,6 +1953,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       }
     }
 
+    // Synchronize entries cache for the active book
+    const currCached = entriesCache.get(activeBookId);
+    if (currCached) {
+      entriesCache.set(activeBookId, currCached.filter(t => t.id !== idToDelete));
+    }
+
     setBooks(books.map(b => 
       b.id === activeBookId 
         ? { ...b, transactions: b.transactions.filter(t => t.id !== idToDelete) }
@@ -1270,17 +2028,23 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     }
   };
 
-  const resetForm = () => {
-    setShowForm(null);
-    setEditingTransaction(null);
+  const resetFormFields = (keepMode?: boolean) => {
     setAmount('');
     setDescription('');
     setCategory('Food');
     setCustomCategory('');
-    setMode('Cash');
-    setCustomMode('');
+    if (!keepMode) {
+      setMode('Cash');
+      setCustomMode('');
+    }
     setTransactionDate(safeToDateTimeLocal(new Date()));
     setSelectedImages([]);
+  };
+
+  const resetForm = () => {
+    setShowForm(null);
+    setEditingTransaction(null);
+    resetFormFields(false);
     setTransactionTypeFilter('all');
     setTransactionDurationFilter('All');
     setTransactionCategoryFilter('All');
@@ -2609,16 +3373,38 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                             )}>{date}</h4>
                           </div>
                           
-                          {transactions.map((t, idx) => {
-                            // Pre-calculated O(1) constant running balance lookup
-                            const runningBalance = runningBalancesMap.get(t.id) || 0;
+                          {transactions.map((t) => (
+                            <MobileTransactionRow
+                              key={t.id}
+                              t={t}
+                              runningBalance={runningBalancesMap.get(t.id) || 0}
+                              selected={selectedTransactions.has(t.id)}
+                              isCurrentlyDeleting={animatingDeleteId === t.id}
+                              onTouchStart={onTouchStart}
+                              onTouchEnd={onTouchEnd}
+                              onClick={handleTransactionPress}
+                              handleEditTransaction={handleEditTransaction}
+                              handleDeleteTransaction={handleDeleteTransaction}
+                              handleRetryUpload={handleRetryUpload}
+                              uploadStatuses={uploadStatuses}
+                              setPreviewImages={setPreviewImages}
+                              setPreviewIndex={setPreviewIndex}
+                              setPreviewRotation={setPreviewRotation}
+                              setPreviewZoom={setPreviewZoom}
+                              theme={theme}
+                            />
+                          ))}
+                          {false && (
+                            transactions.map((t, idx) => {
+                              // Pre-calculated O(1) constant running balance lookup
+                              const runningBalance = runningBalancesMap.get(t.id) || 0;
 
-                            const isCurrentlyDeleting = animatingDeleteId === t.id;
-                            
-                            return (
-                              <motion.div
-                                key={t.id}
-                                initial={{ opacity: 0, y: 10 }}
+                              const isCurrentlyDeleting = animatingDeleteId === t.id;
+                              
+                              return (
+                                <motion.div
+                                  key={t.id}
+                                  initial={{ opacity: 0, y: 10 }}
                                 animate={isCurrentlyDeleting ? { opacity: 0, x: -100, scale: 0.9, height: 0, margin: 0, padding: 0 } : { opacity: 1, y: 0 }}
                                 transition={{ duration: 0.25 }}
                                 onMouseDown={() => onTouchStart(t.id)}
@@ -2802,7 +3588,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                                 </div>
                               </motion.div>
                             );
-                          })}
+                          }))}
                         </div>
                       ));
                     })()
@@ -2906,6 +3692,29 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                               </td>
                             </tr>
                           ) : (
+                            <>
+                              {pagedTransactions.map((t) => (
+                                <DesktopTransactionRow
+                                  key={t.id}
+                                  t={t}
+                                  runningBalance={runningBalancesMap.get(t.id) || 0}
+                                  selected={selectedTransactions.has(t.id)}
+                                  isCurrentlyDeleting={animatingDeleteId === t.id}
+                                  toggleSelectTransaction={toggleSelectTransaction}
+                                  handleEditTransaction={handleEditTransaction}
+                                  handleDeleteTransaction={handleDeleteTransaction}
+                                  handleRetryUpload={handleRetryUpload}
+                                  uploadStatuses={uploadStatuses}
+                                  setPreviewImages={setPreviewImages}
+                                  setPreviewIndex={setPreviewIndex}
+                                  setPreviewRotation={setPreviewRotation}
+                                  setPreviewZoom={setPreviewZoom}
+                                  theme={theme}
+                                />
+                              ))}
+                            </>
+                          )}
+                          {false && (
                             pagedTransactions.map((t, index) => {
                               // Pre-calculated O(1) constant running balance lookup
                               const runningBalance = runningBalancesMap.get(t.id) || 0;
@@ -3103,8 +3912,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                                   </td>
                                 </motion.tr>
                               );
-                            })
-                          )}
+                            }))}
                         </tbody>
                       </table>
                     </div>
@@ -3819,10 +4627,25 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 100 }}
               className={cn(
-                "w-full max-w-lg rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden transition-colors duration-300",
+                "relative w-full max-w-lg rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden transition-colors duration-300",
                 theme === 'dark' ? "bg-zinc-950" : "bg-white"
               )}
             >
+              {/* Quick Add Success Overlay */}
+              <AnimatePresence>
+                {quickAddSuccess && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: -20, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -20, scale: 0.95 }}
+                    className="absolute top-4 left-1/2 -translate-x-1/2 bg-emerald-600 text-white text-[10px] sm:text-xs font-black tracking-widest px-5 py-2.5 rounded-full shadow-xl z-50 flex items-center gap-2 border border-emerald-500/30"
+                  >
+                    <CheckSquare size={13} className="animate-bounce" />
+                    <span>ENTRY SAVED &amp; COMPLETED! ADDING NEXT...</span>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
               {/* Modal Header */}
               <div className={cn(
                 "flex items-center justify-between p-4 sm:p-6 border-b transition-colors duration-300",
@@ -3850,6 +4673,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     theme === 'dark' ? "bg-slate-800" : "bg-slate-100"
                   )}>
                     <button
+                      type="button"
                       onClick={() => setShowForm('in')}
                       className={cn(
                         "flex-1 py-2 sm:py-3 rounded-lg font-bold transition-all text-xs sm:text-sm",
@@ -3861,6 +4685,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       CASH IN
                     </button>
                     <button
+                      type="button"
                       onClick={() => setShowForm('out')}
                       className={cn(
                         "flex-1 py-2 sm:py-3 rounded-lg font-bold transition-all text-xs sm:text-sm",
@@ -3882,6 +4707,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                         type="datetime-local"
                         value={transactionDate}
                         onChange={(e) => setTransactionDate(e.target.value)}
+                        tabIndex={5}
                         className={cn(
                           "w-full h-[52px] px-4 py-3 rounded-xl border-none focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-medium transition-colors duration-300",
                           theme === 'dark' ? "bg-slate-800 text-white" : "bg-slate-50 text-black"
@@ -3892,7 +4718,6 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     <div className="space-y-1.5">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Amount (₹)</label>
                       <input
-                        autoFocus
                         type="number"
                         step="any"
                         min="0"
@@ -3900,6 +4725,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                         value={amount}
                         onChange={(e) => setAmount(e.target.value)}
                         placeholder="0.00"
+                        tabIndex={2}
                         className={cn(
                           "w-full h-[52px] px-4 py-3 rounded-xl border-none focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-medium transition-colors duration-300",
                           theme === 'dark' ? "bg-slate-800 text-white" : "bg-slate-50 text-black"
@@ -3911,10 +4737,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   <div className="space-y-1.5">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Details</label>
                     <textarea
+                      ref={descriptionInputRef}
                       value={description}
                       onChange={(e) => setDescription(e.target.value)}
                       placeholder="Enter transaction details"
                       rows={2}
+                      tabIndex={1}
                       className={cn(
                         "w-full px-4 py-3 rounded-xl border-none focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-medium resize-none transition-colors duration-300",
                         theme === 'dark' ? "bg-slate-800 text-white" : "bg-slate-50 text-black"
@@ -3930,6 +4758,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                           <select
                             value={category}
                             onChange={(e) => setCategory(e.target.value)}
+                            tabIndex={3}
                             className={cn(
                               "w-full h-[52px] px-4 py-3 rounded-xl border-none focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-medium appearance-none transition-colors duration-300",
                               theme === 'dark' ? "bg-slate-800 text-white" : "bg-slate-50 text-black"
@@ -3961,6 +4790,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                           <select
                             value={mode}
                             onChange={(e) => setMode(e.target.value)}
+                            tabIndex={4}
                             className={cn(
                               "w-full h-[52px] px-4 py-3 rounded-xl border-none focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-medium appearance-none transition-colors duration-300",
                               theme === 'dark' ? "bg-slate-800 text-white" : "bg-slate-50 text-black"
@@ -4156,20 +4986,33 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     <button
                       type="button"
                       onClick={resetForm}
-                      className="flex-1 py-3 border border-slate-200 dark:border-slate-800 rounded-xl font-bold text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all text-sm"
+                      className="flex-1 py-3 border border-slate-200 dark:border-slate-800 rounded-xl font-bold text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all text-xs sm:text-sm"
                     >
                       Cancel
                     </button>
+                    {!editingTransaction && (
+                      <button
+                        type="submit"
+                        onClick={() => { vibrate(30); setSubmitAndAddNew(true); }}
+                        className={cn(
+                          "flex-1 py-3 rounded-xl font-bold text-white transition-all active:scale-95 text-xs sm:text-sm",
+                          theme === 'dark' ? "bg-indigo-600 hover:bg-indigo-700 shadow-none" : "bg-indigo-600 hover:bg-indigo-700 shadow-lg shadow-indigo-100"
+                        )}
+                      >
+                        Save &amp; Add New
+                      </button>
+                    )}
                     <button
                       type="submit"
+                      onClick={() => { vibrate(30); setSubmitAndAddNew(false); }}
                       className={cn(
-                        "flex-1 py-3 rounded-xl font-bold text-white transition-all active:scale-95 text-sm",
+                        "flex-1 py-3 rounded-xl font-bold text-white transition-all active:scale-95 text-xs sm:text-sm",
                         showForm === 'in' 
                           ? (theme === 'dark' ? "bg-emerald-600 hover:bg-emerald-700 shadow-none" : "bg-emerald-600 hover:bg-emerald-700 shadow-lg shadow-emerald-100")
                           : (theme === 'dark' ? "bg-rose-600 hover:bg-rose-700 shadow-none" : "bg-rose-600 hover:bg-rose-700 shadow-lg shadow-rose-100")
                       )}
                     >
-                      Save
+                      {editingTransaction ? 'Save Changes' : 'Save'}
                     </button>
                   </div>
                 </form>
