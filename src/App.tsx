@@ -1,11 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from './lib/supabase';
-import Dashboard from './pages/Dashboard';
-import Login from './pages/Login';
-import ResetPassword from './pages/ResetPassword';
 import { Loader2 } from 'lucide-react';
 import { cn } from './lib/utils';
+import SmartUpdateManager from './components/SmartUpdateManager';
+
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const Login = lazy(() => import('./pages/Login'));
+const ResetPassword = lazy(() => import('./pages/ResetPassword'));
 
 function NavigationHandler({ 
   session, 
@@ -31,8 +33,9 @@ function NavigationHandler({
       setLoading(false);
     }, 5000); // 5 second safety net
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    supabase.auth.getSession().then((res) => {
       clearTimeout(sessionTimeout);
+      const session = res?.data?.session || null;
       setSession(session);
       setLoading(false);
       
@@ -125,42 +128,54 @@ export default function App() {
     };
   }, []);
 
+  const suspenseFallback = (
+    <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
+      <div className="flex flex-col items-center gap-4">
+        <Loader2 className="animate-spin text-indigo-600 animate-duration-1000" size={40} />
+        <p className="text-sm font-medium text-slate-500 animate-pulse">Loading view...</p>
+      </div>
+    </div>
+  );
+
   return (
     <Router>
+      <SmartUpdateManager theme={theme} />
       <NavigationHandler 
         session={session} 
         setSession={setSession} 
         setLoading={setLoading} 
       />
       
-      <Routes>
-        {/* Public Routes */}
-        <Route path="/login" element={<Login theme={theme} />} />
-        <Route path="/resetpassword" element={<ResetPassword />} />
+      <Suspense fallback={suspenseFallback}>
+        <Routes>
+          {/* Public Routes */}
+          <Route path="/login" element={<Login theme={theme} />} />
+          <Route path="/resetpassword" element={<ResetPassword />} />
 
-        {/* Protected Routes */}
-        <Route 
-          path="/" 
-          element={
-            session ? (
-              <Dashboard session={session} theme={theme} setTheme={setTheme} />
-            ) : (
-              // If we are still loading initial session, show a loader
-              loading ? (
-                <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
-                  <div className="flex flex-col items-center gap-4">
-                    <Loader2 className="animate-spin text-indigo-600" size={40} />
-                    <p className="text-sm font-medium text-slate-500 animate-pulse">Initializing app...</p>
+          {/* Protected Routes */}
+          <Route 
+            path="/" 
+            element={
+              session ? (
+                <Dashboard session={session} theme={theme} setTheme={setTheme} />
+              ) : (
+                // If we are still loading initial session, show a loader
+                loading ? (
+                  <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
+                    <div className="flex flex-col items-center gap-4">
+                      <Loader2 className="animate-spin text-indigo-600" size={40} />
+                      <p className="text-sm font-medium text-slate-500 animate-pulse">Initializing app...</p>
+                    </div>
                   </div>
-                </div>
-              ) : <Navigate to="/login" replace />
-            )
-          } 
-        />
+                ) : <Navigate to="/login" replace />
+              )
+            } 
+          />
 
-        {/* Fallback */}
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+          {/* Fallback */}
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Suspense>
     </Router>
   );
 }

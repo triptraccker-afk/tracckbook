@@ -10,9 +10,69 @@ const isConfigured = (url: string | undefined, key: string | undefined) => {
   return true;
 };
 
-export const supabase = isConfigured(supabaseUrl, supabaseAnonKey) 
-  ? createClient(supabaseUrl, supabaseAnonKey)
-  : null;
+export const clearSupabaseAuthStorage = () => {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && (key.startsWith('sb-') || key.endsWith('-auth-token'))) {
+          keysToRemove.push(key);
+        }
+      }
+      keysToRemove.forEach(k => {
+        localStorage.removeItem(k);
+        console.warn(`[Supabase Safety] Cleaned up corrupt session key: ${k}`);
+      });
+    } catch (e) {
+      console.error('[Supabase Safety] Error clearing storage:', e);
+    }
+  }
+};
+
+const createWrappedSupabaseClient = () => {
+  if (!isConfigured(supabaseUrl, supabaseAnonKey)) return null;
+
+  const client = createClient(supabaseUrl, supabaseAnonKey);
+
+  // Wrap getSession to handle refresh token invalidation and prevent null-destructure crashes
+  const originalGetSession = client.auth.getSession.bind(client.auth);
+  client.auth.getSession = async () => {
+    try {
+      const res = await originalGetSession();
+      if (res?.error) {
+        const errMsg = res.error.message || '';
+        if (
+          errMsg.includes('Invalid Refresh Token') || 
+          errMsg.includes('Refresh Token Not Found') ||
+          errMsg.includes('invalid_grant') ||
+          errMsg.includes('Refresh token')
+        ) {
+          console.warn('[Supabase Auth Safety] Invalid refresh token detected from getSession, auto-clearing corrupt local storage.');
+          clearSupabaseAuthStorage();
+          res.data = { session: null };
+        }
+      }
+      return res;
+    } catch (err: any) {
+      console.error('[Supabase Auth Safety] getSession threw exception:', err);
+      const errMsg = err?.message || '';
+      if (
+        errMsg.includes('Invalid Refresh Token') || 
+        errMsg.includes('Refresh Token Not Found') ||
+        errMsg.includes('invalid_grant') ||
+        errMsg.includes('Refresh token')
+      ) {
+        clearSupabaseAuthStorage();
+      }
+      return { data: { session: null }, error: err };
+    }
+  };
+
+  return client;
+};
+
+export const supabase = createWrappedSupabaseClient();
 
 if (!supabase) {
   console.warn('Supabase configuration missing or using placeholders:', {
@@ -20,3 +80,4 @@ if (!supabase) {
     key: supabaseAnonKey ? (supabaseAnonKey === 'your_supabase_anon_key' ? 'Placeholder' : 'Present') : 'Missing'
   });
 }
+

@@ -53,3 +53,86 @@ export async function uploadToCloudinary(fileDataUriOrFile: string | File, folde
     throw error;
   }
 }
+
+/**
+ * Optimizes Cloudinary delivery URLs for ultra-low bandwidth usage
+ * Also proxies any non-Cloudinary images through Cloudinary Fetch to protect Supabase egress
+ */
+export function getOptimizedCloudinaryUrl(url: string, type: 'preview' | 'fullscreen'): string {
+  if (!url || typeof url !== 'string') return '';
+  const cloudName = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || 'dd2kcpetc';
+  const transformation = type === 'preview' ? 'f_auto,q_auto,w_300' : 'f_auto,q_auto,w_1200';
+
+  if (!url.includes('cloudinary.com')) {
+    if (url.startsWith('data:')) {
+      return url;
+    }
+    // Egress protection: proxy non-Cloudinary images through Cloudinary image/fetch API
+    return `https://res.cloudinary.com/${cloudName}/image/fetch/${transformation}/${encodeURIComponent(url)}`;
+  }
+
+  if (url.includes('/image/upload/')) {
+    const parts = url.split('/image/upload/');
+    const remaining = parts[1];
+    if (!remaining) return url;
+    
+    const folderAndFile = remaining.split('/');
+    const cleanSegments = folderAndFile.filter(s => {
+      return !(s.includes('w_') || s.includes('q_') || s.includes('f_') || s.includes('c_') || s.includes('h_') || s.includes('dpr_'));
+    });
+    
+    return `${parts[0]}/image/upload/${transformation}/${cleanSegments.join('/')}`;
+  }
+  
+  return url;
+}
+
+/**
+ * Pre-generate lightweight export URLs by stripping transformations and applying lightweight export-specific transforms
+ * Also proxies any non-Cloudinary images through Cloudinary Fetch
+ */
+export function getExportOptimizedCloudinaryUrl(url: string, isCompressed: boolean, isHuge: boolean): string {
+  if (!url || typeof url !== 'string') return '';
+  const cloudName = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || 'dd2kcpetc';
+
+  let transformation = '';
+  if (isCompressed) {
+    if (isHuge) {
+      transformation = 'f_jpg,q_35,w_800';
+    } else {
+      transformation = 'f_jpg,q_40,w_900';
+    }
+  } else {
+    // Original quality mode preservation
+    transformation = 'f_jpg,q_82';
+  }
+
+  if (!url.includes('cloudinary.com')) {
+    if (url.startsWith('data:')) {
+      return url;
+    }
+    // Egress protection: proxy non-Cloudinary images through Cloudinary image/fetch API
+    return `https://res.cloudinary.com/${cloudName}/image/fetch/${transformation}/${encodeURIComponent(url)}`;
+  }
+
+  // Support both /image/upload/ and /upload/ formats
+  const splitter = url.includes('/image/upload/') ? '/image/upload/' : '/upload/';
+  const parts = url.split(splitter);
+  const remaining = parts[1];
+  if (!remaining) return url;
+  
+  const folderAndFile = remaining.split('/');
+  const cleanSegments = folderAndFile.filter(s => {
+    return !(
+      s.includes('w_') || 
+      s.includes('q_') || 
+      s.includes('f_') || 
+      s.includes('c_') || 
+      s.includes('h_') || 
+      s.includes('dpr_') || 
+      s.includes('auto')
+    );
+  });
+  
+  return `${parts[0]}${splitter}${transformation}/${cleanSegments.join('/')}`;
+}

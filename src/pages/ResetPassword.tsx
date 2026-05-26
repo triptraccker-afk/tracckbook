@@ -30,7 +30,8 @@ export default function ResetPassword() {
         setChecking(false);
         return;
       }
-      const { data: { session } } = await supabase.auth.getSession();
+      const res = await supabase.auth.getSession();
+      const session = res?.data?.session || null;
       if (!session) {
         // If no session, they might have accessed this page directly without a recovery token
         // Or the token might have expired.

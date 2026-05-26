@@ -9,7 +9,8 @@ export default function Login({ theme }: { theme: 'light' | 'dark' }) {
   useEffect(() => {
     const checkUser = async () => {
       if (!supabase) return;
-      const { data: { session } } = await supabase.auth.getSession();
+      const res = await supabase.auth.getSession();
+      const session = res?.data?.session || null;
       if (session) {
         navigate('/');
       }

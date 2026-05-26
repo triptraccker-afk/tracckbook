@@ -1,0 +1,8 @@
+{
+  "version": "1.2.5",
+  "releaseNotes": [
+    "Ultra-fast background PDF compilation & optimization workers",
+    "Staggered wave load transitions for cashbook transactions",
+    "Real-time backup caching to eliminate layout jumps & empty flashes"
+  ]
+}
