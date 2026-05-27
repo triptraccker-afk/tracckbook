@@ -68,6 +68,7 @@ import autoTable from 'jspdf-autotable';
 import html2canvas from 'html2canvas';
 import { backgroundExportManager } from '../services/exportManager';
 import DownloadCenter, { DownloadCenterTrigger } from '../components/DownloadCenter';
+import MediaPickerSheet from '../components/MediaPickerSheet';
 
 interface Transaction {
   id: string;
@@ -1709,6 +1710,21 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const multiFileInputRef = useRef<HTMLInputElement>(null);
+  const [isMediaPickerOpen, setIsMediaPickerOpen] = useState(false);
+  const [activeUploadTarget, setActiveUploadTarget] = useState<'ai' | 'transaction' | null>(null);
+
+  const triggerUploadSelector = (target: 'ai' | 'transaction') => {
+    if (window.innerWidth < 768) {
+      setActiveUploadTarget(target);
+      setIsMediaPickerOpen(true);
+    } else {
+      if (target === 'ai') {
+        fileInputRef.current?.click();
+      } else {
+        multiFileInputRef.current?.click();
+      }
+    }
+  };
   const dropdownRef = useRef<HTMLDivElement>(null);
   const reportsRef = useRef<HTMLDivElement>(null);
 
@@ -5674,7 +5690,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     setShowDropZone(false);
                   }
                 }}
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => triggerUploadSelector('ai')}
                 className={cn(
                   "border-2 border-dashed rounded-2xl p-10 flex flex-col items-center justify-center gap-4 transition-all cursor-pointer group",
                   theme === 'dark' ? "border-indigo-900/50 bg-indigo-900/5 hover:bg-indigo-900/10" : "border-indigo-200 bg-indigo-50/30 hover:bg-indigo-50/50"
@@ -6211,7 +6227,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                             {selectedImages.length < 5 && (
                               <button 
                                 type="button"
-                                onClick={() => multiFileInputRef.current?.click()}
+                                onClick={() => triggerUploadSelector('transaction')}
                                 className={cn(
                                   "w-16 h-16 sm:w-20 sm:h-20 flex items-center justify-center border-2 border-dashed rounded-xl text-slate-400 hover:border-indigo-500 hover:text-indigo-500 transition-all",
                                   theme === 'dark' ? "border-slate-800" : "border-slate-200"
@@ -6226,7 +6242,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       
                       {selectedImages.length === 0 && (
                         <div 
-                          onClick={() => multiFileInputRef.current?.click()}
+                          onClick={() => triggerUploadSelector('transaction')}
                           className={cn(
                             "border-2 border-dashed rounded-2xl p-6 flex flex-col items-center justify-center gap-2 hover:border-indigo-300 transition-all cursor-pointer group",
                             theme === 'dark' ? "border-slate-800 hover:border-indigo-500" : "border-slate-200"
@@ -7459,6 +7475,27 @@ Open TrackBook → Import Shared Entries`)}`}
 
       {/* Floating Download Manager Portal */}
       <DownloadCenter theme={theme} isOpen={showDownloadCenter} setIsOpen={setShowDownloadCenter} />
+
+      {/* Premium Media Picker Action Sheet */}
+      <MediaPickerSheet
+        isOpen={isMediaPickerOpen}
+        onClose={() => setIsMediaPickerOpen(false)}
+        theme={theme}
+        onSelectPhoto={() => {
+          if (activeUploadTarget === 'ai') {
+            fileInputRef.current?.click();
+          } else if (activeUploadTarget === 'transaction') {
+            multiFileInputRef.current?.click();
+          }
+        }}
+        onCaptureCamera={(e) => {
+          if (activeUploadTarget === 'ai') {
+            handleFileUpload(e);
+          } else if (activeUploadTarget === 'transaction') {
+            handleImageUpload(e);
+          }
+        }}
+      />
     </div>
   );
 }
