@@ -135,15 +135,24 @@ export default function Auth({
         }
         console.log('SignIn Success:', data);
       } else if (mode === 'forgot') {
+        console.log('Current Origin:', window.location.origin);
         const { error } = await supabase.auth.resetPasswordForEmail(email, {
-          redirectTo: `${redirectTo}/resetpassword`,
+          redirectTo: `${window.location.origin}/resetpassword`
         });
-        if (error) throw error;
-        setSuccess('Password reset link sent to your email!');
+
+        if (error) {
+          console.error('SUPABASE RESET PASSWORD ERROR:', error);
+          setError(error.message);
+          return;
+        }
+
+        setSuccess('Password reset link sent successfully. Check your email.');
       }
     } catch (err: any) {
       console.error('Auth error:', err);
-      if (err.message?.includes('Email not confirmed')) {
+      if (mode === 'forgot') {
+        setError(err.message || 'An error occurred while sending the recovery email.');
+      } else if (err.message?.includes('Email not confirmed')) {
         setError('Email not confirmed. Please check your inbox or spam folder for the verification link.');
       } else if (err.message?.includes('Invalid login credentials')) {
         setError('Invalid email or password. Please try again.');
@@ -196,10 +205,23 @@ export default function Auth({
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: 'auto' }}
                 exit={{ opacity: 0, height: 0 }}
-                className="bg-rose-50 dark:bg-rose-900/20 text-rose-600 dark:text-rose-400 p-2 rounded-lg flex items-start gap-2 text-[10px] font-medium border border-rose-100 dark:border-rose-900/30 overflow-hidden"
+                className="bg-rose-50 dark:bg-rose-900/20 text-rose-600 dark:text-rose-400 p-2.5 rounded-lg flex flex-col gap-1.5 text-[10px] font-medium border border-rose-100 dark:border-rose-900/30 overflow-hidden"
               >
-                <AlertCircle size={12} className="shrink-0 mt-0.5" />
-                <span>{error}</span>
+                <div className="flex items-start gap-2">
+                  <AlertCircle size={12} className="shrink-0 mt-0.5 text-rose-500" />
+                  <span>{error}</span>
+                </div>
+                {error.includes('Error sending recovery email') && (
+                  <div className="mt-1.5 pt-1.5 border-t border-rose-100/50 dark:border-rose-900/30 text-[8.5px] leading-normal text-rose-700 dark:text-rose-400 space-y-1">
+                    <p className="font-bold uppercase tracking-wider text-[8px] text-rose-800 dark:text-rose-300">💡 Supabase SMTP Checklist:</p>
+                    <p>This message is returned directly from Supabase. To resolve it in your Supabase Auth Console:</p>
+                    <ul className="list-disc pl-3.5 space-y-0.5">
+                      <li><strong>SMTP Hour Limit (3/hr)</strong>: Supabase's default SMTP mailer limits password resets to 3 per hour. Wait for the cooldown or add a custom provider (e.g., Resend, Mailgun, SendGrid) under <em>Authentication &gt; Providers &gt; SMTP</em>.</li>
+                      <li><strong>Redirect URL configuration</strong>: Verify <code>{window.location.origin}/**</code> or specific URLs are configured in <em>Authentication &gt; URL Configuration &gt; Redirect URLs</em>.</li>
+                      <li><strong>Disable Double Opt-In</strong>: Under <em>Authentication &gt; Providers &gt; Email</em>, ensure "Confirm email" matches your user registration flow profile.</li>
+                    </ul>
+                  </div>
+                )}
               </motion.div>
             )}
 

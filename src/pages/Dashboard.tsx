@@ -1828,6 +1828,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       if (savedBooks) {
         try {
           const parsed = JSON.parse(savedBooks);
+          // Set cachedCashbooks immediately to synchronize cache checks
+          cachedCashbooks = parsed;
           // Pre-populate entriesCache so we don't flash empty states on hard-refresh
           parsed.forEach((b: any) => {
             if (b.id && Array.isArray(b.transactions)) {
@@ -2067,9 +2069,40 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       }
     } catch (error: any) {
       console.error('Error fetching data from Supabase:', error);
-      const isFailedToFetch = error?.message?.includes('Failed to fetch') || error?.message === 'Failed to fetch';
-      if (isFailedToFetch && (cachedCashbooks || (Array.isArray(books) && books.length > 0))) {
-        console.warn('[fetchData] Failed to fetch live data from Supabase, relying safely on local cache.');
+      const errorMsg = error?.message || '';
+      const isFailedToFetch = errorMsg.includes('Failed to fetch') || 
+                              errorMsg.includes('NetworkError') || 
+                              errorMsg.includes('network error') ||
+                              errorMsg === 'Failed to fetch';
+      
+      if (isFailedToFetch) {
+        console.warn('[fetchData] Failed to fetch live data from Supabase, attempting local cache fallback...');
+        const savedBooks = localStorage.getItem(`cashbooks_${session.user.id}`);
+        if (savedBooks) {
+          try {
+            const parsed = JSON.parse(savedBooks);
+            cachedCashbooks = parsed;
+            parsed.forEach((b: any) => {
+              if (b.id && Array.isArray(b.transactions)) {
+                entriesCache.set(b.id, b.transactions);
+              }
+            });
+            setBooks(parsed.map((b: any) => ({
+              ...b,
+              transactions: (b.transactions || []).map((t: any) => ({
+                ...t,
+                date: t.date ? new Date(t.date) : new Date(),
+                images: t.images || []
+              })),
+              createdAt: b.created_at ? new Date(b.created_at) : (b.createdAt ? new Date(b.createdAt) : new Date())
+            })));
+          } catch (e) {
+            console.error('[fetchData] Failed to parse cache in catch fallback:', e);
+          }
+        } else {
+          // No cached local data yet to show
+          setError('Unable to connect to the database. TrackBook is operating in offline mode.');
+        }
       } else {
         setError(error.message || 'Failed to fetch data');
       }
