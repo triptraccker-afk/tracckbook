@@ -96,7 +96,7 @@ export default function ResetPassword() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 bg-[#f3f7ff] dark:bg-black font-sans transition-colors duration-300">
+    <div className="min-h-screen flex items-center justify-center p-4 bg-[#f3f7ff] dark:bg-black font-lora transition-colors duration-300">
       <motion.div 
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}

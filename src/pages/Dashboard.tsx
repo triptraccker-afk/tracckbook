@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useRef, useMemo, useEffect, useCallback } from 'react';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { 
   Plus, 
   Minus, 
@@ -52,7 +53,9 @@ import {
   Palette,
   ArrowUp,
   ArrowUpDown,
-  MoreVertical
+  MoreVertical,
+  Users,
+  Camera
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
@@ -81,6 +84,9 @@ interface Transaction {
   images?: string[];
   imageLayout?: 'split' | 'merge';
   isAi?: boolean;
+  imported_from_share_code?: string;
+  is_imported?: boolean;
+  import_batch_id?: string;
 }
 
 interface Cashbook {
@@ -125,9 +131,10 @@ async function compressImage(file: File): Promise<Blob | File> {
   }
 
   const options = {
-    maxSizeMB: 0.4,
-    maxWidthOrHeight: 1400,
-    useWebWorker: true
+    maxSizeMB: 1.0, // Increased target size to avoid slow multi-pass iteration cycles
+    maxWidthOrHeight: 1200, // Fast single-pass resize width/height
+    useWebWorker: true,
+    maxIteration: 2 // Guarantee it finishes in maximum 2 iterations for speed
   };
 
   try {
@@ -601,6 +608,14 @@ const MobileTransactionRow = React.memo(({
           )}>
             {t.mode}
           </span>
+          {(t.imported_from_share_code || t.is_imported) && (
+            <span className={cn(
+              "px-2.5 py-1 text-[10px] font-black tracking-wider uppercase rounded-lg transition-colors shrink-0",
+              theme === 'dark' ? "bg-sky-950 text-sky-400 border border-sky-900/30" : "bg-sky-50 text-sky-700 border border-sky-100"
+            )}>
+              Imported
+            </span>
+          )}
         </div>
         <div className="text-right flex flex-col items-end">
           <p className={cn(
@@ -835,11 +850,19 @@ const DesktopTransactionRow = React.memo(({
         </p>
       </td>
       <td className="px-3 sm:px-6 py-4 min-w-[120px]">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <p className={cn(
             "text-sm font-bold transition-colors duration-300",
             theme === 'dark' ? "text-slate-300" : "text-black"
           )}>{t.description || '--'}</p>
+          {(t.imported_from_share_code || t.is_imported) && (
+            <span className={cn(
+              "px-1.5 py-0.5 text-[9px] font-black rounded-full border uppercase shrink-0 transition-all",
+              theme === 'dark' ? "bg-sky-950/40 text-sky-400 border-sky-800/40" : "bg-sky-50 text-sky-600 border-sky-200"
+            )}>
+              Imported
+            </span>
+          )}
           {t.isAi && (
             <span className={cn(
               "px-1.5 py-0.5 text-[9px] font-black rounded-full flex items-center gap-0.5 border",
@@ -934,7 +957,7 @@ const SummaryCards = React.memo(({ totals, theme }: { totals: { in: number; out:
     <>
       {/* Mobile Summary Card (Reference Image Style) */}
       <div className={cn(
-        "sm:hidden rounded-2xl border shadow-sm overflow-hidden transition-colors duration-300",
+        "lg:hidden rounded-2xl border shadow-sm overflow-hidden transition-colors duration-300",
         theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-100"
       )}>
         <div className="p-3 px-4 space-y-2.5">
@@ -1278,7 +1301,22 @@ const CATEGORIES = ['Food', 'Travel', 'Advance', 'Shopping', 'Custom'];
 const MODES = ['Card', 'UPI', 'Cash', 'Custom'];
 const DURATIONS = ['All', 'Today', 'Yesterday', 'Last Week'];
 
+export function getBookSlug(name: string, id: string): string {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
+  return slug || id;
+}
+
 export default function Dashboard({ session, theme, setTheme }: { session: any, theme: 'light' | 'dark', setTheme: React.Dispatch<React.SetStateAction<'light' | 'dark'>> }) {
+  // Routing Hooks
+  const { bookSlug, tabName } = useParams();
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  const currentTabName = tabName || 'entries';
+
   // Global State
   const [userName, setUserName] = useState('Siva');
   const [isHelpOpen, setIsHelpOpen] = useState(false);
@@ -1288,9 +1326,64 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [books, setBooks] = useState<Cashbook[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [activeBookId, setActiveBookId] = useState<string | null>(null);
+  const [activeBookId, setActiveBookIdState] = useState<string | null>(null);
+  const [isEntriesLoading, setIsEntriesLoading] = useState(false);
+
+  const setActiveBookId = (id: string | null) => {
+    setActiveBookIdState(id);
+    if (id) {
+      const cached = entriesCache.get(id);
+      const hasFetched = lastFetchTimeCache.has(id);
+      if (!cached || cached.length === 0 || !hasFetched) {
+        setIsEntriesLoading(true);
+      }
+    } else {
+      setIsEntriesLoading(false);
+    }
+  };
   const [searchQuery, setSearchQuery] = useState('');
   const [searchQueryInput, setSearchQueryInput] = useState('');
+
+  // Routing synchronization wrapper
+  const handleSelectBook = (id: string | null) => {
+    setActiveBookId(id);
+    if (id === null) {
+      navigate('/cashbooks');
+    } else {
+      const book = books.find(b => b.id === id);
+      if (book) {
+        const slug = getBookSlug(book.name, book.id);
+        navigate(`/cashbooks/${slug}/entries`);
+      } else {
+        navigate('/cashbooks');
+      }
+    }
+  };
+
+  // Synchronize route with activeBookId & tabName
+  useEffect(() => {
+    if (isLoading) return;
+
+    if (bookSlug && books.length > 0) {
+      const foundBook = books.find(b => getBookSlug(b.name, b.id) === bookSlug);
+      if (foundBook) {
+        if (activeBookId !== foundBook.id) {
+          setActiveBookId(foundBook.id);
+        }
+      } else {
+        // Redirect if slug is invalid
+        navigate('/cashbooks', { replace: true });
+      }
+    } else if (!bookSlug) {
+      if (activeBookId !== null) {
+        setActiveBookId(null);
+      }
+      // Redirect home root / to /cashbooks if authenticated
+      if (location.pathname === '/') {
+        navigate('/cashbooks', { replace: true });
+      }
+    }
+  }, [bookSlug, books, activeBookId, isLoading, location.pathname]);
 
   // Performance timers
   const lastBookOpenStart = useRef<number | null>(null);
@@ -1354,6 +1447,27 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [showDropZone, setShowDropZone] = useState(false);
   const [aiMode, setAiMode] = useState<'split' | 'merge'>('split');
   const [error, setError] = useState<string | null>(null);
+
+  // Intelligent TrackBook AI Upload states
+  const [aiWorkflowStep, setAiWorkflowStep] = useState<'group' | 'upload' | 'scanning' | 'confirmation'>('group');
+  const [aiGroupSize, setAiGroupSize] = useState<number>(1);
+  const [showGroupSizeModal, setShowGroupSizeModal] = useState(false);
+  const [aiScanStatus, setAiScanStatus] = useState<string>('Analyzing bill...');
+  const [aiFile, setAiFile] = useState<File | null>(null);
+  const [aiFilePreviewUrl, setAiFilePreviewUrl] = useState<string>('');
+  const [isHandwritten, setIsHandwritten] = useState<boolean>(false);
+  const [handwrittenTime, setHandwrittenTime] = useState<string>('12:00 PM');
+  const [handwrittenIsFood, setHandwrittenIsFood] = useState<boolean>(true);
+
+  // AI Extracted variables for Preview Screen
+  const [aiAmount, setAiAmount] = useState<string>('');
+  const [aiMerchant, setAiMerchant] = useState<string>('');
+  const [aiBillType, setAiBillType] = useState<string>('Food');
+  const [aiCategory, setAiCategory] = useState<string>('Food');
+  const [aiDate, setAiDate] = useState<string>('');
+  const [aiTime, setAiTime] = useState<string>('');
+  const [aiMealType, setAiMealType] = useState<string>('');
+  const [aiDescription, setAiDescription] = useState<string>('');
 
   // Share Entries states
   const [showShareModal, setShowShareModal] = useState(false);
@@ -1497,7 +1611,6 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [showExitConfirm, setShowExitConfirm] = useState(false);
   const [deleteConfirmed, setDeleteConfirmed] = useState(false);
   const [animatingDeleteId, setAnimatingDeleteId] = useState<string | null>(null);
-  const [isEntriesLoading, setIsEntriesLoading] = useState(false);
   const [visibleCount, setVisibleCount] = useState(20);
   const [uploadStatuses, setUploadStatuses] = useState<Record<string, {
     status: 'uploading' | 'success' | 'failed';
@@ -1567,7 +1680,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     if (selectedBooks.size > 0) {
       toggleSelectBook(id);
     } else {
-      setActiveBookId(id);
+      handleSelectBook(id);
     }
   };
 
@@ -1646,7 +1759,20 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       } else if (lastKey === 'A') {
         if (key === 'U' && activeBookId) {
           e.preventDefault();
+          setAiWorkflowStep('group');
+          setAiGroupSize(1);
+          setAiFile(null);
+          setAiFilePreviewUrl('');
           setAiConstructionModal('upload');
+          lastKey = '';
+        }
+      } else if (lastKey === 'I') {
+        if (key === 'M') {
+          e.preventDefault();
+          setShowImportModal(true);
+          setImportCode('');
+          setImportError('');
+          setImportSuccess(false);
           lastKey = '';
         }
       }
@@ -1664,28 +1790,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     setTheme(prev => prev === 'light' ? 'dark' : 'light');
   };
 
-  // Back button handling for mobile
-  useEffect(() => {
-    const handlePopState = (event: PopStateEvent) => {
-      if (activeBookId) {
-        setActiveBookId(null);
-        // Prevent default back behavior
-        window.history.pushState(null, '', window.location.pathname);
-      } else {
-        setShowExitConfirm(true);
-        // Prevent default back behavior
-        window.history.pushState(null, '', window.location.pathname);
-      }
-    };
 
-    // Push initial state
-    window.history.pushState(null, '', window.location.pathname);
-    window.addEventListener('popstate', handlePopState);
-
-    return () => {
-      window.removeEventListener('popstate', handlePopState);
-    };
-  }, [activeBookId]);
 
   const moveImage = (index: number, direction: 'up' | 'down') => {
     const newImages = [...selectedImages];
@@ -1709,9 +1814,27 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [reportLoading, setReportLoading] = useState<{ type: 'excel' | 'pdf', progress: number, message?: string } | null>(null);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const aiOcrFileInputRef = useRef<HTMLInputElement>(null);
   const multiFileInputRef = useRef<HTMLInputElement>(null);
   const [isMediaPickerOpen, setIsMediaPickerOpen] = useState(false);
   const [activeUploadTarget, setActiveUploadTarget] = useState<'ai' | 'transaction' | null>(null);
+
+  const handleAiOcrFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      setAiFile(file);
+      if (file.type.startsWith('image/')) {
+        setAiFilePreviewUrl(URL.createObjectURL(file));
+      } else {
+        setAiFilePreviewUrl('');
+      }
+      setAiWorkflowStep('group');
+      setAiGroupSize(1);
+      setError(null);
+      setAiConstructionModal('upload');
+    }
+    if (e.target) e.target.value = '';
+  };
 
   const triggerUploadSelector = (target: 'ai' | 'transaction') => {
     if (window.innerWidth < 768) {
@@ -1889,7 +2012,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           };
         });
       });
-      if (activeBookId && entriesCache.has(activeBookId)) {
+      if (activeBookId && entriesCache.has(activeBookId) && lastFetchTimeCache.has(activeBookId)) {
         setIsEntriesLoading(false);
         setIsLoading(false);
       }
@@ -1908,7 +2031,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     }
 
     try {
-      if (activeBookId && (!entriesCache.has(activeBookId) || entriesCache.get(activeBookId)?.length === 0)) {
+      if (activeBookId && (!entriesCache.has(activeBookId) || entriesCache.get(activeBookId)?.length === 0 || !lastFetchTimeCache.has(activeBookId))) {
         setIsEntriesLoading(true);
       }
       console.log('[fetchData] Refreshing books from Supabase...');
@@ -1925,12 +2048,47 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         if (activeBookId) {
           console.log('[fetchData] Fetching required columns for active book:', activeBookId);
           // PART 2: Select ONLY required columns! Optimize queries aggressively!
-          const { data: entries, error: entError } = await supabase
-            .from('entries')
-            .select('id, amount, type, description, category, mode, date, image_layout, cashbook_id, user_id')
-            .eq('cashbook_id', activeBookId)
-            .eq('user_id', session.user.id)
-            .order('date', { ascending: false });
+          let entries: any[] | null = null;
+          let entError: any = null;
+
+          try {
+            // Attempt 1: Fetch with is_imported and import_batch_id
+            const { data, error } = await supabase
+              .from('entries')
+              .select('id, amount, type, description, category, mode, date, image_layout, cashbook_id, user_id, imported_from_share_code, is_imported, import_batch_id')
+              .eq('cashbook_id', activeBookId)
+              .eq('user_id', session.user.id)
+              .order('date', { ascending: false });
+            
+            if (error) throw error;
+            entries = data;
+          } catch (e1: any) {
+            console.warn('[fetchData] Select Attempt 1 warning or missing columns:', e1?.message);
+            try {
+              // Attempt 2: Fetch with imported_from_share_code only
+              const { data, error } = await supabase
+                .from('entries')
+                .select('id, amount, type, description, category, mode, date, image_layout, cashbook_id, user_id, imported_from_share_code')
+                .eq('cashbook_id', activeBookId)
+                .eq('user_id', session.user.id)
+                .order('date', { ascending: false });
+              
+              if (error) throw error;
+              entries = data;
+            } catch (e2: any) {
+              console.warn('[fetchData] Select Attempt 2 warning:', e2?.message);
+              // Attempt 3: Strict minimal fallback
+              const { data, error } = await supabase
+                .from('entries')
+                .select('id, amount, type, description, category, mode, date, image_layout, cashbook_id, user_id')
+                .eq('cashbook_id', activeBookId)
+                .eq('user_id', session.user.id)
+                .order('date', { ascending: false });
+              
+              if (error) entError = error;
+              entries = data;
+            }
+          }
 
           if (entError) throw entError;
           if (entries) {
@@ -1973,12 +2131,16 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   // Keep it in cache
                   attachmentCache.set(t.id, existing);
                 }
+                const importedCode = t.imported_from_share_code || t.importedFromShareCode;
                 return {
                   ...t,
                   date: t.date ? new Date(t.date) : new Date(),
                   images: existing ? existing.images : [],
                   imageLayout: t.image_layout || 'split',
-                  isAi: existing ? existing.isAi : false
+                  isAi: existing ? existing.isAi : false,
+                  imported_from_share_code: importedCode,
+                  is_imported: t.is_imported || !!importedCode,
+                  import_batch_id: t.import_batch_id || importedCode
                 };
               }),
               createdAt: cb.created_at ? new Date(cb.created_at) : (cb.createdAt ? new Date(cb.createdAt) : new Date())
@@ -2543,7 +2705,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         model: "gemini-3-flash-preview",
         contents: helpQuery,
         config: {
-          systemInstruction: "You are a helpful assistant for 'Track Book', a financial management app. The app allows users to create multiple books, add transactions (Cash In/Out), upload receipt images for AI detection (using Gemini), and export reports in Excel/PDF. Users can also filter transactions by type, category, and duration. Answer the user's question about how to use the app or general financial advice within the context of this app. Keep it concise.",
+          systemInstruction: "You are a helpful assistant for 'Track Book', a financial management app. The app allows users to create multiple books, add transactions (Cash In/Out), upload receipt images for AI detection (using TrackBook AI), and export reports in Excel/PDF. Users can also filter transactions by type, category, and duration. Answer the user's question about how to use the app or general financial advice within the context of this app. Keep it concise.",
         },
       });
       setHelpResponse(response.text || "I'm sorry, I couldn't generate a response.");
@@ -2579,7 +2741,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       setBooks(books.filter(b => b.id !== deleteConfirmId));
       setDeleteConfirmId(null);
       if (activeBookId === deleteConfirmId) {
-        setActiveBookId(null);
+        handleSelectBook(null);
       }
     }
   };
@@ -3372,6 +3534,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             cashbook_id: targetBookId,
             user_id: session.user.id,
             imported_from_share_code: cleanedCode, // Rule 6
+            is_imported: true,
+            import_batch_id: cleanedCode,
             images: t.images || [] // kept in memory for attachments insert
           });
         }
@@ -3405,51 +3569,69 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                               err1.message?.includes('does not exist');
 
         if (isColumnError) {
-          // Attempt 2: Without imported_from_share_code
-          console.log('[Import] Retrying without imported_from_share_code...');
-          const inserts2 = cleanInserts.map(({ imported_from_share_code, ...rest }) => rest);
-          const { error: err2 } = await supabase
+          // Rescue Step: Retry without is_imported and import_batch_id first (keep original column set)
+          console.log('[Import] Retrying without is_imported and import_batch_id...');
+          const baseInserts = cleanInserts.map(({ is_imported, import_batch_id, ...rest }) => rest);
+          const { error: errBase } = await supabase
             .from('entries')
-            .insert(inserts2);
+            .insert(baseInserts);
 
-          if (err2) {
-            console.warn('[Import] Attempt 2 failed:', err2.message, err2.code);
-            const isColError2 = err2.code === '42703' || 
-                                err2.message?.includes('column') || 
-                                err2.message?.includes('does not exist');
-
-            if (isColError2) {
-              // Attempt 3: Without image_layout
-              console.log('[Import] Retrying without image_layout...');
-              const inserts3 = cleanInserts.map(({ image_layout, ...rest }) => rest);
-              const { error: err3 } = await supabase
+          if (errBase) {
+            console.warn('[Import] Retry without is_imported/import_batch_id failed:', errBase.message);
+            const isColErrorBase = errBase.code === '42703' || 
+                                   errBase.message?.includes('column') || 
+                                   errBase.message?.includes('does not exist');
+            
+            if (isColErrorBase) {
+              // Attempt 2: Without imported_from_share_code
+              console.log('[Import] Retrying without imported_from_share_code...');
+              const inserts2 = baseInserts.map(({ imported_from_share_code, ...rest }) => rest);
+              const { error: err2 } = await supabase
                 .from('entries')
-                .insert(inserts3);
+                .insert(inserts2);
 
-              if (err3) {
-                console.warn('[Import] Attempt 3 failed:', err3.message, err3.code);
-                const isColError3 = err3.code === '42703' || 
-                                    err3.message?.includes('column') || 
-                                    err3.message?.includes('does not exist');
+              if (err2) {
+                console.warn('[Import] Attempt 2 failed:', err2.message, err2.code);
+                const isColError2 = err2.code === '42703' || 
+                                    err2.message?.includes('column') || 
+                                    err2.message?.includes('does not exist');
 
-                if (isColError3) {
-                  // Attempt 4: Without both image_layout and imported_from_share_code
-                  console.log('[Import] Retrying without both image_layout and imported_from_share_code...');
-                  const inserts4 = cleanInserts.map(({ image_layout, imported_from_share_code, ...rest }) => rest);
-                  const { error: err4 } = await supabase
+                if (isColError2) {
+                  // Attempt 3: Without image_layout
+                  console.log('[Import] Retrying without image_layout...');
+                  const inserts3 = baseInserts.map(({ image_layout, ...rest }) => rest);
+                  const { error: err3 } = await supabase
                     .from('entries')
-                    .insert(inserts4);
+                    .insert(inserts3);
 
-                  if (err4) {
-                    console.error('[Import] Attempt 4 failed:', err4);
-                    throw new Error('Failed to import entries database save failed.');
+                  if (err3) {
+                    console.warn('[Import] Attempt 3 failed:', err3.message, err3.code);
+                    const isColError3 = err3.code === '42703' || 
+                                        err3.message?.includes('column') || 
+                                        err3.message?.includes('does not exist');
+
+                    if (isColError3) {
+                      // Attempt 4: Without both image_layout and imported_from_share_code
+                      console.log('[Import] Retrying without both image_layout and imported_from_share_code...');
+                      const inserts4 = baseInserts.map(({ image_layout, imported_from_share_code, ...rest }) => rest);
+                      const { error: err4 } = await supabase
+                        .from('entries')
+                        .insert(inserts4);
+
+                      if (err4) {
+                        console.error('[Import] Attempt 4 failed:', err4);
+                        throw new Error('Failed to import entries database save failed.');
+                      }
+                    } else {
+                      throw err3;
+                    }
                   }
                 } else {
-                  throw err3;
+                  throw err2;
                 }
               }
             } else {
-              throw err2;
+              throw errBase;
             }
           }
         } else {
@@ -3543,7 +3725,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       // Fetch fresh data asynchronously while staying optimistic so UI is instant and doesn't block!
       const updatePromise = fetchData();
       if (targetBookId) {
-        setActiveBookId(targetBookId);
+        handleSelectBook(targetBookId);
       }
       
       setTimeout(() => {
@@ -3916,7 +4098,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     const filesToProcess = Array.from(files).slice(0, 5) as File[];
 
     setIsUploading(true);
-    setUploadingMessage('Detecting bills with Gemini...');
+    setUploadingMessage('Detecting bills with TrackBook AI...');
     setError(null);
 
     try {
@@ -4163,6 +4345,507 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     }
     // Reset input
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const startAiUploadReceiptParsing = async (filesInput: File | File[] | FileList) => {
+    if (!activeBookId) return;
+
+    let files: File[] = [];
+    if (filesInput instanceof File) {
+      files = [filesInput];
+    } else if (filesInput instanceof FileList) {
+      files = Array.from(filesInput);
+    } else if (Array.isArray(filesInput)) {
+      files = filesInput;
+    }
+
+    if (files.length === 0) return;
+
+    if (files.length === 1) {
+      const file = files[0];
+      setAiWorkflowStep('scanning');
+      setAiFile(file);
+      setError(null);
+      
+      // Create preview
+      if (file.type.startsWith('image/')) {
+        const previewUrl = URL.createObjectURL(file);
+        setAiFilePreviewUrl(previewUrl);
+      } else {
+        setAiFilePreviewUrl('');
+      }
+
+      // Initialize animation status intervals
+      let statusIndex = 0;
+      const statuses = [
+        'Analyzing bill...',
+        'Extracting bill information...',
+        'Detecting categories...',
+        'Structuring receipt details...'
+      ];
+      setAiScanStatus(statuses[0]);
+      const interval = setInterval(() => {
+        statusIndex++;
+        if (statusIndex < statuses.length) {
+          setAiScanStatus(statuses[statusIndex]);
+        } else {
+          statusIndex = 0;
+          setAiScanStatus(statuses[0]);
+        }
+      }, 1200);
+
+      try {
+        // 1. Read base64 representation of file
+        const base64String = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const resStr = reader.result as string;
+            resolve(resStr.split(',')[1]);
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+
+        const retryIntervals = [2000, 5000, 10000]; // Delays: Attempt 1, 2, 3
+        const maxAttempts = 4;
+        let response: Response | null = null;
+        let finalError: any = null;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          try {
+            console.log(`[Client AI] OCR Request Attempt ${attempt}...`);
+            response = await fetch('/api/gemini/parse-receipt', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                base64Image: base64String,
+                mimeType: file.type || 'image/jpeg',
+                groupSize: aiGroupSize,
+                isHandwritten,
+                handwrittenTime,
+                handwrittenIsFood
+              })
+            });
+
+            if (!response.ok) {
+              const errJson = await response.json().catch(() => ({}));
+              throw new Error(errJson.error || 'Receipt parsing returned an error status.');
+            }
+            finalError = null;
+            break; // Success! Exit retry loop
+          } catch (err: any) {
+            finalError = err;
+            console.error(`[Client AI] Attempt ${attempt} failed:`, err);
+            
+            const errMsg = String(err.message || '').toUpperCase();
+            const isNonRetryable = errMsg.includes("CONFIGURATION") || errMsg.includes("ADMINISTRATOR") || errMsg.includes("QUOTA EXCEEDED") || errMsg.includes("TOO LARGE") || errMsg.includes("API_KEY") || errMsg.includes("API KEY") || errMsg.includes("EXPIRED") || errMsg.includes("INVALID");
+            if (isNonRetryable) {
+              console.log("[Client AI] Non-retryable Error detected. Exiting retry loop instantly.");
+              break;
+            }
+            
+            if (attempt < maxAttempts) {
+              const delay = retryIntervals[attempt - 1];
+              setAiScanStatus(`AI service is busy. Retrying in ${delay / 1000}s...`);
+              await new Promise(resolve => setTimeout(resolve, delay));
+            }
+          }
+        }
+
+        clearInterval(interval);
+
+        if (finalError) {
+          throw finalError;
+        }
+
+        if (!response) {
+          throw new Error("No response from the server.");
+        }
+
+        const result = await response.json();
+        
+        // Auto fill intermediate values (Steps 7, 8 & 9)
+        setAiAmount(String(result.amount));
+        setAiMerchant(result.merchant || 'Unknown Vendor');
+        setAiBillType(result.billType || 'Food');
+        setAiCategory(result.category || 'Food');
+        setAiDate(result.date || '27-05-2026');
+        setAiTime(result.time || '12:00 PM');
+        setAiMealType(result.mealType || '');
+        setAiDescription(result.description || 'Food Expense');
+
+        // Transition to final result preview
+        setAiWorkflowStep('confirmation');
+      } catch (err: any) {
+        clearInterval(interval);
+        console.error('[AI Parse Error]', err);
+        setError(err.message || "AI service is busy. Please try again in a few moments.");
+        setAiWorkflowStep('group');
+      }
+      return;
+    }
+
+    // Multiple files!
+    setAiWorkflowStep('scanning');
+    setError(null);
+
+    const totalFiles = files.length;
+    const userIdentifier = session?.user?.email || session?.user?.id || 'anonymous';
+    const cloudinaryFolder = `trackbook/${userIdentifier}`;
+
+    const newTransactionsToAppend: Transaction[] = [];
+    const cacheUpdates: Array<{ id: string; item: any }> = [];
+
+    for (let i = 0; i < totalFiles; i++) {
+      const file = files[i];
+      setAiScanStatus(`Analyzing bill ${i + 1} of ${totalFiles}...`);
+
+      try {
+        // Read file to base64
+        const base64String = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const resStr = reader.result as string;
+            resolve(resStr.split(',')[1]);
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+
+        // OCR request with retry logic
+        const retryIntervals = [2000, 5000, 10000];
+        const maxAttempts = 4;
+        let response: Response | null = null;
+        let finalError: any = null;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          try {
+            response = await fetch('/api/gemini/parse-receipt', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                base64Image: base64String,
+                mimeType: file.type || 'image/jpeg',
+                groupSize: aiGroupSize,
+                isHandwritten,
+                handwrittenTime,
+                handwrittenIsFood
+              })
+            });
+
+            if (!response.ok) {
+              const errJson = await response.json().catch(() => ({}));
+              throw new Error(errJson.error || 'Receipt parsing returned an error status.');
+            }
+            finalError = null;
+            break;
+          } catch (err: any) {
+            finalError = err;
+            const errMsg = String(err.message || '').toUpperCase();
+            const isNonRetryable = errMsg.includes("CONFIGURATION") || errMsg.includes("ADMINISTRATOR") || errMsg.includes("QUOTA EXCEEDED") || errMsg.includes("TOO LARGE") || errMsg.includes("API_KEY") || errMsg.includes("API KEY") || errMsg.includes("EXPIRED") || errMsg.includes("INVALID");
+            if (isNonRetryable) {
+              console.log("[Client AI] Non-retryable Error detected. Exiting retry loop instantly.");
+              break;
+            }
+            if (attempt < maxAttempts) {
+              const delay = retryIntervals[attempt - 1];
+              setAiScanStatus(`Analyzing bill ${i + 1} of ${totalFiles}...\nAI is busy. Retrying in ${delay / 1000}s...`);
+              await new Promise(resolve => setTimeout(resolve, delay));
+            }
+          }
+        }
+
+        if (finalError) throw finalError;
+        if (!response) throw new Error("No response from server.");
+
+        const result = await response.json();
+
+        // Extracted values
+        const parsedAmount = parseFloat(result.amount) || 0;
+        const parsedMerchant = result.merchant || 'Unknown Vendor';
+        const parsedBillType = result.billType || 'Food';
+        const parsedCategory = result.category || 'Food';
+        const parsedDate = result.date || '27-05-2026';
+        const parsedDescription = result.description || 'Food Expense';
+        const parsedTime = result.time || '12:00 PM';
+        const parsedMealType = result.mealType || '';
+
+        // Generate Transaction
+        const parts = parsedDate.split('-');
+        let dateObj = new Date();
+        if (parts.length === 3) {
+          dateObj = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+        }
+
+        const tempId = safeUUID();
+        const localFileUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : '';
+        const imagesToStore = localFileUrl ? [localFileUrl] : [];
+
+        const ocrData = {
+          merchant: parsedMerchant,
+          billType: parsedBillType,
+          extractedTime: parsedTime,
+          mealType: parsedMealType,
+          groupSize: aiGroupSize
+        };
+
+        const newTransaction: Transaction = {
+          id: tempId,
+          amount: parsedAmount,
+          type: 'out',
+          description: parsedDescription,
+          category: parsedCategory || 'General',
+          mode: 'Online',
+          date: dateObj,
+          images: imagesToStore,
+          imageLayout: 'split',
+          isAi: true
+        };
+
+        // Cache parameters
+        attachmentCache.set(tempId, { images: imagesToStore, isAi: true });
+        newTransactionsToAppend.push(newTransaction);
+
+        cacheUpdates.push({
+          id: tempId,
+          item: {
+            id: tempId,
+            amount: parsedAmount,
+            type: 'out',
+            description: parsedDescription,
+            category: parsedCategory || 'General',
+            mode: 'Online',
+            date: dateObj,
+            image_layout: 'split',
+            user_id: session?.user?.id,
+            cashbook_id: activeBookId
+          }
+        });
+
+        // Background database uploading & synchronization
+        if (supabase && session) {
+          (async () => {
+            try {
+              let imageUrl = '';
+              imageUrl = await uploadToCloudinary(file, cloudinaryFolder);
+
+              const payload: any = {
+                id: tempId,
+                cashbook_id: activeBookId,
+                user_id: session.user.id,
+                amount: parsedAmount,
+                type: 'out',
+                description: parsedDescription,
+                category: parsedCategory || 'General',
+                mode: 'Online',
+                date: safeToISOString(dateObj),
+                image_layout: 'split'
+              };
+
+              const { error: entryError } = await supabase.from('entries').insert([payload]);
+              if (entryError) {
+                if (entryError.code === '42703' || entryError.message?.includes('image_layout')) {
+                  delete payload.image_layout;
+                  const { error: retryError } = await supabase.from('entries').insert([payload]);
+                  if (retryError) throw retryError;
+                } else {
+                  throw entryError;
+                }
+              }
+
+              if (imageUrl) {
+                const validatedUrl = await validateAndResolveCloudinaryUrl(imageUrl, session.user.id);
+                const aiAttachmentInserts = [{
+                  entry_id: tempId,
+                  user_id: session.user.id,
+                  file_url: validatedUrl,
+                  file_name: JSON.stringify({
+                    original_name: file.name,
+                    ocr: ocrData,
+                    classification: parsedBillType,
+                    groupSize: aiGroupSize
+                  }),
+                  file_type: 'image'
+                }];
+                await supabase.from('ai_attachments').insert(aiAttachmentInserts);
+              }
+            } catch (dbErr) {
+              console.error('[AI Save Bulk BG] Error for file:', file.name, dbErr);
+            }
+          })();
+        }
+
+      } catch (err: any) {
+        console.error(`[AI Parse Bulk Error] on file ${file.name}:`, err);
+        setError(err.message || `Failed to parse file: ${file.name}`);
+      }
+    }
+
+    if (newTransactionsToAppend.length > 0) {
+      // Refresh local React states
+      setBooks(prevBooks => prevBooks.map(b => 
+        b.id === activeBookId 
+          ? { ...b, transactions: [...newTransactionsToAppend, ...b.transactions] }
+          : b
+      ));
+
+      // Refresh cache
+      const currCached = entriesCache.get(activeBookId) || [];
+      entriesCache.set(activeBookId, [...cacheUpdates.map(cu => cu.item), ...currCached]);
+
+      // Trigger standard data refetch background if needed
+      if (supabase && session) {
+        setTimeout(() => {
+          fetchData().catch(console.error);
+        }, 1000);
+      }
+    }
+
+    // Reset workflow and redirect
+    setAiWorkflowStep('group');
+    setAiGroupSize(1);
+    setIsUploading(false);
+    setAiConstructionModal(null);
+
+    const slug = getBookSlug(activeBook?.name || '', activeBook?.id || '');
+    navigate(`/cashbooks/${slug}/entries`);
+  };
+
+  const handleSaveAiEntry = async () => {
+    if (!activeBookId) return;
+    setIsUploading(true);
+    setError(null);
+
+    const amountNum = parseFloat(aiAmount) || 0;
+    
+    // Parse the date (which is in DD-MM-YYYY format)
+    const parts = aiDate.split('-');
+    let dateObj = new Date();
+    if (parts.length === 3) {
+      dateObj = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+    }
+
+    const tempId = safeUUID();
+    const userIdentifier = session?.user?.email || session?.user?.id || 'anonymous';
+    const cloudinaryFolder = `trackbook/${userIdentifier}`;
+
+    // Prepare arrays of selected files
+    const localBlobUrl = aiFilePreviewUrl;
+    const imagesToStore = localBlobUrl ? [localBlobUrl] : [];
+
+    const ocrData = {
+      merchant: aiMerchant,
+      billType: aiBillType,
+      extractedTime: aiTime,
+      mealType: aiMealType,
+      groupSize: aiGroupSize
+    };
+
+    const newTransaction: Transaction = {
+      id: tempId,
+      amount: amountNum,
+      type: 'out', // Expense
+      description: aiDescription,
+      category: aiCategory || 'General',
+      mode: 'Online',
+      date: dateObj,
+      images: imagesToStore,
+      imageLayout: 'split',
+      isAi: true
+    };
+
+    // Cache the attachments
+    attachmentCache.set(tempId, { images: imagesToStore, isAi: true });
+
+    // Update entriesCache
+    const currCached = entriesCache.get(activeBookId) || [];
+    entriesCache.set(activeBookId, [{ 
+      id: tempId, 
+      amount: amountNum, 
+      type: 'out', 
+      description: aiDescription, 
+      category: aiCategory || 'General', 
+      mode: 'Online', 
+      date: dateObj, 
+      image_layout: 'split',
+      user_id: session?.user?.id,
+      cashbook_id: activeBookId
+    }, ...currCached]);
+
+    // Instantly add to State
+    setBooks(prevBooks => prevBooks.map(b => 
+      b.id === activeBookId 
+        ? { ...b, transactions: [newTransaction, ...b.transactions] }
+        : b
+    ));
+
+    // Redirect to entries tab
+    const slug = getBookSlug(activeBook?.name || '', activeBook?.id || '');
+    navigate(`/cashbooks/${slug}/entries`);
+
+    // Reset AI states
+    setAiWorkflowStep('group');
+    setAiGroupSize(1);
+    setIsUploading(false);
+
+    // Run direct database updates in background!
+    if (supabase && session) {
+      (async () => {
+        try {
+          let imageUrl = '';
+          if (aiFile) {
+            imageUrl = await uploadToCloudinary(aiFile, cloudinaryFolder);
+          }
+
+          const payload: any = {
+            id: tempId,
+            cashbook_id: activeBookId,
+            user_id: session.user.id,
+            amount: amountNum,
+            type: 'out',
+            description: aiDescription,
+            category: aiCategory || 'General',
+            mode: 'Online',
+            date: safeToISOString(dateObj),
+            image_layout: 'split'
+          };
+
+          const { error: entryError } = await supabase.from('entries').insert([payload]);
+          if (entryError) {
+            if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist')) {
+              delete payload.image_layout;
+              const { error: retryError } = await supabase.from('entries').insert([payload]);
+              if (retryError) throw retryError;
+            } else {
+              throw entryError;
+            }
+          }
+
+          if (imageUrl) {
+            // Save inside ai_attachments
+            const validatedUrl = await validateAndResolveCloudinaryUrl(imageUrl, session.user.id);
+            const aiAttachmentInserts = [{
+              entry_id: tempId,
+              user_id: session.user.id,
+              file_url: validatedUrl,
+              file_name: JSON.stringify({
+                original_name: aiFile?.name || 'receipt',
+                ocr: ocrData,
+                classification: aiBillType,
+                groupSize: aiGroupSize
+              }),
+              file_type: 'image'
+            }];
+            await supabase.from('ai_attachments').insert(aiAttachmentInserts);
+          }
+          await fetchData();
+        } catch (dbErr) {
+          console.error('[AI Save BG] Database sync error:', dbErr);
+        }
+      })();
+    }
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -4573,7 +5256,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                             <Trash2 size={12} className="sm:w-[18px] sm:h-[18px]" />
                           </button>
                           <button 
-                            onClick={() => setActiveBookId(book.id)}
+                            onClick={() => handleSelectBook(book.id)}
                             className="p-1.5 sm:p-2 text-indigo-800 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 rounded-lg transition-all ml-0.5"
                           >
                             <motion.div
@@ -4612,16 +5295,19 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 {/* Header Actions */}
                 <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 sm:gap-4">
+                <div className="flex items-center gap-1.5 sm:gap-2.5">
                   <button 
-                    onClick={() => setActiveBookId(null)}
-                    className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full text-slate-400 transition-colors"
+                    onClick={() => handleSelectBook(null)}
+                    className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full text-slate-450 transition-colors shrink-0"
                   >
-                    <ArrowLeft size={24} />
+                    <ArrowLeft size={22} className="sm:w-[24px] sm:h-[24px]" />
                   </button>
-                  <h2 className={cn(
-                    "text-xl sm:text-2xl font-bold truncate max-w-[150px] sm:max-w-none transition-colors duration-300",
-                    theme === 'dark' ? "text-slate-100" : "text-black"
-                  )}>{activeBook?.name}</h2>
+                  <div className="flex items-center font-sans font-bold text-base sm:text-lg tracking-tight select-none leading-none">
+                    <h2 className={cn(
+                      "font-black truncate max-w-[160px] sm:max-w-[280px] md:max-w-none transition-colors duration-300 text-slate-900 dark:text-slate-100",
+                    )}>{activeBook?.name}</h2>
+                  </div>
+                </div>
                 </div>
                 
                 {/* Right actions: Download Center Trigger + 3-Dots Menu */}
@@ -4655,46 +5341,59 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                             : "bg-white/95 border-slate-200 text-slate-900"
                         )}
                       >
+                        {/* Navigation Section */}
+                        <div className="px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400 dark:text-zinc-500">
+                          View Sections
+                        </div>
+                        {[
+                          { id: 'entries', label: 'Entries', icon: List },
+                          { id: 'reports', label: 'Reports', icon: FileText }
+                        ].map((tab) => {
+                          const isActive = currentTabName === tab.id;
+                          const Icon = tab.icon;
+                          return (
+                            <button
+                              key={tab.id}
+                              onClick={() => {
+                                setShowBookMenu(false);
+                                vibrate();
+                                const slug = getBookSlug(activeBook?.name || '', activeBook?.id || '');
+                                navigate(`/cashbooks/${slug}/${tab.id}`);
+                              }}
+                              className={cn(
+                                "w-full flex items-center gap-2.5 p-2 rounded-xl transition-all cursor-pointer text-left shadow-sm text-xs border mb-1 last:mb-0",
+                                isActive 
+                                  ? theme === 'dark'
+                                    ? "bg-indigo-950/40 border-indigo-900/60 text-indigo-400 font-extrabold"
+                                    : "bg-indigo-50/60 border-indigo-100/80 text-indigo-700 font-extrabold"
+                                  : theme === 'dark'
+                                    ? "bg-transparent border-transparent text-slate-300 hover:bg-zinc-900 hover:border-zinc-805"
+                                    : "bg-transparent border-transparent text-slate-700 hover:bg-slate-50 hover:border-slate-105"
+                              )}
+                            >
+                              <Icon size={14} className={cn("shrink-0", isActive ? "text-indigo-500" : "opacity-70 dark:opacity-80")} />
+                              <span>{tab.label}</span>
+                            </button>
+                          );
+                        })}
+
+                        <div className="border-t border-slate-100 dark:border-zinc-900/60 my-1.5" />
+
+                        {/* Actions Section */}
+                        <div className="px-2.5 py-1 text-[10px] font-black uppercase tracking-widest text-slate-400 dark:text-zinc-500 mb-1">
+                          Book Actions
+                        </div>
                         <button 
                           onClick={() => { setShowBookMenu(false); setShowImportModal(true); }}
                           className={cn(
-                            "w-full flex items-center gap-3 p-2.5 rounded-xl transition-all cursor-pointer text-left border mb-1.5 shadow-sm",
+                            "w-full flex items-center gap-3 p-2 rounded-xl transition-all cursor-pointer text-left border shadow-sm text-xs",
                             theme === 'dark' 
                               ? "bg-amber-950/20 border-amber-900/40 text-amber-400 hover:bg-amber-950/45" 
                               : "bg-amber-50/50 border-amber-100/70 text-amber-800 hover:bg-amber-50"
                           )}
                         >
-                          <DownloadCloud size={16} className="text-amber-500 shrink-0" />
-                          <span className="font-extrabold text-[11px] uppercase tracking-wider">Import Entries</span>
-                        </button>
-                        <button 
-                          onClick={() => { setShowBookMenu(false); exportToExcel(); }}
-                          className={cn(
-                            "w-full flex items-center gap-3 p-2.5 rounded-xl transition-all cursor-pointer text-left border mb-1.5 shadow-sm",
-                            theme === 'dark' 
-                              ? "bg-emerald-950/20 border-emerald-900/40 text-emerald-400 hover:bg-emerald-950/45" 
-                              : "bg-emerald-50/50 border-emerald-100/70 text-emerald-800 hover:bg-emerald-50"
-                          )}
-                        >
-                          <FileSpreadsheet size={16} className="text-emerald-500 shrink-0" />
-                          <span className="font-extrabold text-[11px] uppercase tracking-wider">Export Excel</span>
-                        </button>
-                        <button 
-                          onClick={() => { 
-                            setShowBookMenu(false); 
-                            if (activeBook) {
-                              backgroundExportManager.enqueueTask(activeBook.id, activeBook.name, filteredTransactions, true);
-                            }
-                          }}
-                          className={cn(
-                            "w-full flex items-center gap-3 p-2.5 rounded-xl transition-all cursor-pointer text-left border shadow-sm",
-                            theme === 'dark' 
-                              ? "bg-rose-950/20 border-rose-900/40 text-rose-400 hover:bg-rose-950/45" 
-                              : "bg-rose-50/50 border-rose-100/70 text-rose-800 hover:bg-rose-50"
-                          )}
-                        >
-                          <FileText size={16} className="text-rose-500 shrink-0" />
-                          <span className="font-extrabold text-[11px] uppercase tracking-wider">Export PDF</span>
+                          <DownloadCloud size={14} className="text-amber-500 shrink-0" />
+                          <span className="font-bold">Import Entries</span>
                         </button>
                       </motion.div>
                     )}
@@ -4703,9 +5402,11 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               </div>
             </div>
 
-              {/* Mobile Summary Card (Reference Image Style) */}
+            {currentTabName === 'entries' && (
+              <>
+                {/* Mobile Summary Card (Reference Image Style) */}
               <div className={cn(
-                "sm:hidden rounded-2xl border shadow-sm overflow-hidden transition-colors duration-300",
+                "lg:hidden rounded-2xl border shadow-sm overflow-hidden transition-colors duration-300",
                 theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-100"
               )}>
                 <div className="p-3 px-4 space-y-2.5">
@@ -4760,7 +5461,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     "group/shortcut relative flex-1 sm:flex-none flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-bold transition-all active:scale-95 cursor-pointer",
                     theme === 'dark' 
                       ? "bg-emerald-900/20 text-emerald-400 hover:bg-emerald-900/40" 
-                      : "bg-emerald-50/80 border border-emerald-100 text-emerald-700 hover:bg-emerald-100 shadow-sm shadow-emerald-100/50"
+                      : "bg-emerald-50/50 border border-emerald-150 text-emerald-800 hover:bg-emerald-100/70 shadow-sm shadow-emerald-50/20"
                   )}
                 >
                   <Plus size={20} />
@@ -4775,7 +5476,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     "group/shortcut relative flex-1 sm:flex-none flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-bold transition-all active:scale-95 cursor-pointer",
                     theme === 'dark' 
                       ? "bg-rose-900/20 text-rose-400 hover:bg-rose-900/40" 
-                      : "bg-rose-50/80 border border-rose-100 text-rose-700 hover:bg-rose-100 shadow-sm shadow-rose-100/50"
+                      : "bg-rose-50/50 border border-rose-150 text-rose-800 hover:bg-rose-100/70 shadow-sm shadow-rose-50/20"
                   )}
                 >
                   <Minus size={20} />
@@ -4785,16 +5486,22 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   </span>
                 </button>
                 <button
-                  onClick={() => { vibrate(); setAiConstructionModal('upload'); }}
-                  disabled={isUploading}
+                  onClick={() => { 
+                    vibrate(); 
+                    setAiWorkflowStep('group'); 
+                    setAiGroupSize(1);
+                    setAiFile(null);
+                    setAiFilePreviewUrl('');
+                    setAiConstructionModal('upload'); 
+                  }}
                   className={cn(
                     "group/shortcut relative flex-1 sm:flex-none flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-bold transition-all active:scale-95 cursor-pointer",
                     theme === 'dark' 
                       ? "bg-indigo-900/20 text-indigo-400 hover:bg-indigo-900/40" 
-                      : "bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-50 shadow-sm shadow-indigo-100/20"
+                      : "bg-indigo-50/40 border border-indigo-150 text-indigo-750 hover:bg-indigo-100 shadow-sm shadow-indigo-100/20"
                   )}
                 >
-                  {isUploading ? <Loader2 size={20} className="animate-spin" /> : <Upload size={20} />}
+                  <Upload size={20} className="text-indigo-650 dark:text-indigo-400 shrink-0" />
                   AI Upload
                   <span className="hidden lg:group-hover/shortcut:flex absolute -bottom-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-slate-800 text-white text-[10px] rounded shadow-lg whitespace-nowrap items-center gap-1 z-50">
                     Press <kbd className="bg-slate-700 px-1 rounded">A</kbd> + <kbd className="bg-slate-700 px-1 rounded">U</kbd>
@@ -5004,13 +5711,17 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   </div>
                 </div>
               </div>
+              </>
+            )}
               </div> {/* Close STICKY TOP CONTROLS SECTION */}
 
               {/* Transaction List Section */}
-              <div className="space-y-4">
+              {currentTabName === 'entries' && (
+                <>
+                  <div className="space-y-4">
                 {/* Mobile Transaction List (Card Based) */}
                  <div ref={mobileContainerRef} className="lg:hidden space-y-3">
-                  {(isEntriesLoading || (activeBookId !== null && !entriesCache.has(activeBookId))) && filteredTransactions.length === 0 ? (
+                  {(isEntriesLoading || (activeBookId !== null && (!entriesCache.has(activeBookId) || !lastFetchTimeCache.has(activeBookId)))) && filteredTransactions.length === 0 ? (
                     <div className="flex flex-col items-center justify-center py-20 text-center space-y-4">
                       <div className="relative flex items-center justify-center">
                         <div className="w-12 h-12 rounded-full border-2 border-indigo-500/20 animate-ping absolute" />
@@ -5158,7 +5869,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                             "divide-y transition-colors duration-300",
                             theme === 'dark' ? "divide-slate-800" : "divide-slate-50"
                           )}
-                        >{(isEntriesLoading || (activeBookId !== null && !entriesCache.has(activeBookId))) && filteredTransactions.length === 0 ? (
+                        >{(isEntriesLoading || (activeBookId !== null && (!entriesCache.has(activeBookId) || !lastFetchTimeCache.has(activeBookId)))) && filteredTransactions.length === 0 ? (
                             <tr>
                               <td colSpan={9} className="px-6 py-20">
                                 <div className="flex flex-col items-center justify-center py-12 text-center space-y-4">
@@ -5255,48 +5966,828 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 "lg:hidden fixed bottom-0 left-0 right-0 p-4 pb-6 backdrop-blur-lg border-t z-40 transition-colors duration-300",
                 theme === 'dark' ? "bg-slate-900/80 border-slate-800" : "bg-white/80 border-slate-100"
               )}>
-                <div className="flex flex-col gap-2 w-full">
-                  <button
-                    onClick={() => { vibrate(); setAiConstructionModal('upload'); }}
-                    disabled={isUploading}
-                    className={cn(
-                      "w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl font-black shadow-sm transition-all active:scale-95 cursor-pointer text-xs sm:text-sm border",
-                      theme === 'dark' 
-                        ? "bg-indigo-950/40 text-indigo-400 border-indigo-900/50 shadow-none hover:bg-indigo-950/60" 
-                        : "bg-white border-indigo-200 text-indigo-700 shadow-sm shadow-indigo-100/30 hover:bg-indigo-50"
-                    )}
-                  >
-                    {isUploading ? <Loader2 size={18} className="animate-spin" /> : <Upload size={18} />}
-                    AI UPLOAD
-                  </button>
-                  <div className="grid grid-cols-2 gap-2.5">
+                <div className="w-full font-sans">
+                  <div className="flex flex-col gap-3 w-full">
+                    {/* Row 1: AI UPLOAD */}
                     <button
-                      onClick={() => { vibrate(); setShowForm('in'); setTransactionDate(safeToDateTimeLocal(new Date())); }}
+                      onClick={() => { 
+                        vibrate(); 
+                        setAiWorkflowStep('group'); 
+                        setAiGroupSize(1);
+                        setAiFile(null);
+                        setAiFilePreviewUrl('');
+                        setAiConstructionModal('upload'); 
+                      }}
                       className={cn(
-                        "flex items-center justify-center gap-2 py-3.5 rounded-2xl font-black shadow-sm transition-all active:scale-95 cursor-pointer text-xs sm:text-sm border",
+                        "w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl font-black shadow-sm transition-all active:scale-95 cursor-pointer text-xs sm:text-sm border",
                         theme === 'dark' 
-                          ? "bg-emerald-950/20 text-emerald-400 border-emerald-900/40 shadow-none hover:bg-emerald-950/35" 
-                          : "bg-white border-emerald-200 text-emerald-700 shadow-sm shadow-emerald-100/30 hover:bg-emerald-50"
+                          ? "bg-indigo-950/25 text-indigo-400 border-indigo-900/50 hover:bg-indigo-950/40" 
+                          : "bg-white border-indigo-200 text-indigo-650 shadow-sm shadow-indigo-100/30 hover:bg-indigo-50"
                       )}
                     >
-                      <Plus size={18} />
-                      CASH IN
+                      <Upload size={18} className="shrink-0" />
+                      AI UPLOAD
                     </button>
-                    <button
-                      onClick={() => { vibrate(); setShowForm('out'); setTransactionDate(safeToDateTimeLocal(new Date())); }}
-                      className={cn(
-                        "flex items-center justify-center gap-2 py-3.5 rounded-2xl font-black shadow-sm transition-all active:scale-95 cursor-pointer text-xs sm:text-sm border",
-                        theme === 'dark' 
-                          ? "bg-rose-950/20 text-rose-400 border-rose-900/40 shadow-none hover:bg-rose-950/35" 
-                          : "bg-white border-rose-200 text-rose-700 shadow-sm shadow-rose-100/30 hover:bg-rose-50"
-                      )}
-                    >
-                      <Minus size={18} />
-                      CASH OUT
-                    </button>
+
+                    {/* Row 2: CASH IN & CASH OUT */}
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        onClick={() => { vibrate(); vibrate(); setShowForm('in'); setTransactionDate(safeToDateTimeLocal(new Date())); }}
+                        className={cn(
+                          "flex items-center justify-center gap-2 py-3.5 rounded-2xl font-black shadow-sm transition-all active:scale-95 cursor-pointer text-xs sm:text-sm border",
+                          theme === 'dark' 
+                            ? "bg-emerald-950/20 text-emerald-400 border-emerald-900/40 shadow-none hover:bg-emerald-950/35" 
+                            : "bg-white border-emerald-200 text-emerald-700 shadow-sm shadow-emerald-100/30 hover:bg-emerald-50"
+                        )}
+                      >
+                        <Plus size={16} />
+                        CASH IN
+                      </button>
+                      <button
+                        onClick={() => { vibrate(); vibrate(); setShowForm('out'); setTransactionDate(safeToDateTimeLocal(new Date())); }}
+                        className={cn(
+                          "flex items-center justify-center gap-2 py-3.5 rounded-2xl font-black shadow-sm transition-all active:scale-95 cursor-pointer text-xs sm:text-sm border",
+                          theme === 'dark' 
+                            ? "bg-rose-950/20 text-rose-400 border-rose-900/40 shadow-none hover:bg-rose-950/35" 
+                            : "bg-white border-rose-200 text-rose-700 shadow-sm shadow-rose-100/30 hover:bg-rose-50"
+                        )}
+                      >
+                        <Minus size={16} />
+                        CASH OUT
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
+              </>
+            )}
+
+            {currentTabName === 'ai-upload' && (
+              <div className="space-y-6 max-w-2xl mx-auto py-8 px-4">
+                {/* 1. Group Size Selector Modal/Card */}
+                {aiWorkflowStep === 'group' && (
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0.95 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    className={cn(
+                      "rounded-3xl border p-8 shadow-xl space-y-8 transition-colors duration-300 max-w-md mx-auto relative overflow-hidden",
+                      theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-150"
+                    )}
+                  >
+                    <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/10 rounded-full blur-2xl -z-10" />
+                    
+                    <div className="text-center space-y-3">
+                      <div className="w-12 h-12 bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 rounded-2xl flex items-center justify-center mx-auto shadow-sm">
+                        <Users size={24} />
+                      </div>
+                      <h3 className={cn(
+                        "text-xl font-extrabold tracking-tight transition-colors duration-300",
+                        theme === 'dark' ? "text-white" : "text-zinc-900"
+                      )}>Who was included in this expense?</h3>
+                      <p className="text-slate-500 dark:text-slate-400 text-sm">
+                        Select the group size to automatically divide and describe this bill.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-col items-center justify-center space-y-4">
+                      <div className="flex items-center gap-6">
+                        <button 
+                          type="button"
+                          onClick={() => {
+                            vibrate();
+                            setAiGroupSize(prev => Math.max(1, prev - 1));
+                          }}
+                          disabled={aiGroupSize <= 1}
+                          className={cn(
+                            "w-12 h-12 rounded-2xl border flex items-center justify-center transition-all font-bold hover:scale-105 active:scale-95 text-lg disabled:opacity-40 select-none cursor-pointer",
+                            theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-800"
+                          )}
+                          id="btn-dec-groupsize"
+                        >
+                          -
+                        </button>
+                        
+                        <div className="text-center min-w-[100px]">
+                          <span className={cn(
+                            "text-4xl font-black tracking-tight block",
+                            theme === 'dark' ? "text-white" : "text-zinc-900"
+                          )}>
+                            {aiGroupSize}
+                          </span>
+                          <span className="text-xs font-semibold text-slate-400/80 uppercase tracking-widest mt-1 block">
+                            {aiGroupSize === 1 ? 'Member' : 'Members'}
+                          </span>
+                        </div>
+
+                        <button 
+                          type="button"
+                          onClick={() => {
+                            vibrate();
+                            setAiGroupSize(prev => Math.min(50, prev + 1));
+                          }}
+                          disabled={aiGroupSize >= 50}
+                          className={cn(
+                            "w-12 h-12 rounded-2xl border flex items-center justify-center transition-all font-bold hover:scale-105 active:scale-95 text-lg disabled:opacity-40 select-none cursor-pointer",
+                            theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-800"
+                          )}
+                          id="btn-inc-groupsize"
+                        >
+                          +
+                        </button>
+                      </div>
+
+                      <div className="text-center py-2 px-4 bg-indigo-50/50 dark:bg-indigo-950/10 rounded-2xl border border-indigo-100/10 text-xs font-medium text-indigo-650 dark:text-indigo-400">
+                        {aiGroupSize} Member{aiGroupSize > 1 ? 's' : ''} expense structure will be auto-calculated.
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        vibrate();
+                        setAiWorkflowStep('upload');
+                      }}
+                      className={cn(
+                        "w-full py-4 rounded-2xl font-bold text-sm tracking-wide shadow-lg cursor-pointer transform hover:translate-y-[-1px] transition-all duration-200 active:scale-95 flex items-center justify-center gap-2",
+                        theme === 'dark'
+                          ? "bg-indigo-650 text-white hover:bg-indigo-700 shadow-indigo-950/40"
+                          : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-100"
+                      )}
+                      id="btn-confirm-groupsize"
+                    >
+                      Continue
+                      <ArrowRight size={16} />
+                    </button>
+                  </motion.div>
+                )}
+
+                {/* 2. File Upload / Picker Select Area */}
+                {aiWorkflowStep === 'upload' && (
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0.95 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    className={cn(
+                      "rounded-3xl border p-8 shadow-sm space-y-6 transition-colors duration-300",
+                      theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-150"
+                    )}
+                  >
+                    <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-zinc-900/60 font-sans">
+                      <button
+                        type="button"
+                        onClick={() => setAiWorkflowStep('group')}
+                        className="flex items-center gap-1.5 text-xs font-semibold text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors cursor-pointer"
+                      >
+                        <ArrowLeft size={14} /> Back
+                      </button>
+                      <span className="text-xs font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/10 px-3 py-1 rounded-full uppercase tracking-wider">
+                        {aiGroupSize} {aiGroupSize === 1 ? 'Member' : 'Members'} Selected
+                      </span>
+                    </div>
+
+                    <div className="text-center space-y-1.5">
+                      <h3 className={cn(
+                        "text-lg font-extrabold transition-colors duration-300",
+                        theme === 'dark' ? "text-white" : "text-black"
+                      )}>Upload Bill or Document</h3>
+                      <p className="text-slate-500 dark:text-slate-400 text-xs sm:text-sm">
+                        Camera snapshots, library photos, or PDF invoices are fully supported.
+                      </p>
+                    </div>
+
+                    {/* Drag & Drop Zone */}
+                    <div 
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                          startAiUploadReceiptParsing(e.dataTransfer.files);
+                        }
+                      }}
+                      onClick={() => {
+                        vibrate();
+                        // Open file input directly!
+                        const el = document.getElementById('custom-ai-file-picker');
+                        if (el) el.click();
+                      }}
+                      className={cn(
+                        "border-2 border-dashed rounded-2xl p-12 flex flex-col items-center justify-center gap-4 transition-all cursor-pointer group",
+                        theme === 'dark' ? "border-indigo-900/50 bg-indigo-900/5 hover:bg-indigo-900/10" : "border-indigo-200 bg-indigo-50/30 hover:bg-indigo-50/50"
+                      )}
+                    >
+                      <div className="w-16 h-16 bg-white dark:bg-slate-800 rounded-2xl shadow-sm flex items-center justify-center text-indigo-600 group-hover:scale-110 transition-transform">
+                        <Upload size={32} />
+                      </div>
+                      <div className="text-center">
+                        <p className={cn(
+                          "font-bold transition-colors duration-300",
+                          theme === 'dark' ? "text-white" : "text-black"
+                        )}>Drag & Drop bill here</p>
+                        <p className={cn(
+                          "text-sm transition-colors duration-300",
+                          theme === 'dark' ? "text-slate-400" : "text-slate-500"
+                        )}>or click to browse files</p>
+                      </div>
+                    </div>
+
+                    {/* Quick Selection Buttons */}
+                    <div className="grid grid-cols-2 gap-3 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          vibrate();
+                          const el = document.getElementById('custom-ai-file-picker');
+                          if (el) el.click();
+                        }}
+                        className={cn(
+                          "flex items-center justify-center gap-2 py-3 border rounded-xl text-xs font-bold transition-all cursor-pointer hover:bg-slate-50 dark:hover:bg-zinc-900 active:scale-95",
+                          theme === 'dark' ? "border-zinc-800 text-slate-300" : "border-slate-200 text-slate-700"
+                        )}
+                        id="btn-upload-camera"
+                      >
+                        <Camera size={14} />
+                        Camera / Gallery
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          vibrate();
+                          const el = document.getElementById('custom-ai-file-picker');
+                          if (el) el.click();
+                        }}
+                        className={cn(
+                          "flex items-center justify-center gap-2 py-3 border rounded-xl text-xs font-bold transition-all cursor-pointer hover:bg-slate-50 dark:hover:bg-zinc-900 active:scale-95",
+                          theme === 'dark' ? "border-zinc-800 text-slate-300" : "border-slate-200 text-slate-700"
+                        )}
+                        id="btn-upload-doc"
+                      >
+                        <FileText size={14} />
+                        Upload PDF Bill
+                      </button>
+                    </div>
+
+                    {/* Custom onFileSelected hook to intercept input changes inside this wizard */}
+                    <input 
+                      type="file"
+                      multiple
+                      accept="image/*,application/pdf"
+                      onChange={(e) => {
+                        if (e.target.files && e.target.files.length > 0) {
+                          startAiUploadReceiptParsing(e.target.files);
+                        }
+                      }}
+                      className="hidden"
+                      id="custom-ai-file-picker"
+                    />
+
+                    <div className="flex items-center gap-2.5 p-4 bg-amber-50 dark:bg-amber-900/10 rounded-xl text-amber-700 dark:text-amber-400 text-xs font-sans">
+                      <div className="shrink-0"><Loader2 size={14} className="animate-spin" /></div>
+                      <p>Full AI extraction automatically normalizes and splits currencies.</p>
+                    </div>
+                  </motion.div>
+                )}
+
+                {/* 3. Real-time Scanning Progress screen (Step 2 details) */}
+                {aiWorkflowStep === 'scanning' && (
+                  <motion.div 
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    className={cn(
+                      "rounded-3xl border p-12 shadow-md space-y-8 text-center transition-colors duration-300 relative overflow-hidden",
+                      theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-150"
+                    )}
+                  >
+                    <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-indigo-500 via-pink-500 to-indigo-500 animate-[shimmer_2s_infinite]" />
+                    
+                    <div className="relative mx-auto w-24 h-24 flex items-center justify-center">
+                      <div className="absolute inset-0 bg-indigo-500/10 rounded-full animate-ping" />
+                      <div className="relative w-16 h-16 bg-indigo-600 rounded-3xl flex items-center justify-center text-white shadow-lg rotate-12 transition-transform duration-700 hover:rotate-0">
+                        <Sparkles size={28} className="animate-pulse" />
+                      </div>
+                    </div>
+
+                    <div className="space-y-3">
+                      <h4 className={cn(
+                        "text-xl font-bold tracking-tight animate-bounce",
+                        theme === 'dark' ? "text-white" : "text-black"
+                      )}>
+                        {aiScanStatus}
+                      </h4>
+                      <p className="text-xs text-slate-400 dark:text-slate-500 max-w-sm mx-auto">
+                        TrackBook AI is reading text, classifying merchants, and matching time structures.
+                      </p>
+                    </div>
+
+                    {/* Progress tracker animation list */}
+                    <div className="max-w-xs mx-auto space-y-3 pt-4 border-t border-slate-100 dark:border-zinc-900/60 text-left text-xs text-slate-400 dark:text-slate-500 font-sans">
+                      {[
+                        { label: 'Scanning bill...', active: aiScanStatus === 'Scanning bill...' || aiScanStatus === 'Detecting merchant...' || aiScanStatus === 'Extracting amount...' || aiScanStatus === 'Reading date & time...' },
+                        { label: 'Detecting merchant...', active: aiScanStatus === 'Detecting merchant...' || aiScanStatus === 'Extracting amount...' || aiScanStatus === 'Reading date & time...' },
+                        { label: 'Extracting amount...', active: aiScanStatus === 'Extracting amount...' || aiScanStatus === 'Reading date & time...' },
+                        { label: 'Reading date & time...', active: aiScanStatus === 'Reading date & time...' }
+                      ].map((step, idx) => (
+                        <div key={idx} className="flex items-center gap-2">
+                          <div className={cn(
+                            "w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold border",
+                            step.active 
+                              ? "bg-indigo-600 text-white border-indigo-600" 
+                              : "border-slate-200 dark:border-zinc-800 text-slate-400"
+                          )}>
+                            {idx + 1}
+                          </div>
+                          <span className={cn(
+                            "font-semibold",
+                            step.active ? "text-slate-700 dark:text-slate-200" : "text-slate-300 dark:text-zinc-700"
+                          )}>
+                            {step.label}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
+
+                {/* 4. Confirmation / Field Filling Preview (Step 8 & 9) */}
+                {aiWorkflowStep === 'confirmation' && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 15 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="grid grid-cols-1 md:grid-cols-5 gap-6"
+                  >
+                    {/* Invoice/bill visual metadata preview card */}
+                    <div className="md:col-span-2 space-y-4">
+                      <div className={cn(
+                        "rounded-3xl border p-5 shadow-sm space-y-4 transition-colors duration-300 text-center",
+                        theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-150"
+                      )}>
+                        <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest text-left">Captured Receipt</h4>
+                        
+                        {aiFilePreviewUrl ? (
+                          <div className="relative rounded-2xl overflow-hidden aspect-[3/4] bg-slate-100 dark:bg-zinc-900 flex items-center justify-center group border border-slate-200 dark:border-zinc-800 shadow-inner">
+                            <img 
+                              src={aiFilePreviewUrl} 
+                              alt="Uploaded Receipt" 
+                              className="w-full h-full object-cover"
+                              referrerPolicy="no-referrer"
+                            />
+                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
+                              <span className="text-white text-xs px-2 py-1 rounded bg-black/60 font-bold select-none whitespace-normal break-all">
+                                {aiFile?.name || 'document.pdf'}
+                              </span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="rounded-2xl border-2 border-dashed border-slate-200 dark:border-zinc-800 flex flex-col items-center justify-center p-8 aspect-[3/4] text-slate-400">
+                            <FileText size={48} className="stroke-[1.5]" />
+                            <span className="text-xs font-semibold mt-2">Document uploaded</span>
+                          </div>
+                        )}
+
+                        <div className="pt-2 text-left space-y-1 bg-slate-50 dark:bg-zinc-900/40 p-3 rounded-2xl border border-slate-100 dark:border-zinc-900/20 font-sans">
+                          <p className="text-[10px] font-bold text-slate-400 dark:text-zinc-500 uppercase tracking-wider">AI Classification</p>
+                          <p className="text-sm font-black text-indigo-650 dark:text-indigo-400">
+                            {aiBillType} Detected{aiMealType ? ` (${aiMealType})` : ''}
+                          </p>
+                          <p className="text-xs text-slate-500 dark:text-slate-400 font-medium pt-0.5">
+                            Group Size: {aiGroupSize} {aiGroupSize === 1 ? 'Member' : 'Members'}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Pre-filled fields editable inputs list */}
+                    <div className="md:col-span-3 space-y-4">
+                      <div className={cn(
+                        "rounded-3xl border p-6 sm:p-8 shadow-sm space-y-6 transition-colors duration-300",
+                        theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-150"
+                      )}>
+                        <div className="flex items-center justify-between pl-1 pb-3 border-b border-slate-100 dark:border-zinc-900/60 font-sans">
+                          <h3 className={cn(
+                            "text-base font-extrabold",
+                            theme === 'dark' ? "text-white" : "text-zinc-900"
+                          )}>Verify Ledger Entry</h3>
+                          <span className="rounded bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 font-black text-[10px] px-2.5 py-1 uppercase tracking-widest">
+                            Ready to save
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4 font-sans text-left">
+                          {/* Amount */}
+                          <div className="space-y-1.5 col-span-2 sm:col-span-1">
+                            <label className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Amount</label>
+                            <div className="relative">
+                              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-sm">₹</span>
+                              <input 
+                                type="number"
+                                value={aiAmount}
+                                onChange={(e) => setAiAmount(e.target.value)}
+                                className={cn(
+                                  "w-full pl-7 pr-4 py-3 rounded-xl border text-sm font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-colors",
+                                  theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-900"
+                                )}
+                              />
+                            </div>
+                          </div>
+
+                          {/* Merchant / Vendor */}
+                          <div className="space-y-1.5 col-span-2 sm:col-span-1">
+                            <label className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Merchant</label>
+                            <input 
+                              type="text"
+                              value={aiMerchant}
+                              onChange={(e) => setAiMerchant(e.target.value)}
+                              className={cn(
+                                "w-full px-4 py-3 rounded-xl border text-sm font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-colors",
+                                theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-900"
+                              )}
+                            />
+                          </div>
+
+                          {/* Date */}
+                          <div className="space-y-1.5 col-span-1">
+                            <label className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Date</label>
+                            <input 
+                              type="text"
+                              value={aiDate}
+                              onChange={(e) => setAiDate(e.target.value)}
+                              placeholder="DD-MM-YYYY"
+                              className={cn(
+                                "w-full px-4 py-3 rounded-xl border text-sm font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-colors",
+                                theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-900"
+                              )}
+                            />
+                          </div>
+
+                          {/* Time */}
+                          <div className="space-y-1.5 col-span-1">
+                            <label className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Time</label>
+                            <input 
+                              type="text"
+                              value={aiTime}
+                              onChange={(e) => setAiTime(e.target.value)}
+                              placeholder="e.g., 01:20 PM"
+                              className={cn(
+                                "w-full px-4 py-3 rounded-xl border text-sm font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-colors",
+                                theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-900"
+                              )}
+                            />
+                          </div>
+
+                          {/* Bill Type Category selection */}
+                          <div className="space-y-1.5 col-span-1">
+                            <label className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Bill Type</label>
+                            <select 
+                              value={aiBillType}
+                              onChange={(e) => setAiBillType(e.target.value)}
+                              className={cn(
+                                "w-full px-4 py-3 rounded-xl border text-sm font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-colors appearance-none cursor-pointer",
+                                theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-900"
+                              )}
+                            >
+                              {["Restaurant", "Food", "Taxi", "Cab", "Bus", "Train", "Flight", "Fuel", "Groceries", "Medical", "Shopping", "Utilities", "Internet", "Recharge", "Hotel", "Entertainment"].map(t => (
+                                <option key={t} value={t}>{t}</option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* Ledger Category selection */}
+                          <div className="space-y-1.5 col-span-1">
+                            <label className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Category</label>
+                            <select 
+                              value={aiCategory}
+                              onChange={(e) => setAiCategory(e.target.value)}
+                              className={cn(
+                                "w-full px-4 py-3 rounded-xl border text-sm font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-colors appearance-none cursor-pointer",
+                                theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-900"
+                              )}
+                            >
+                              {["Food", "Transport", "Utilities", "Shopping", "Entertainment", "Health", "Education", "Salary", "Other"].map(c => (
+                                <option key={c} value={c}>{c}</option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* Description field */}
+                          <div className="space-y-1.5 col-span-2">
+                            <label className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Generated Description</label>
+                            <input 
+                              type="text"
+                              value={aiDescription}
+                              onChange={(e) => setAiDescription(e.target.value)}
+                              className={cn(
+                                "w-full px-4 py-3 rounded-xl border text-sm font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-colors",
+                                theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-900"
+                              )}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Action buttons */}
+                        <div className="flex gap-3 pt-4 border-t border-slate-100 dark:border-zinc-900/60 font-sans">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              vibrate();
+                              setAiWorkflowStep('upload');
+                              setAiFile(null);
+                              setAiFilePreviewUrl('');
+                            }}
+                            className={cn(
+                              "flex-1 py-3.5 rounded-2xl font-bold text-xs tracking-wide border cursor-pointer active:scale-95 transition-all text-center flex items-center justify-center gap-1.5",
+                              theme === 'dark' 
+                                ? "border-zinc-800 text-slate-400 hover:bg-zinc-900" 
+                                : "border-slate-200 text-slate-500 hover:bg-slate-50"
+                            )}
+                            id="btn-cancel-ai"
+                          >
+                            <Trash2 size={14} />
+                            Change Bill
+                          </button>
+                          
+                          <button
+                            type="button"
+                            onClick={() => {
+                              vibrate();
+                              handleSaveAiEntry();
+                            }}
+                            className={cn(
+                              "flex-[2] py-3.5 rounded-2xl font-black text-xs tracking-wide shadow-md active:scale-95 transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-white",
+                              theme === 'dark' 
+                                ? "bg-indigo-650 hover:bg-indigo-700 shadow-indigo-950/50" 
+                                : "bg-indigo-600 hover:bg-indigo-700 shadow-indigo-100"
+                            )}
+                            id="btn-save-ai"
+                          >
+                            <Check size={14} />
+                            SAVE ENTRY
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </div>
+            )}
+
+            {currentTabName === 'reports' && (
+              <div className="space-y-6 max-w-4xl mx-auto py-6 px-4 pb-20">
+                {/* Summary Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className={cn(
+                    "p-6 rounded-3xl border transition-colors duration-300 shadow-sm",
+                    theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-100"
+                  )}>
+                    <p className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Total Cash In</p>
+                    <h4 className="text-2xl font-black text-emerald-600 mt-2">{formatCurrency(totals.in)}</h4>
+                  </div>
+                  <div className={cn(
+                    "p-6 rounded-3xl border transition-colors duration-300 shadow-sm",
+                    theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-100"
+                  )}>
+                    <p className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Total Cash Out</p>
+                    <h4 className="text-2xl font-black text-rose-600 mt-2">{formatCurrency(totals.out)}</h4>
+                  </div>
+                  <div className={cn(
+                    "p-6 rounded-3xl border transition-colors duration-300 shadow-sm",
+                    theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-100"
+                  )}>
+                    <p className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">Net Balance</p>
+                    <h4 className={cn(
+                      "text-2xl font-black mt-2",
+                      totals.net >= 0 ? "text-indigo-600 dark:text-indigo-400" : "text-rose-600 dark:text-rose-400"
+                    )}>{formatCurrency(totals.net)}</h4>
+                  </div>
+                </div>
+
+                {/* Cash Flow Distribution */}
+                <div className={cn(
+                  "p-6 rounded-3xl border transition-colors duration-300 shadow-sm space-y-4",
+                  theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-100"
+                )}>
+                  <h3 className="text-base font-bold text-slate-800 dark:text-slate-200">Cash Flow Balance Chart</h3>
+                  {totals.in === 0 && totals.out === 0 ? (
+                    <p className="text-slate-500 text-xs py-4 text-center">Add entries to generate visual cash flow distribution.</p>
+                  ) : (
+                    <div className="space-y-4">
+                      <div className="flex h-5 w-full rounded-full overflow-hidden bg-slate-100 dark:bg-zinc-900">
+                        <div 
+                          style={{ width: `${Math.max(5, (totals.in / (totals.in + totals.out || 1)) * 100)}%` }} 
+                          className="bg-emerald-500 font-extrabold text-[10px] text-white flex items-center justify-center transition-all duration-550"
+                        >
+                          In
+                        </div>
+                        <div 
+                          style={{ width: `${Math.max(5, (totals.out / (totals.in + totals.out || 1)) * 100)}%` }} 
+                          className="bg-rose-500 font-extrabold text-[10px] text-white flex items-center justify-center transition-all duration-550"
+                        >
+                          Out
+                        </div>
+                      </div>
+                      <div className="flex justify-between text-[11px] font-bold text-slate-500">
+                        <span>{((totals.in / (totals.in + totals.out || 1)) * 100).toFixed(1)}% In ({formatCurrency(totals.in)})</span>
+                        <span>{((totals.out / (totals.in + totals.out || 1)) * 100).toFixed(1)}% Out ({formatCurrency(totals.out)})</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Quick Export Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div 
+                    onClick={exportToExcel}
+                    className={cn(
+                      "p-6 rounded-3xl border transition-all cursor-pointer shadow-sm hover:scale-[1.01] active:scale-[0.99] duration-150 flex items-center gap-4 group",
+                      theme === 'dark' ? "bg-zinc-950 hover:bg-emerald-950/10 border-zinc-900" : "bg-white hover:bg-emerald-50/20 border-slate-100"
+                    )}
+                  >
+                    <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 rounded-xl">
+                      <FileSpreadsheet size={24} />
+                    </div>
+                    <div className="min-w-0">
+                      <h4 className="font-bold text-sm text-slate-800 dark:text-slate-100">Export as Microsoft Excel</h4>
+                      <p className="text-slate-500 dark:text-slate-400 text-xs mt-0.5">Compatible with Excel, Google Sheets, and Numbers.</p>
+                    </div>
+                  </div>
+
+                  <div 
+                    onClick={() => {
+                      if (activeBook) {
+                        backgroundExportManager.enqueueTask(activeBook.id, activeBook.name, filteredTransactions, true);
+                      }
+                    }}
+                    className={cn(
+                      "p-6 rounded-3xl border transition-all cursor-pointer shadow-sm hover:scale-[1.01] active:scale-[0.99] duration-150 flex items-center gap-4 group",
+                      theme === 'dark' ? "bg-zinc-950 hover:bg-rose-950/10 border-zinc-900" : "bg-white hover:bg-rose-50/20 border-slate-100"
+                    )}
+                  >
+                    <div className="p-3 bg-rose-50 dark:bg-rose-950/20 text-rose-600 dark:text-rose-400 rounded-xl">
+                      <FileText size={24} />
+                    </div>
+                    <div className="min-w-0">
+                      <h4 className="font-bold text-sm text-slate-800 dark:text-slate-100">Export as PDF</h4>
+                      <p className="text-slate-500 dark:text-slate-400 text-xs mt-0.5">Perfect for printing or sharing official business records.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {currentTabName === 'import-export' && (
+              <div className="space-y-6 max-w-4xl mx-auto py-6 px-4 pb-20">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* Share Panel */}
+                  <div className={cn(
+                    "p-6 rounded-3xl border transition-colors duration-300 shadow-sm space-y-4 flex flex-col justify-between",
+                    theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-100"
+                  )}>
+                    <div className="space-y-2">
+                      <h3 className="text-base font-black text-slate-800 dark:text-slate-100">Generate Share Code</h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                        Generate a secure, single-use 5-character share code to transfer selected entries seamlessly to another TrackBook user.
+                      </p>
+                      
+                      {selectedList.length === 0 ? (
+                        <div className="p-4 bg-slate-50 dark:bg-zinc-900 rounded-2xl text-center space-y-2">
+                          <p className="text-xs text-slate-500 dark:text-slate-400 font-bold">No entries currently selected</p>
+                          <button
+                            onClick={toggleSelectAll}
+                            className="text-xs text-indigo-600 dark:text-indigo-400 font-extrabold hover:underline"
+                          >
+                            Select All {filteredTransactions.length} Entries
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="p-3 bg-indigo-50/40 dark:bg-indigo-950/10 rounded-2xl flex items-center justify-between border border-indigo-150/20">
+                          <div>
+                            <span className="text-xs font-bold text-indigo-600 dark:text-indigo-400">Selected Entries</span>
+                            <p className="text-sm font-black text-slate-800 dark:text-slate-200 mt-0.5">{selectedList.length} items</p>
+                          </div>
+                          <button
+                            onClick={() => setSelectedTransactions(new Set())}
+                            className="text-xs text-rose-600 hover:underline font-bold"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      )}
+
+                      {shareError && (
+                        <div className="p-3 bg-rose-50 dark:bg-rose-950/20 text-rose-600 dark:text-rose-400 rounded-xl text-xs flex items-center gap-2 font-bold antialiased">
+                          <AlertCircle size={14} />
+                          <span>{shareError}</span>
+                        </div>
+                      )}
+
+                      {generatedCode && (
+                        <div className="mt-4 p-4 border border-indigo-200/50 dark:border-indigo-900/50 bg-indigo-50/10 dark:bg-indigo-950/10 rounded-2xl text-center space-y-3">
+                          <div className="text-[10px] uppercase font-black tracking-widest text-slate-400">Share Code</div>
+                          <div className="text-2xl font-black font-mono tracking-widest text-indigo-600 dark:text-indigo-400 select-all p-2 bg-white dark:bg-zinc-900 rounded-xl inline-block border dark:border-zinc-800">
+                            {generatedCode}
+                          </div>
+                          {countdownText && (
+                            <p className="text-[10px] font-bold text-amber-500 uppercase tracking-wider">{countdownText}</p>
+                          )}
+                          <div className="pt-2">
+                            <span className="text-[10px] text-slate-400 leading-normal block">Give this code to another user to let them import these entries instantly.</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="pt-4">
+                      <button
+                        onClick={handleGenerateShareCode}
+                        disabled={selectedList.length === 0}
+                        className={cn(
+                          "w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-black tracking-wider text-xs uppercase transition-all shadow-md shadow-indigo-100 dark:shadow-none cursor-pointer",
+                          selectedList.length === 0 && "opacity-55 cursor-not-allowed"
+                        )}
+                      >
+                        Generate Share Code
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Import Panel */}
+                  <div className={cn(
+                    "p-6 rounded-3xl border transition-colors duration-300 shadow-sm space-y-4 flex flex-col justify-between",
+                    theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-100"
+                  )}>
+                    <div className="space-y-4">
+                      <h3 className="text-base font-black text-slate-800 dark:text-slate-100">Import Shared Entries</h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                        Enter a shared 5-character coupon/code code from another user to instantly clone and import their transactions into a new cashbook.
+                      </p>
+
+                      {importError && (
+                        <div className="p-3 bg-rose-50 dark:bg-rose-950/20 text-rose-600 dark:text-rose-400 rounded-xl text-xs flex items-center gap-2 font-bold antialiased">
+                          <AlertCircle size={14} />
+                          <span>{importError}</span>
+                        </div>
+                      )}
+
+                      {importSuccess ? (
+                        <div className="text-center py-4 space-y-3 bg-emerald-500/5 dark:bg-emerald-950/5 p-4 rounded-2xl border border-emerald-500/10">
+                          <div className="w-10 h-10 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 rounded-full flex items-center justify-center mx-auto">
+                            <CheckSquare size={18} />
+                          </div>
+                          <div>
+                            <h4 className="font-extrabold text-sm text-slate-850 dark:text-slate-100">Entries Imported!</h4>
+                            <p className="text-[10px] text-slate-400 mt-1">Creating book and refreshing workspace...</p>
+                            {importSummary && (
+                              <div className="mt-2.5 p-2.5 bg-indigo-50 dark:bg-indigo-950/20 rounded-xl text-left border border-indigo-100/30 text-[11px] font-semibold text-slate-550 dark:text-slate-400">
+                                {importSummary}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          <label className="text-[10px] uppercase font-black tracking-wider text-slate-400">Share Code</label>
+                          <input 
+                            type="text"
+                            placeholder="e.g. TBK-82KD1"
+                            value={importCode}
+                            onChange={(e) => setImportCode(e.target.value.toUpperCase())}
+                            disabled={isImporting}
+                            className={cn(
+                              "w-full px-4 py-3 border rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-center font-bold font-mono text-base tracking-widest",
+                              theme === 'dark' ? "bg-zinc-900 border-zinc-800 text-white placeholder-slate-700" : "bg-white border-slate-200 text-black placeholder-slate-350"
+                            )}
+                            maxLength={10}
+                          />
+                        </div>
+                      )}
+                    </div>
+
+                    {!importSuccess && (
+                      <div className="pt-4">
+                        <button
+                          onClick={() => {
+                            if (!isImporting && importCode.trim()) {
+                              handleImportSharedEntries();
+                            }
+                          }}
+                          disabled={isImporting || !importCode.trim()}
+                          className={cn(
+                            "w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-black tracking-wider text-xs uppercase transition-all shadow-md shadow-emerald-100 dark:shadow-none cursor-pointer flex items-center justify-center gap-2",
+                            (isImporting || !importCode.trim()) && "opacity-55 cursor-not-allowed"
+                          )}
+                        >
+                          {isImporting ? (
+                            <>
+                              <Loader2 size={14} className="animate-spin" />
+                              <span>Importing...</span>
+                            </>
+                          ) : (
+                            <span>Import Code</span>
+                          )}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
             </motion.div>
           )}
         </AnimatePresence>
@@ -5308,7 +6799,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       <AnimatePresence>
         {deleteConfirmId && (
           <div className={cn(
-            "fixed inset-0 z-[150] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300",
+            "fixed inset-0 z-[150] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300 overflow-y-auto",
             theme === 'dark' ? "bg-black/60" : "bg-indigo-900/10"
           )}>
             <motion.div
@@ -5373,7 +6864,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       <AnimatePresence>
         {transactionToDelete && (
           <div className={cn(
-            "fixed inset-0 z-[150] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300",
+            "fixed inset-0 z-[150] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300 overflow-y-auto",
             theme === 'dark' ? "bg-black/60" : "bg-indigo-900/10"
           )}>
             <motion.div
@@ -5491,196 +6982,722 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         )}
       </AnimatePresence>
 
-      {/* AI Under Construction Modal */}
+      {/* AI Under Construction / OCR Parser Modal */}
       <AnimatePresence>
         {aiConstructionModal && (
           <div 
-            onClick={() => setAiConstructionModal(null)}
+            onClick={() => {
+              if (aiWorkflowStep !== 'scanning') {
+                setAiConstructionModal(null);
+              }
+            }}
             className={cn(
               "fixed inset-0 z-[400] flex items-center justify-center p-4 backdrop-blur-xl transition-colors duration-300",
               theme === 'dark' ? "bg-slate-950/80" : "bg-slate-900/60"
             )}
           >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 15 }}
-              transition={{ type: 'spring', damping: 25, stiffness: 250 }}
-              onClick={(e) => e.stopPropagation()}
-              className={cn(
-                "relative w-full max-w-sm rounded-[32px] p-6 sm:p-8 shadow-3xl text-center space-y-6 transition-colors duration-300 border overflow-hidden",
-                theme === 'dark' ? "bg-zinc-950 border-zinc-900 shadow-black/80" : "bg-white border-slate-100 shadow-slate-200/50"
-              )}
-            >
-              {/* Background Slowly Rotating Construction Gear */}
-              <div className="absolute inset-0 flex items-center justify-center overflow-hidden pointer-events-none select-none">
-                <motion.div
-                  animate={{ rotate: 360 }}
-                  transition={{ repeat: Infinity, duration: 25, ease: "linear" }}
+            {aiConstructionModal === 'ask' ? (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.9, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 15 }}
+                transition={{ type: 'spring', damping: 25, stiffness: 250 }}
+                onClick={(e) => e.stopPropagation()}
+                className={cn(
+                  "relative w-full max-w-sm rounded-[32px] p-6 sm:p-8 shadow-3xl text-center space-y-6 transition-colors duration-300 border overflow-hidden",
+                  theme === 'dark' ? "bg-zinc-950 border-zinc-900 shadow-black/80" : "bg-white border-slate-100 shadow-slate-200/50"
+                )}
+              >
+                {/* Background Slowly Rotating Construction Gear */}
+                <div className="absolute inset-0 flex items-center justify-center overflow-hidden pointer-events-none select-none">
+                  <motion.div
+                    animate={{ rotate: 360 }}
+                    transition={{ repeat: Infinity, duration: 25, ease: "linear" }}
+                    className={cn(
+                      "opacity-[0.03] dark:opacity-[0.04]",
+                      theme === 'dark' ? "text-indigo-400" : "text-indigo-900"
+                    )}
+                  >
+                    <Settings size={280} strokeWidth={1} />
+                  </motion.div>
+                </div>
+
+                {/* Close Button */}
+                <button 
+                  onClick={() => { vibrate(); setAiConstructionModal(null); }}
                   className={cn(
-                    "opacity-[0.03] dark:opacity-[0.04]",
-                    theme === 'dark' ? "text-indigo-400" : "text-indigo-900"
+                    "absolute top-4 right-4 p-2 rounded-full border transition-all hover:scale-105 active:scale-95 cursor-pointer",
+                    theme === 'dark' 
+                      ? "border-zinc-800 hover:bg-zinc-900 text-slate-400 hover:text-white" 
+                      : "border-slate-100 hover:bg-slate-50 text-slate-500 hover:text-slate-800"
                   )}
                 >
-                  <Settings size={280} strokeWidth={1} />
-                </motion.div>
-              </div>
+                  <X size={16} />
+                </button>
 
-              {/* Close Button */}
-              <button 
-                onClick={() => { vibrate(); setAiConstructionModal(null); }}
-                className={cn(
-                  "absolute top-4 right-4 p-2 rounded-full border transition-all hover:scale-105 active:scale-95 cursor-pointer",
-                  theme === 'dark' 
-                    ? "border-zinc-800 hover:bg-zinc-900 text-slate-400 hover:text-white" 
-                    : "border-slate-100 hover:bg-slate-50 text-slate-500 hover:text-slate-800"
-                )}
-              >
-                <X size={16} />
-              </button>
-
-              {/* Glowing Dynamic Visual Header */}
-              <div className="relative w-24 h-24 mx-auto flex items-center justify-center mt-3">
-                {/* AI Glow/Pulse Rings */}
-                <motion.div 
-                  animate={{ scale: [1, 1.4, 1], opacity: [0.6, 0.15, 0.6] }}
-                  transition={{ repeat: Infinity, duration: 3, ease: "easeInOut" }}
-                  className="absolute inset-0 rounded-full bg-indigo-500/10 dark:bg-indigo-500/5"
-                />
-                <motion.div 
-                  animate={{ scale: [1, 1.25, 1], opacity: [0.8, 0.3, 0.8] }}
-                  transition={{ repeat: Infinity, duration: 2.5, ease: "easeInOut", delay: 0.5 }}
-                  className="absolute inset-2 rounded-full bg-indigo-500/15 dark:bg-indigo-500/10"
-                />
-                
-                {/* Central Icon Container */}
-                <div className={cn(
-                  "w-16 h-16 rounded-[22px] flex items-center justify-center relative shadow-xl",
-                  theme === 'dark' ? "bg-gradient-to-tr from-indigo-900/40 to-violet-800/20" : "bg-indigo-50"
-                )}>
-                  {/* Rotating small cog */}
-                  <motion.div
-                    animate={{ rotate: -360 }}
-                    transition={{ repeat: Infinity, duration: 6, ease: "linear" }}
-                    className="absolute -top-1 -right-1 text-indigo-500/40"
-                  >
-                    <Settings size={18} strokeWidth={2.5} />
-                  </motion.div>
-
-                  {/* Interactive Icon based on type */}
-                  <motion.div
-                    animate={aiConstructionModal === 'upload' ? { y: [-2, 2, -2] } : { scale: [0.95, 1.05, 0.95] }}
-                    transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
-                    className={theme === 'dark' ? "text-indigo-400" : "text-indigo-600"}
-                  >
-                    {aiConstructionModal === 'upload' ? (
-                      <Upload size={28} strokeWidth={2.2} />
-                    ) : (
-                      <MessageSquare size={28} strokeWidth={2.2} />
-                    )}
-                  </motion.div>
-                  
-                  {/* Sparkles overlay */}
+                {/* Glowing Dynamic Visual Header */}
+                <div className="relative w-24 h-24 mx-auto flex items-center justify-center mt-3">
                   <motion.div 
-                    animate={{ opacity: [0.4, 1, 0.4], scale: [0.8, 1.1, 0.8] }}
-                    transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
-                    className="absolute bottom-1 right-1 text-amber-400"
-                  >
-                    <Sparkles size={14} fill="currentColor" />
-                  </motion.div>
-                </div>
-              </div>
-
-              {/* Title & Subtitle */}
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-center gap-1.5">
-                  <motion.div 
-                    animate={{ opacity: [0.3, 1, 0.3] }}
-                    transition={{ repeat: Infinity, duration: 1.5, delay: 0 }}
-                    className="w-1.5 h-1.5 rounded-full bg-emerald-500"
+                    animate={{ scale: [1, 1.4, 1], opacity: [0.6, 0.15, 0.6] }}
+                    transition={{ repeat: Infinity, duration: 3, ease: "easeInOut" }}
+                    className="absolute inset-0 rounded-full bg-indigo-500/10 dark:bg-indigo-500/5"
                   />
-                  <span className="text-[10px] font-black uppercase tracking-widest text-emerald-500">Under Construction</span>
-                </div>
-                
-                <h3 className={cn(
-                  "text-xl font-bold tracking-tight transition-colors duration-300",
-                  theme === 'dark' ? "text-white" : "text-slate-900"
-                )}>
-                  {aiConstructionModal === 'upload' ? "AI Upload Coming Soon" : "Ask AI Coming Soon"}
-                </h3>
-                
-                <p className={cn(
-                  "text-sm leading-relaxed px-2 transition-colors duration-300 font-medium",
-                  theme === 'dark' ? "text-slate-400" : "text-slate-600"
-                )}>
-                  {aiConstructionModal === 'upload' 
-                    ? "This feature is currently under construction and will be available in a couple of days." 
-                    : "This AI feature is under development and will be released soon."}
-                </p>
-              </div>
-
-              {/* Progress and Construction indicators */}
-              <div className="space-y-2 pt-1">
-                <div className="flex items-center justify-between text-xs font-bold text-slate-400 px-1">
-                  <span>Development Progress</span>
-                  <span className="text-indigo-500 font-black">
-                    {aiConstructionModal === 'upload' ? "85%" : "78%"}
-                  </span>
-                </div>
-                
-                {/* Simulated Progress bar with shine */}
-                <div className={cn(
-                  "h-2 w-full rounded-full overflow-hidden relative",
-                  theme === 'dark' ? "bg-zinc-900" : "bg-slate-100"
-                )}>
                   <motion.div 
-                    initial={{ width: "0%" }}
-                    animate={{ width: aiConstructionModal === 'upload' ? "85%" : "78%" }}
-                    transition={{ duration: 1.2, ease: "easeOut" }}
-                    className="h-full bg-gradient-to-r from-indigo-500 to-violet-600 rounded-full relative"
-                  >
-                    {/* Glowing scanning effect inside the progress bar */}
+                    animate={{ scale: [1, 1.25, 1], opacity: [0.8, 0.3, 0.8] }}
+                    transition={{ repeat: Infinity, duration: 2.5, ease: "easeInOut", delay: 0.5 }}
+                    className="absolute inset-2 rounded-full bg-indigo-500/15 dark:bg-indigo-500/10"
+                  />
+                  
+                  {/* Central Icon Container */}
+                  <div className={cn(
+                    "w-16 h-16 rounded-[22px] flex items-center justify-center relative shadow-xl",
+                    theme === 'dark' ? "bg-gradient-to-tr from-indigo-900/40 to-violet-800/20" : "bg-indigo-50"
+                  )}>
+                    <motion.div
+                      animate={{ scale: [0.95, 1.05, 0.95] }}
+                      transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
+                      className={theme === 'dark' ? "text-indigo-400" : "text-indigo-600"}
+                    >
+                      <MessageSquare size={28} strokeWidth={2.2} />
+                    </motion.div>
+                    
                     <motion.div 
-                      initial={{ left: "-100%" }}
-                      animate={{ left: "100%" }}
-                      transition={{ duration: 1.8, repeat: Infinity, ease: "linear" }}
-                      className="absolute inset-y-0 w-24 bg-gradient-to-r from-transparent via-white/30 to-transparent skew-x-12"
-                    />
-                  </motion.div>
-                </div>
-                
-                {/* Bouncing loading indicator dots representing activity */}
-                <div className="flex justify-center items-center gap-1.5 pt-2">
-                  <span className="text-[10px] font-bold text-slate-400">Deploying updates</span>
-                  <div className="flex gap-1 items-center">
-                    {[0, 1, 2].map((i) => (
-                      <motion.div
-                        key={i}
-                        animate={{ y: [0, -3, 0] }}
-                        transition={{
-                          repeat: Infinity,
-                          duration: 1,
-                          delay: i * 0.18,
-                          ease: "easeInOut"
-                        }}
-                        className="w-1 h-1 rounded-full bg-indigo-500"
-                      />
-                    ))}
+                      animate={{ opacity: [0.4, 1, 0.4], scale: [0.8, 1.1, 0.8] }}
+                      transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
+                      className="absolute bottom-1 right-1 text-amber-400"
+                    >
+                      <Sparkles size={14} fill="currentColor" />
+                    </motion.div>
                   </div>
                 </div>
-              </div>
 
-              {/* Primary action close button */}
-              <button 
-                onClick={() => { vibrate(); setAiConstructionModal(null); }}
+                {/* Title & Subtitle */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-center gap-1.5">
+                    <motion.div 
+                      animate={{ opacity: [0.3, 1, 0.3] }}
+                      transition={{ repeat: Infinity, duration: 1.5, delay: 0 }}
+                      className="w-1.5 h-1.5 rounded-full bg-emerald-500"
+                    />
+                    <span className="text-[10px] font-black uppercase tracking-widest text-emerald-500">Under Construction</span>
+                  </div>
+                  
+                  <h3 className={cn(
+                    "text-xl font-bold tracking-tight transition-colors duration-300",
+                    theme === 'dark' ? "text-white" : "text-slate-900"
+                  )}>
+                    Ask AI Coming Soon
+                  </h3>
+                  
+                  <p className={cn(
+                    "text-sm leading-relaxed px-2 transition-colors duration-300 font-medium",
+                    theme === 'dark' ? "text-slate-400" : "text-slate-600"
+                    )}>
+                    This AI feature is under development and will be released soon.
+                  </p>
+                </div>
+
+                {/* Progress bar */}
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-400 px-1">
+                    <span>Development Progress</span>
+                    <span className="text-indigo-500 font-black">78%</span>
+                  </div>
+                  <div className={cn(
+                    "h-2 w-full rounded-full overflow-hidden relative",
+                    theme === 'dark' ? "bg-zinc-900" : "bg-slate-100"
+                  )}>
+                    <motion.div 
+                      initial={{ width: "0%" }}
+                      animate={{ width: "78%" }}
+                      transition={{ duration: 1.2, ease: "easeOut" }}
+                      className="h-full bg-gradient-to-r from-indigo-500 to-violet-600 rounded-full relative"
+                    >
+                      <motion.div 
+                        initial={{ left: "-100%" }}
+                        animate={{ left: "100%" }}
+                        transition={{ duration: 1.8, repeat: Infinity, ease: "linear" }}
+                        className="absolute inset-y-0 w-24 bg-gradient-to-r from-transparent via-white/30 to-transparent skew-x-12"
+                      />
+                    </motion.div>
+                  </div>
+                </div>
+
+                <button 
+                  onClick={() => { vibrate(); setAiConstructionModal(null); }}
+                  className={cn(
+                    "w-full py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-bold transition-all transform hover:scale-[1.02] active:scale-[0.98] cursor-pointer shadow-lg",
+                    theme === 'dark' ? "shadow-indigo-950/20" : "shadow-indigo-100"
+                  )}
+                >
+                  Awesome, I'll wait!
+                </button>
+              </motion.div>
+            ) : (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 15 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 15 }}
+                transition={{ type: 'spring', damping: 28, stiffness: 220 }}
+                onClick={(e) => e.stopPropagation()}
                 className={cn(
-                  "w-full py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-bold transition-all transform hover:scale-[1.02] active:scale-[0.98] cursor-pointer shadow-lg",
-                  theme === 'dark' ? "shadow-indigo-950/20" : "shadow-indigo-100"
+                  "relative w-full rounded-[32px] p-6 sm:p-8 shadow-3xl transition-all duration-300 border overflow-hidden",
+                  aiWorkflowStep === 'confirmation' ? "max-w-4xl" : "max-w-md",
+                  theme === 'dark' ? "bg-zinc-950 border-zinc-900 shadow-black/80" : "bg-white border-slate-150 shadow-slate-200/50"
                 )}
               >
-                Awesome, I'll wait!
-              </button>
-            </motion.div>
+                {/* 1. Group Size Selector Step */}
+                {aiWorkflowStep === 'group' && (
+                  <div className="space-y-6 relative">
+                    <button 
+                      onClick={() => { vibrate(); setAiConstructionModal(null); }}
+                      className={cn(
+                        "absolute top-0 right-0 p-2 rounded-full border transition-all hover:scale-105 active:scale-95 cursor-pointer",
+                        theme === 'dark' 
+                          ? "border-zinc-800 hover:bg-zinc-900 text-slate-400 hover:text-white" 
+                          : "border-slate-100 hover:bg-slate-50 text-slate-500 hover:text-slate-800"
+                      )}
+                    >
+                      <X size={16} />
+                    </button>
+
+                    <div className="text-center space-y-3 pt-4">
+                      <div className="w-12 h-12 bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 rounded-2xl flex items-center justify-center mx-auto shadow-sm">
+                        <Users size={24} />
+                      </div>
+                      <h3 className={cn(
+                        "text-xl font-extrabold tracking-tight transition-colors duration-300",
+                        theme === 'dark' ? "text-white" : "text-zinc-900"
+                      )}>Who was included in this expense?</h3>
+                      <p className="text-slate-500 dark:text-slate-400 text-sm">
+                        Select group size to automatically divide and classify this bill.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-col items-center justify-center space-y-4">
+                      <div className="flex items-center gap-6">
+                        <button 
+                          type="button"
+                          onClick={() => {
+                            vibrate();
+                            setAiGroupSize(prev => Math.max(1, prev - 1));
+                          }}
+                          disabled={aiGroupSize <= 1}
+                          className={cn(
+                            "w-12 h-12 rounded-2xl border flex items-center justify-center transition-all font-bold hover:scale-105 active:scale-95 text-lg disabled:opacity-40 select-none cursor-pointer",
+                            theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-800"
+                          )}
+                        >
+                          -
+                        </button>
+                        
+                        <div className="text-center min-w-[100px]">
+                          <span className={cn(
+                            "text-4xl font-black tracking-tight block",
+                            theme === 'dark' ? "text-white" : "text-zinc-900"
+                          )}>
+                            {aiGroupSize}
+                          </span>
+                          <span className="text-xs font-semibold text-slate-400/80 uppercase tracking-widest mt-1 block">
+                            {aiGroupSize === 1 ? 'Member' : 'Members'}
+                          </span>
+                        </div>
+
+                        <button 
+                          type="button"
+                          onClick={() => {
+                            vibrate();
+                            setAiGroupSize(prev => Math.min(50, prev + 1));
+                          }}
+                          disabled={aiGroupSize >= 50}
+                          className={cn(
+                            "w-12 h-12 rounded-2xl border flex items-center justify-center transition-all font-bold hover:scale-105 active:scale-95 text-lg disabled:opacity-40 select-none cursor-pointer",
+                            theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-800"
+                          )}
+                        >
+                          +
+                        </button>
+                      </div>
+
+                      <div className="text-center py-2 px-4 bg-indigo-50/20 dark:bg-indigo-950/25 rounded-2xl border border-indigo-500/10 text-xs font-bold text-indigo-650 dark:text-indigo-400">
+                        {aiGroupSize === 1 ? '1 Member' : `${aiGroupSize} Members`} expense structure will be auto-calculated.
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        vibrate();
+                        setAiWorkflowStep('upload');
+                      }}
+                      className={cn(
+                        "w-full py-4 rounded-2xl font-bold text-sm tracking-wide shadow-lg cursor-pointer transform hover:translate-y-[-1px] transition-all duration-200 active:scale-95 flex items-center justify-center gap-2 text-white",
+                        theme === 'dark'
+                          ? "bg-indigo-650 hover:bg-indigo-700 shadow-indigo-950/40"
+                          : "bg-indigo-600 hover:bg-indigo-700 shadow-indigo-100"
+                      )}
+                    >
+                      Continue
+                      <ArrowRight size={16} />
+                    </button>
+                  </div>
+                )}
+
+                {/* 1.5 File Upload Step */}
+                {aiWorkflowStep === 'upload' && (
+                  <div className="space-y-6 relative">
+                    <button 
+                      onClick={() => { vibrate(); setAiConstructionModal(null); }}
+                      className={cn(
+                        "absolute top-0 right-0 p-2 rounded-full border transition-all hover:scale-105 active:scale-95 cursor-pointer z-10",
+                        theme === 'dark' 
+                          ? "border-zinc-800 hover:bg-zinc-900 text-slate-400 hover:text-white" 
+                          : "border-slate-100 hover:bg-slate-50 text-slate-500 hover:text-slate-800"
+                      )}
+                    >
+                      <X size={16} />
+                    </button>
+
+                    <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-zinc-900/60 font-sans pt-4">
+                      <button
+                        type="button"
+                        onClick={() => setAiWorkflowStep('group')}
+                        className="flex items-center gap-1.5 text-xs font-semibold text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors cursor-pointer"
+                      >
+                        <ArrowLeft size={14} /> Back
+                      </button>
+                      <span className="text-xs font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/10 px-3 py-1 rounded-full uppercase tracking-wider">
+                        {aiGroupSize} {aiGroupSize === 1 ? 'Member' : 'Members'} Selected
+                      </span>
+                    </div>
+
+                    <div className="text-center space-y-1.5">
+                      <h3 className={cn(
+                        "text-lg font-extrabold transition-colors duration-300",
+                        theme === 'dark' ? "text-white" : "text-black"
+                      )}>Upload Bill or Document</h3>
+                      <p className="text-slate-500 dark:text-slate-400 text-xs text-center">
+                        Camera snapshots, library photos, or PDF invoices are fully supported.
+                      </p>
+                    </div>
+
+                    {/* Drag & Drop Zone */}
+                    <div 
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                          startAiUploadReceiptParsing(e.dataTransfer.files);
+                        }
+                      }}
+                      onClick={() => {
+                        vibrate();
+                        const el = document.getElementById('modal-ai-file-picker');
+                        if (el) el.click();
+                      }}
+                      className={cn(
+                        "border-2 border-dashed rounded-2xl p-8 flex flex-col items-center justify-center gap-3 transition-all cursor-pointer group",
+                        theme === 'dark' ? "border-indigo-900/50 bg-indigo-900/5 hover:bg-indigo-900/10" : "border-indigo-200 bg-indigo-50/30 hover:bg-indigo-50/50"
+                      )}
+                    >
+                      <div className="w-12 h-12 bg-white dark:bg-slate-800 rounded-xl shadow-sm flex items-center justify-center text-indigo-600 group-hover:scale-110 transition-transform">
+                        <Upload size={24} />
+                      </div>
+                      <div className="text-center font-sans">
+                        <p className={cn(
+                          "font-bold transition-colors text-sm",
+                          theme === 'dark' ? "text-white" : "text-black"
+                        )}>Drag & Drop bill here</p>
+                        <p className={cn(
+                          "text-xs transition-colors",
+                          theme === 'dark' ? "text-slate-400" : "text-slate-500"
+                        )}>or click to browse files</p>
+                      </div>
+                    </div>
+
+                    {/* Quick Selection Buttons */}
+                    <div className="grid grid-cols-2 gap-3 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          vibrate();
+                          const el = document.getElementById('modal-ai-file-picker');
+                          if (el) el.click();
+                        }}
+                        className={cn(
+                          "flex items-center justify-center gap-2 py-3 border rounded-xl text-xs font-bold transition-all cursor-pointer hover:bg-slate-50 dark:hover:bg-zinc-900 active:scale-95",
+                          theme === 'dark' ? "border-zinc-800 text-slate-300" : "border-slate-200 text-slate-700"
+                        )}
+                      >
+                        <Camera size={14} />
+                        Camera / Gallery
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          vibrate();
+                          const el = document.getElementById('modal-ai-file-picker');
+                          if (el) el.click();
+                        }}
+                        className={cn(
+                          "flex items-center justify-center gap-2 py-3 border rounded-xl text-xs font-bold transition-all cursor-pointer hover:bg-slate-50 dark:hover:bg-zinc-900 active:scale-95",
+                          theme === 'dark' ? "border-zinc-800 text-slate-300" : "border-slate-200 text-slate-700"
+                        )}
+                      >
+                        <FileText size={14} />
+                        Upload PDF Bill
+                      </button>
+                    </div>
+
+                    {/* Handwritten Bill Configuration Section */}
+                    <div className={cn(
+                      "p-3.5 rounded-2xl border transition-all space-y-3 font-sans",
+                      isHandwritten 
+                        ? (theme === 'dark' ? "bg-amber-950/20 border-amber-900/40 text-amber-300" : "bg-amber-50/50 border-amber-200 text-amber-900")
+                        : (theme === 'dark' ? "bg-zinc-900/30 border-zinc-900/60 text-slate-400" : "bg-slate-50 border-slate-150 text-slate-600")
+                    )}>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <FileText size={16} className={isHandwritten ? "text-amber-500" : "text-slate-400"} />
+                          <div>
+                            <span className="text-xs font-bold block">Hand-written Bill?</span>
+                            <span className="text-[10px] text-slate-400 dark:text-zinc-500 block">Optimized accuracy for hand-written bills</span>
+                          </div>
+                        </div>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input 
+                            type="checkbox" 
+                            checked={isHandwritten}
+                            onChange={(e) => {
+                              vibrate();
+                              setIsHandwritten(e.target.checked);
+                            }}
+                            className="sr-only peer"
+                          />
+                          <div className="w-9 h-5 bg-slate-200 dark:bg-zinc-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-500"></div>
+                        </label>
+                      </div>
+
+                      {isHandwritten && (
+                        <div className="space-y-3 pt-2.5 border-t border-amber-200/40 dark:border-amber-900/30">
+                          {/* Time Picker/Input */}
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 dark:text-zinc-500 block">
+                              What time was this bill paid?
+                            </label>
+                            <input 
+                              type="text"
+                              value={handwrittenTime}
+                              onChange={(e) => setHandwrittenTime(e.target.value)}
+                              placeholder="e.g., 01:20 PM or 21:30"
+                              className={cn(
+                                "w-full px-3 py-2 text-xs font-bold rounded-xl border focus:ring-1 focus:ring-amber-500 focus:outline-none transition-colors",
+                                theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-white text-zinc-900"
+                              )}
+                            />
+                          </div>
+
+                          {/* Food Item Toggle */}
+                          <div className="flex items-center justify-between pt-1">
+                            <span className="text-xs font-bold text-slate-700 dark:text-slate-300">Is this a Food Item?</span>
+                            <div className="flex bg-slate-100 dark:bg-zinc-900 p-0.5 rounded-lg border border-slate-200/50 dark:border-zinc-800">
+                              {[
+                                { val: true, label: "Yes" },
+                                { val: false, label: "No" }
+                              ].map((opt) => {
+                                const isSel = handwrittenIsFood === opt.val;
+                                return (
+                                  <button
+                                    key={opt.label}
+                                    type="button"
+                                    onClick={() => {
+                                      vibrate();
+                                      setHandwrittenIsFood(opt.val);
+                                    }}
+                                    className={cn(
+                                      "px-3 py-1 rounded-md text-[10px] font-bold transition-all cursor-pointer whitespace-nowrap",
+                                      isSel 
+                                        ? "bg-amber-500 text-black shadow-sm" 
+                                        : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                                    )}
+                                  >
+                                    {opt.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <input 
+                      type="file"
+                      multiple
+                      accept="image/*,application/pdf"
+                      onChange={(e) => {
+                        if (e.target.files && e.target.files.length > 0) {
+                          startAiUploadReceiptParsing(e.target.files);
+                        }
+                      }}
+                      className="hidden"
+                      id="modal-ai-file-picker"
+                    />
+
+                    <div className="flex items-center gap-2.5 p-3.5 bg-amber-50 dark:bg-amber-900/10 rounded-xl text-amber-700 dark:text-amber-400 text-xs font-sans">
+                      <div className="shrink-0"><Loader2 size={13} className="animate-spin" /></div>
+                      <p>Full AI extraction automatically normalizes and splits currencies.</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* 2. Scanning Loader Step */}
+                {aiWorkflowStep === 'scanning' && (
+                  <div className="space-y-6 pt-4 text-center">
+                    <div className="relative w-24 h-24 mx-auto flex items-center justify-center">
+                      <motion.div 
+                        animate={{ scale: [1, 1.4, 1], opacity: [0.6, 0.15, 0.6] }}
+                        transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
+                        className="absolute inset-0 rounded-full bg-indigo-500/20 dark:bg-indigo-500/10"
+                      />
+                      <motion.div 
+                        animate={{ rotate: 360 }}
+                        transition={{ repeat: Infinity, duration: 1.5, ease: "linear" }}
+                        className="w-16 h-16 rounded-full border-4 border-indigo-300 dark:border-zinc-800 border-t-indigo-600 dark:border-t-indigo-400 flex items-center justify-center"
+                      />
+                      <Sparkles size={22} className="absolute text-indigo-600 dark:text-indigo-400 animate-pulse" />
+                    </div>
+
+                    <div className="space-y-2">
+                      <h3 className={cn(
+                        "text-xl font-black tracking-tight",
+                        theme === 'dark' ? "text-white" : "text-zinc-900"
+                      )}>Smart OCR Scanning</h3>
+                      <p className="text-indigo-600 dark:text-indigo-400 font-bold text-xs uppercase tracking-widest animate-pulse max-w-xs mx-auto">
+                        {aiScanStatus}
+                      </p>
+                    </div>
+
+                    <div className="text-xs text-slate-400 dark:text-zinc-500 max-w-xs mx-auto leading-relaxed">
+                      TrackBook AI is extracting receipt data, mapping categories, and parsing your splits. Please do not close this window.
+                    </div>
+                  </div>
+                )}
+
+                {/* 3. Confirmation Step */}
+                {aiWorkflowStep === 'confirmation' && (
+                  <div className="space-y-6 text-left">
+                    <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-zinc-900/60 font-sans">
+                      <div className="flex items-center gap-2">
+                        <Sparkles size={18} className="text-indigo-600 dark:text-indigo-400 animate-pulse" />
+                        <h3 className={cn(
+                          "text-lg font-extrabold tracking-tight",
+                          theme === 'dark' ? "text-white" : "text-zinc-900"
+                        )}>Verify Split Entry</h3>
+                      </div>
+                      <span className="rounded bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 font-black text-[10px] px-2.5 py-1 uppercase tracking-widest">
+                        OCR Completed
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-5 gap-6">
+                      {/* Left Side: Thumbnail Preview */}
+                      <div className="md:col-span-2 space-y-4">
+                        <div className={cn(
+                          "rounded-2xl border p-4 text-center space-y-3 shadow-inner",
+                          theme === 'dark' ? "bg-zinc-900/40 border-zinc-900" : "bg-slate-50/50 border-slate-150"
+                        )}>
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-black text-slate-400 uppercase tracking-wider">Receipt Preview</span>
+                            <span className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">
+                              {aiGroupSize} {aiGroupSize === 1 ? 'Member' : 'Members'}
+                            </span>
+                          </div>
+
+                          {aiFilePreviewUrl ? (
+                            <div className="relative rounded-xl overflow-hidden aspect-[3/4] bg-slate-100 dark:bg-zinc-950 flex items-center justify-center border border-slate-200 dark:border-zinc-850 shadow-inner">
+                              <img 
+                                src={aiFilePreviewUrl} 
+                                alt="Receipt Thumbnail" 
+                                className="w-full h-full object-cover"
+                                referrerPolicy="no-referrer"
+                              />
+                            </div>
+                          ) : (
+                            <div className="rounded-xl border-2 border-dashed border-slate-200 dark:border-zinc-800 flex flex-col items-center justify-center p-6 aspect-[3/4] text-slate-400 bg-slate-100/50 dark:bg-zinc-950">
+                              <FileText size={36} className="stroke-[1.5]" />
+                              <span className="text-[10px] font-bold mt-2">Document processed</span>
+                              <span className="text-[9px] text-slate-400 mt-1 truncate max-w-full px-2">
+                                {aiFile?.name}
+                              </span>
+                            </div>
+                          )}
+                          <div className="text-[10px] font-black text-emerald-500 flex items-center justify-center gap-1">
+                            <Check size={12} strokeWidth={3} />
+                            Classified: {aiBillType} Detection
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Right Side: Form Fields to verify */}
+                      <div className="md:col-span-3 space-y-4">
+                        <div className="grid grid-cols-2 gap-4 font-sans">
+                          {/* Amount */}
+                          <div className="space-y-1.5 col-span-2 sm:col-span-1">
+                            <label className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Amount</label>
+                            <div className="relative">
+                              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-sm">₹</span>
+                              <input 
+                                type="number"
+                                value={aiAmount}
+                                onChange={(e) => setAiAmount(e.target.value)}
+                                className={cn(
+                                  "w-full pl-7 pr-4 py-3 rounded-xl border text-sm font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-colors",
+                                  theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-900"
+                                )}
+                              />
+                            </div>
+                          </div>
+
+                          {/* Merchant */}
+                          <div className="space-y-1.5 col-span-2 sm:col-span-1">
+                            <label className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Merchant</label>
+                            <input 
+                              type="text"
+                              value={aiMerchant}
+                              onChange={(e) => setAiMerchant(e.target.value)}
+                              className={cn(
+                                "w-full px-4 py-3 rounded-xl border text-sm font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-colors",
+                                theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-900"
+                              )}
+                            />
+                          </div>
+
+                          {/* Date */}
+                          <div className="space-y-1.5 col-span-1">
+                            <label className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Date</label>
+                            <input 
+                              type="text"
+                              value={aiDate}
+                              onChange={(e) => setAiDate(e.target.value)}
+                              placeholder="DD-MM-YYYY"
+                              className={cn(
+                                "w-full px-4 py-3 rounded-xl border text-sm font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-colors",
+                                theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-900"
+                              )}
+                            />
+                          </div>
+
+                          {/* Time */}
+                          <div className="space-y-1.5 col-span-1">
+                            <label className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Time</label>
+                            <input 
+                              type="text"
+                              value={aiTime}
+                              onChange={(e) => setAiTime(e.target.value)}
+                              placeholder="e.g., 01:20 PM"
+                              className={cn(
+                                "w-full px-4 py-3 rounded-xl border text-sm font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-colors",
+                                theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-900"
+                              )}
+                            />
+                          </div>
+
+                          {/* Bill Type Category selection */}
+                          <div className="space-y-1.5 col-span-1">
+                            <label className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Bill Type</label>
+                            <select 
+                              value={aiBillType}
+                              onChange={(e) => setAiBillType(e.target.value)}
+                              className={cn(
+                                "w-full px-4 py-3 rounded-xl border text-sm font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-colors appearance-none cursor-pointer",
+                                theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-900"
+                              )}
+                            >
+                              {["Restaurant", "Food", "Taxi", "Cab", "Bus", "Train", "Flight", "Fuel", "Groceries", "Medical", "Shopping", "Utilities", "Internet", "Recharge", "Hotel", "Entertainment"].map(t => (
+                                <option key={t} value={t}>{t}</option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* Ledger Category selection */}
+                          <div className="space-y-1.5 col-span-1">
+                            <label className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Category</label>
+                            <select 
+                              value={aiCategory}
+                              onChange={(e) => setAiCategory(e.target.value)}
+                              className={cn(
+                                "w-full px-4 py-3 rounded-xl border text-sm font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-colors appearance-none cursor-pointer",
+                                theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-900"
+                              )}
+                            >
+                              {["Food", "Transport", "Utilities", "Shopping", "Entertainment", "Health", "Education", "Salary", "Other"].map(c => (
+                                <option key={c} value={c}>{c}</option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* Description field */}
+                          <div className="space-y-1.5 col-span-2">
+                            <label className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">Generated Description</label>
+                            <input 
+                              type="text"
+                              value={aiDescription}
+                              onChange={(e) => setAiDescription(e.target.value)}
+                              className={cn(
+                                "w-full px-4 py-3 rounded-xl border text-sm font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-colors",
+                                theme === 'dark' ? "border-zinc-800 bg-zinc-900 text-white" : "border-slate-200 bg-slate-50 text-slate-900"
+                              )}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Action buttons */}
+                        <div className="flex gap-3 pt-4 border-t border-slate-100 dark:border-zinc-900/60 font-sans">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              vibrate();
+                              setAiWorkflowStep('group');
+                              setAiFile(null);
+                              setAiFilePreviewUrl('');
+                              setAiConstructionModal(null);
+                            }}
+                            className={cn(
+                              "flex-1 py-3 rounded-xl font-bold text-xs tracking-wide border cursor-pointer active:scale-95 transition-all text-center flex items-center justify-center gap-1.5",
+                              theme === 'dark' 
+                                ? "border-zinc-800 text-slate-400 hover:bg-zinc-900" 
+                                : "border-slate-200 text-slate-500 hover:bg-slate-50"
+                            )}
+                          >
+                            <Trash2 size={13} />
+                            Discard
+                          </button>
+                          
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              vibrate();
+                              await handleSaveAiEntry();
+                              setAiConstructionModal(null);
+                            }}
+                            className={cn(
+                              "flex-[2] py-3 rounded-xl font-black text-xs tracking-wide shadow-md active:scale-95 transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-white",
+                              theme === 'dark' 
+                                ? "bg-indigo-650 hover:bg-indigo-700 shadow-indigo-950/50" 
+                                : "bg-indigo-600 hover:bg-indigo-700 shadow-indigo-100"
+                            )}
+                          >
+                            <Check size={13} />
+                            SAVE ENTRY
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </motion.div>
+            )}
           </div>
         )}
       </AnimatePresence>
@@ -5967,12 +7984,21 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 "flex items-center justify-between p-4 sm:p-6 border-b transition-colors duration-300",
                 theme === 'dark' ? "border-slate-800" : "border-slate-100"
               )}>
-                <h3 className={cn(
-                  "text-xl sm:text-2xl font-bold transition-colors duration-300",
-                  theme === 'dark' ? "text-white" : "text-slate-800"
-                )}>
-                  {showForm === 'in' ? 'Add Cash In' : 'Add Cash Out'}
-                </h3>
+                <div className="flex flex-col gap-1">
+                  <h3 className={cn(
+                    "text-xl sm:text-2xl font-bold transition-colors duration-300",
+                    theme === 'dark' ? "text-white" : "text-slate-800"
+                  )}>
+                    {editingTransaction 
+                      ? (showForm === 'in' ? 'Edit Cash In' : 'Edit Cash Out') 
+                      : (showForm === 'in' ? 'Add Cash In' : 'Add Cash Out')}
+                  </h3>
+                  {editingTransaction && (editingTransaction.imported_from_share_code || editingTransaction.is_imported) && (
+                    <span className="text-[9px] sm:text-[10px] font-extrabold text-sky-600 dark:text-sky-400 mt-1 uppercase tracking-widest flex items-center gap-1 bg-sky-50 dark:bg-sky-950/30 px-2.5 py-1 rounded-lg border border-sky-100 dark:border-sky-900/30 w-max select-none">
+                      ✓ Imported Entry
+                    </span>
+                  )}
+                </div>
                 <button onClick={resetForm} className={cn(
                   "p-2 rounded-full transition-colors",
                   theme === 'dark' ? "hover:bg-slate-800" : "hover:bg-slate-100"
@@ -6890,7 +8916,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       <AnimatePresence>
         {showBulkTransactionDeleteConfirm && (
           <div className={cn(
-            "fixed inset-0 z-[150] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300",
+            "fixed inset-0 z-[150] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300 overflow-y-auto",
             theme === 'dark' ? "bg-black/60" : "bg-slate-900/40"
           )}>
             <motion.div
@@ -6957,7 +8983,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       <AnimatePresence>
         {showBulkDeleteConfirm && (
           <div className={cn(
-            "fixed inset-0 z-[150] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300",
+            "fixed inset-0 z-[150] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300 overflow-y-auto",
             theme === 'dark' ? "bg-black/60" : "bg-slate-900/40"
           )}>
             <motion.div
@@ -7503,6 +9529,15 @@ Open TrackBook → Import Shared Entries`)}`}
         accept="image/*"
         ref={fileInputRef}
         onChange={handleFileUpload}
+        className="hidden"
+      />
+
+      {/* Hidden AI OCR File Input */}
+      <input 
+        type="file"
+        accept="image/*,application/pdf"
+        ref={aiOcrFileInputRef}
+        onChange={handleAiOcrFileSelected}
         className="hidden"
       />
 

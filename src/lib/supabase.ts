@@ -30,10 +30,40 @@ export const clearSupabaseAuthStorage = () => {
   }
 };
 
+const dynamicStorage = {
+  getItem: (key: string): string | null => {
+    if (typeof window === 'undefined') return null;
+    const rememberMe = localStorage.getItem('supabase_remember_me') !== 'false';
+    const val = rememberMe ? localStorage.getItem(key) : sessionStorage.getItem(key);
+    return val;
+  },
+  setItem: (key: string, value: string): void => {
+    if (typeof window === 'undefined') return;
+    const rememberMe = localStorage.getItem('supabase_remember_me') !== 'false';
+    if (rememberMe) {
+      localStorage.setItem(key, value);
+    } else {
+      sessionStorage.setItem(key, value);
+    }
+  },
+  removeItem: (key: string): void => {
+    if (typeof window === 'undefined') return;
+    localStorage.removeItem(key);
+    sessionStorage.removeItem(key);
+  }
+};
+
 const createWrappedSupabaseClient = () => {
   if (!isConfigured(supabaseUrl, supabaseAnonKey)) return null;
 
-  const client = createClient(supabaseUrl, supabaseAnonKey);
+  const client = createClient(supabaseUrl, supabaseAnonKey, {
+    auth: {
+      storage: typeof window !== 'undefined' ? dynamicStorage : undefined,
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true
+    }
+  });
 
   // Wrap getSession to handle refresh token invalidation and prevent null-destructure crashes
   const originalGetSession = client.auth.getSession.bind(client.auth);

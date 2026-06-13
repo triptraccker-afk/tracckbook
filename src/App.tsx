@@ -4,6 +4,7 @@ import { supabase } from './lib/supabase';
 import { Loader2 } from 'lucide-react';
 import { cn } from './lib/utils';
 import SmartUpdateManager from './components/SmartUpdateManager';
+import AutoLogoutManager from './components/AutoLogoutManager';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Login = lazy(() => import('./pages/Login'));
@@ -140,6 +141,7 @@ export default function App() {
   return (
     <Router>
       <SmartUpdateManager theme={theme} />
+      <AutoLogoutManager session={session} />
       <NavigationHandler 
         session={session} 
         setSession={setSession} 
@@ -149,7 +151,10 @@ export default function App() {
       <Suspense fallback={suspenseFallback}>
         <Routes>
           {/* Public Routes */}
-          <Route path="/login" element={<Login theme={theme} />} />
+          <Route path="/login" element={<Login theme={theme} initialMode="signin" />} />
+          <Route path="/register" element={<Login theme={theme} initialMode="signup" />} />
+          <Route path="/forgot" element={<Login theme={theme} initialMode="forgot" />} />
+          <Route path="/signup" element={<Navigate to="/register" replace />} />
           <Route path="/resetpassword" element={<ResetPassword />} />
 
           {/* Protected Routes */}
@@ -160,6 +165,57 @@ export default function App() {
                 <Dashboard session={session} theme={theme} setTheme={setTheme} />
               ) : (
                 // If we are still loading initial session, show a loader
+                loading ? (
+                  <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
+                    <div className="flex flex-col items-center gap-4">
+                      <Loader2 className="animate-spin text-indigo-600" size={40} />
+                      <p className="text-sm font-medium text-slate-500 animate-pulse">Initializing app...</p>
+                    </div>
+                  </div>
+                ) : <Navigate to="/login" replace />
+              )
+            } 
+          />
+          <Route 
+            path="/cashbooks" 
+            element={
+              session ? (
+                <Dashboard session={session} theme={theme} setTheme={setTheme} />
+              ) : (
+                loading ? (
+                  <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
+                    <div className="flex flex-col items-center gap-4">
+                      <Loader2 className="animate-spin text-indigo-600" size={40} />
+                      <p className="text-sm font-medium text-slate-500 animate-pulse">Initializing app...</p>
+                    </div>
+                  </div>
+                ) : <Navigate to="/login" replace />
+              )
+            } 
+          />
+          <Route 
+            path="/cashbooks/:bookSlug" 
+            element={
+              session ? (
+                <Dashboard session={session} theme={theme} setTheme={setTheme} />
+              ) : (
+                loading ? (
+                  <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
+                    <div className="flex flex-col items-center gap-4">
+                      <Loader2 className="animate-spin text-indigo-600" size={40} />
+                      <p className="text-sm font-medium text-slate-500 animate-pulse">Initializing app...</p>
+                    </div>
+                  </div>
+                ) : <Navigate to="/login" replace />
+              )
+            } 
+          />
+          <Route 
+            path="/cashbooks/:bookSlug/:tabName" 
+            element={
+              session ? (
+                <Dashboard session={session} theme={theme} setTheme={setTheme} />
+              ) : (
                 loading ? (
                   <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
                     <div className="flex flex-col items-center gap-4">
