@@ -22,6 +22,7 @@ import {
   Settings,
   LogOut,
   LayoutGrid,
+  Key,
   List,
   Download,
   RotateCw,
@@ -1299,7 +1300,7 @@ const getCachedOptimizedImage = (
 
 const CATEGORIES = ['Food', 'Travel', 'Advance', 'Shopping', 'Custom'];
 const MODES = ['Card', 'UPI', 'Cash', 'Custom'];
-const DURATIONS = ['All', 'Today', 'Yesterday', 'Last Week'];
+const DURATIONS = ['All', 'Today', 'Yesterday', 'Last Week', 'Custom'];
 
 export function getBookSlug(name: string, id: string): string {
   const slug = name
@@ -1447,6 +1448,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [showDropZone, setShowDropZone] = useState(false);
   const [aiMode, setAiMode] = useState<'split' | 'merge'>('split');
   const [error, setError] = useState<string | null>(null);
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  const [customApiKeyVal, setCustomApiKeyVal] = useState(() => typeof window !== 'undefined' ? localStorage.getItem('GEMINI_API_KEY') || '' : '');
 
   // Intelligent TrackBook AI Upload states
   const [aiWorkflowStep, setAiWorkflowStep] = useState<'group' | 'upload' | 'scanning' | 'confirmation'>('group');
@@ -1458,6 +1461,11 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [isHandwritten, setIsHandwritten] = useState<boolean>(false);
   const [handwrittenTime, setHandwrittenTime] = useState<string>('12:00 PM');
   const [handwrittenIsFood, setHandwrittenIsFood] = useState<boolean>(true);
+
+  // Handwritten verification queue
+  const [handwrittenQueue, setHandwrittenQueue] = useState<Array<{ file: File; result: any; previewUrl: string }>>([]);
+  const [currentQueueIndex, setCurrentQueueIndex] = useState<number>(0);
+  const [showFullScreenPreview, setShowFullScreenPreview] = useState<boolean>(false);
 
   // AI Extracted variables for Preview Screen
   const [aiAmount, setAiAmount] = useState<string>('');
@@ -1600,6 +1608,14 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   }, [shareExpiryTime, activeBookId]);
   const [transactionTypeFilter, setTransactionTypeFilter] = useState<'all' | 'in' | 'out'>('all');
   const [transactionDurationFilter, setTransactionDurationFilter] = useState('All');
+  const getTodayDateString = () => {
+    const d = new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  };
+  const [customFilterDate, setCustomFilterDate] = useState<string>(getTodayDateString());
   const [transactionCategoryFilter, setTransactionCategoryFilter] = useState('All');
   const [sortColumn, setSortColumn] = useState<'date' | 'category' | 'amount'>('date');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
@@ -2510,6 +2526,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         matchesDuration = t.date >= yesterday && t.date < today;
       } else if (transactionDurationFilter === 'Last Week') {
         matchesDuration = t.date >= lastWeek;
+      } else if (transactionDurationFilter === 'Custom' && customFilterDate) {
+        // Parse custom date string "YYYY-MM-DD"
+        const [cy, cm, cd] = customFilterDate.split('-').map(Number);
+        const filterDateStart = new Date(cy, cm - 1, cd);
+        const filterDateEnd = new Date(cy, cm - 1, cd + 1);
+        matchesDuration = t.date >= filterDateStart && t.date < filterDateEnd;
       }
 
       return matchesSearch && matchesType && matchesCategory && matchesDuration;
@@ -2533,12 +2555,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       }
       return sortDirection === 'asc' ? comparison : -comparison;
     });
-  }, [activeBook, transactionSearchQuery, transactionTypeFilter, transactionCategoryFilter, transactionDurationFilter, sortColumn, sortDirection]);
+  }, [activeBook, transactionSearchQuery, transactionTypeFilter, transactionCategoryFilter, transactionDurationFilter, customFilterDate, sortColumn, sortDirection]);
 
   // Reset visibleCount whenever the selected book or filters change to keep viewport neat and clean
   useEffect(() => {
     setVisibleCount(20);
-  }, [activeBookId, transactionSearchQuery, transactionTypeFilter, transactionCategoryFilter, transactionDurationFilter]);
+  }, [activeBookId, transactionSearchQuery, transactionTypeFilter, transactionCategoryFilter, transactionDurationFilter, customFilterDate]);
 
   // Pre-calculate running balances for transaction list items with smart cached incremental logic
   const runningBalancesMap = useMemo(() => {
@@ -4361,133 +4383,6 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
     if (files.length === 0) return;
 
-    if (files.length === 1) {
-      const file = files[0];
-      setAiWorkflowStep('scanning');
-      setAiFile(file);
-      setError(null);
-      
-      // Create preview
-      if (file.type.startsWith('image/')) {
-        const previewUrl = URL.createObjectURL(file);
-        setAiFilePreviewUrl(previewUrl);
-      } else {
-        setAiFilePreviewUrl('');
-      }
-
-      // Initialize animation status intervals
-      let statusIndex = 0;
-      const statuses = [
-        'Analyzing bill...',
-        'Extracting bill information...',
-        'Detecting categories...',
-        'Structuring receipt details...'
-      ];
-      setAiScanStatus(statuses[0]);
-      const interval = setInterval(() => {
-        statusIndex++;
-        if (statusIndex < statuses.length) {
-          setAiScanStatus(statuses[statusIndex]);
-        } else {
-          statusIndex = 0;
-          setAiScanStatus(statuses[0]);
-        }
-      }, 1200);
-
-      try {
-        // 1. Read base64 representation of file
-        const base64String = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const resStr = reader.result as string;
-            resolve(resStr.split(',')[1]);
-          };
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-
-        const retryIntervals = [2000, 5000, 10000]; // Delays: Attempt 1, 2, 3
-        const maxAttempts = 4;
-        let response: Response | null = null;
-        let finalError: any = null;
-
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-          try {
-            console.log(`[Client AI] OCR Request Attempt ${attempt}...`);
-            response = await fetch('/api/gemini/parse-receipt', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                base64Image: base64String,
-                mimeType: file.type || 'image/jpeg',
-                groupSize: aiGroupSize,
-                isHandwritten,
-                handwrittenTime,
-                handwrittenIsFood
-              })
-            });
-
-            if (!response.ok) {
-              const errJson = await response.json().catch(() => ({}));
-              throw new Error(errJson.error || 'Receipt parsing returned an error status.');
-            }
-            finalError = null;
-            break; // Success! Exit retry loop
-          } catch (err: any) {
-            finalError = err;
-            console.error(`[Client AI] Attempt ${attempt} failed:`, err);
-            
-            const errMsg = String(err.message || '').toUpperCase();
-            const isNonRetryable = errMsg.includes("CONFIGURATION") || errMsg.includes("ADMINISTRATOR") || errMsg.includes("QUOTA EXCEEDED") || errMsg.includes("TOO LARGE") || errMsg.includes("API_KEY") || errMsg.includes("API KEY") || errMsg.includes("EXPIRED") || errMsg.includes("INVALID");
-            if (isNonRetryable) {
-              console.log("[Client AI] Non-retryable Error detected. Exiting retry loop instantly.");
-              break;
-            }
-            
-            if (attempt < maxAttempts) {
-              const delay = retryIntervals[attempt - 1];
-              setAiScanStatus(`AI service is busy. Retrying in ${delay / 1000}s...`);
-              await new Promise(resolve => setTimeout(resolve, delay));
-            }
-          }
-        }
-
-        clearInterval(interval);
-
-        if (finalError) {
-          throw finalError;
-        }
-
-        if (!response) {
-          throw new Error("No response from the server.");
-        }
-
-        const result = await response.json();
-        
-        // Auto fill intermediate values (Steps 7, 8 & 9)
-        setAiAmount(String(result.amount));
-        setAiMerchant(result.merchant || 'Unknown Vendor');
-        setAiBillType(result.billType || 'Food');
-        setAiCategory(result.category || 'Food');
-        setAiDate(result.date || '27-05-2026');
-        setAiTime(result.time || '12:00 PM');
-        setAiMealType(result.mealType || '');
-        setAiDescription(result.description || 'Food Expense');
-
-        // Transition to final result preview
-        setAiWorkflowStep('confirmation');
-      } catch (err: any) {
-        clearInterval(interval);
-        console.error('[AI Parse Error]', err);
-        setError(err.message || "AI service is busy. Please try again in a few moments.");
-        setAiWorkflowStep('group');
-      }
-      return;
-    }
-
-    // Multiple files!
     setAiWorkflowStep('scanning');
     setError(null);
 
@@ -4497,6 +4392,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
     const newTransactionsToAppend: Transaction[] = [];
     const cacheUpdates: Array<{ id: string; item: any }> = [];
+    const tempHandwrittenQueue: Array<{ file: File; result: any; previewUrl: string }> = [];
 
     for (let i = 0; i < totalFiles; i++) {
       const file = files[i];
@@ -4522,16 +4418,21 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
           try {
+            const customKey = localStorage.getItem('GEMINI_API_KEY') || '';
             response = await fetch('/api/gemini/parse-receipt', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: { 
+                'Content-Type': 'application/json',
+                ...(customKey ? { 'x-gemini-api-key': customKey } : {})
+              },
               body: JSON.stringify({
                 base64Image: base64String,
                 mimeType: file.type || 'image/jpeg',
                 groupSize: aiGroupSize,
                 isHandwritten,
                 handwrittenTime,
-                handwrittenIsFood
+                handwrittenIsFood,
+                customApiKey: customKey
               })
             });
 
@@ -4546,7 +4447,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             const errMsg = String(err.message || '').toUpperCase();
             const isNonRetryable = errMsg.includes("CONFIGURATION") || errMsg.includes("ADMINISTRATOR") || errMsg.includes("QUOTA EXCEEDED") || errMsg.includes("TOO LARGE") || errMsg.includes("API_KEY") || errMsg.includes("API KEY") || errMsg.includes("EXPIRED") || errMsg.includes("INVALID");
             if (isNonRetryable) {
-              console.log("[Client AI] Non-retryable Error detected. Exiting retry loop instantly.");
+              console.log("[Client AI] Non-retryable Error detected. Exiting retry loop.");
               break;
             }
             if (attempt < maxAttempts) {
@@ -4571,46 +4472,48 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         const parsedDescription = result.description || 'Food Expense';
         const parsedTime = result.time || '12:00 PM';
         const parsedMealType = result.mealType || '';
+        const detectedHandwritten = result.isHandwritten ?? isHandwritten;
 
-        // Generate Transaction
-        const parts = parsedDate.split('-');
-        let dateObj = new Date();
-        if (parts.length === 3) {
-          dateObj = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
-        }
+        // Create preview URL
+        const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : '';
 
-        const tempId = safeUUID();
-        const localFileUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : '';
-        const imagesToStore = localFileUrl ? [localFileUrl] : [];
+        if (detectedHandwritten) {
+          // Push to handwritten preview verification queue
+          tempHandwrittenQueue.push({
+            file,
+            result: {
+              ...result,
+              amount: parsedAmount,
+              merchant: parsedMerchant,
+              billType: parsedBillType,
+              category: parsedCategory,
+              date: parsedDate,
+              time: parsedTime,
+              mealType: parsedMealType,
+              description: parsedDescription
+            },
+            previewUrl
+          });
+        } else {
+          // Computer-printed printed bill - SAVE INSTANTLY / DIRECT AUTO-SAVE!
+          const parts = parsedDate.split('-');
+          let dateObj = new Date();
+          if (parts.length === 3) {
+            dateObj = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+          }
 
-        const ocrData = {
-          merchant: parsedMerchant,
-          billType: parsedBillType,
-          extractedTime: parsedTime,
-          mealType: parsedMealType,
-          groupSize: aiGroupSize
-        };
+          const tempId = safeUUID();
+          const imagesToStore = previewUrl ? [previewUrl] : [];
 
-        const newTransaction: Transaction = {
-          id: tempId,
-          amount: parsedAmount,
-          type: 'out',
-          description: parsedDescription,
-          category: parsedCategory || 'General',
-          mode: 'Online',
-          date: dateObj,
-          images: imagesToStore,
-          imageLayout: 'split',
-          isAi: true
-        };
+          const ocrData = {
+            merchant: parsedMerchant,
+            billType: parsedBillType,
+            extractedTime: parsedTime,
+            mealType: parsedMealType,
+            groupSize: aiGroupSize
+          };
 
-        // Cache parameters
-        attachmentCache.set(tempId, { images: imagesToStore, isAi: true });
-        newTransactionsToAppend.push(newTransaction);
-
-        cacheUpdates.push({
-          id: tempId,
-          item: {
+          const newTransaction: Transaction = {
             id: tempId,
             amount: parsedAmount,
             type: 'out',
@@ -4618,99 +4521,132 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             category: parsedCategory || 'General',
             mode: 'Online',
             date: dateObj,
-            image_layout: 'split',
-            user_id: session?.user?.id,
-            cashbook_id: activeBookId
-          }
-        });
+            images: imagesToStore,
+            imageLayout: 'split',
+            isAi: true
+          };
 
-        // Background database uploading & synchronization
-        if (supabase && session) {
-          (async () => {
-            try {
-              let imageUrl = '';
-              imageUrl = await uploadToCloudinary(file, cloudinaryFolder);
+          attachmentCache.set(tempId, { images: imagesToStore, isAi: true });
+          newTransactionsToAppend.push(newTransaction);
 
-              const payload: any = {
-                id: tempId,
-                cashbook_id: activeBookId,
-                user_id: session.user.id,
-                amount: parsedAmount,
-                type: 'out',
-                description: parsedDescription,
-                category: parsedCategory || 'General',
-                mode: 'Online',
-                date: safeToISOString(dateObj),
-                image_layout: 'split'
-              };
-
-              const { error: entryError } = await supabase.from('entries').insert([payload]);
-              if (entryError) {
-                if (entryError.code === '42703' || entryError.message?.includes('image_layout')) {
-                  delete payload.image_layout;
-                  const { error: retryError } = await supabase.from('entries').insert([payload]);
-                  if (retryError) throw retryError;
-                } else {
-                  throw entryError;
-                }
-              }
-
-              if (imageUrl) {
-                const validatedUrl = await validateAndResolveCloudinaryUrl(imageUrl, session.user.id);
-                const aiAttachmentInserts = [{
-                  entry_id: tempId,
-                  user_id: session.user.id,
-                  file_url: validatedUrl,
-                  file_name: JSON.stringify({
-                    original_name: file.name,
-                    ocr: ocrData,
-                    classification: parsedBillType,
-                    groupSize: aiGroupSize
-                  }),
-                  file_type: 'image'
-                }];
-                await supabase.from('ai_attachments').insert(aiAttachmentInserts);
-              }
-            } catch (dbErr) {
-              console.error('[AI Save Bulk BG] Error for file:', file.name, dbErr);
+          cacheUpdates.push({
+            id: tempId,
+            item: {
+              id: tempId,
+              amount: parsedAmount,
+              type: 'out',
+              description: parsedDescription,
+              category: parsedCategory || 'General',
+              mode: 'Online',
+              date: dateObj,
+              image_layout: 'split',
+              user_id: session?.user?.id,
+              cashbook_id: activeBookId
             }
-          })();
-        }
+          });
 
+          // Run background database upload
+          if (supabase && session) {
+            (async () => {
+              try {
+                let imageUrl = await uploadToCloudinary(file, cloudinaryFolder);
+                const payload: any = {
+                  id: tempId,
+                  cashbook_id: activeBookId,
+                  user_id: session.user.id,
+                  amount: parsedAmount,
+                  type: 'out',
+                  description: parsedDescription,
+                  category: parsedCategory || 'General',
+                  mode: 'Online',
+                  date: safeToISOString(dateObj),
+                  image_layout: 'split'
+                };
+
+                const { error: entryError } = await supabase.from('entries').insert([payload]);
+                if (entryError) {
+                  if (entryError.code === '42703' || entryError.message?.includes('image_layout')) {
+                    delete payload.image_layout;
+                    const { error: retryError } = await supabase.from('entries').insert([payload]);
+                    if (retryError) throw retryError;
+                  } else {
+                    throw entryError;
+                  }
+                }
+
+                if (imageUrl) {
+                  const validatedUrl = await validateAndResolveCloudinaryUrl(imageUrl, session.user.id);
+                  const aiAttachmentInserts = [{
+                    entry_id: tempId,
+                    user_id: session.user.id,
+                    file_url: validatedUrl,
+                    file_name: JSON.stringify({
+                      original_name: file.name,
+                      ocr: ocrData,
+                      classification: parsedBillType,
+                      groupSize: aiGroupSize
+                    }),
+                    file_type: 'image'
+                  }];
+                  await supabase.from('ai_attachments').insert(aiAttachmentInserts);
+                }
+              } catch (dbErr) {
+                console.error('[AI Direct Save BG] Database sync error:', dbErr);
+              }
+            })();
+          }
+        }
       } catch (err: any) {
-        console.error(`[AI Parse Bulk Error] on file ${file.name}:`, err);
-        setError(err.message || `Failed to parse file: ${file.name}`);
+        console.error(`[AI Unified Parse Error] file ${file.name}:`, err);
+        setError(err.message || `Failed to process document: ${file.name}`);
       }
     }
 
+    // Apply auto-saved transactions to local React state
     if (newTransactionsToAppend.length > 0) {
-      // Refresh local React states
       setBooks(prevBooks => prevBooks.map(b => 
         b.id === activeBookId 
           ? { ...b, transactions: [...newTransactionsToAppend, ...b.transactions] }
           : b
       ));
 
-      // Refresh cache
       const currCached = entriesCache.get(activeBookId) || [];
       entriesCache.set(activeBookId, [...cacheUpdates.map(cu => cu.item), ...currCached]);
-
-      // Trigger standard data refetch background if needed
-      if (supabase && session) {
-        setTimeout(() => {
-          fetchData().catch(console.error);
-        }, 1000);
-      }
     }
 
-    // Reset workflow and redirect
-    setAiWorkflowStep('group');
-    setAiGroupSize(1);
-    setIsUploading(false);
-    setAiConstructionModal(null);
+    // Handle flow termination
+    if (tempHandwrittenQueue.length > 0) {
+      setHandwrittenQueue(tempHandwrittenQueue);
+      setCurrentQueueIndex(0);
 
-    const slug = getBookSlug(activeBook?.name || '', activeBook?.id || '');
-    navigate(`/cashbooks/${slug}/entries`);
+      const firstItem = tempHandwrittenQueue[0];
+      setAiAmount(String(firstItem.result.amount));
+      setAiMerchant(firstItem.result.merchant || 'Unknown Vendor');
+      setAiBillType(firstItem.result.billType || 'Food');
+      setAiCategory(firstItem.result.category || 'Food');
+      setAiDate(firstItem.result.date || '27-05-2026');
+      setAiTime(firstItem.result.time || '12:00 PM');
+      setAiMealType(firstItem.result.mealType || '');
+      setAiDescription(firstItem.result.description || 'Food Expense');
+      setAiFile(firstItem.file);
+      setAiFilePreviewUrl(firstItem.previewUrl);
+
+      setAiWorkflowStep('confirmation');
+    } else {
+      // Direct success redirect if all were printed bills
+      if (supabase && session && newTransactionsToAppend.length > 0) {
+        setAiScanStatus('Synchronizing entries...');
+        await fetchData();
+      }
+
+      setAiWorkflowStep('group');
+      setAiGroupSize(1);
+      setIsUploading(false);
+      setAiConstructionModal(null);
+
+      const slug = getBookSlug(activeBook?.name || '', activeBook?.id || '');
+      navigate(`/cashbooks/${slug}/entries`);
+    }
   };
 
   const handleSaveAiEntry = async () => {
@@ -4731,7 +4667,6 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     const userIdentifier = session?.user?.email || session?.user?.id || 'anonymous';
     const cloudinaryFolder = `trackbook/${userIdentifier}`;
 
-    // Prepare arrays of selected files
     const localBlobUrl = aiFilePreviewUrl;
     const imagesToStore = localBlobUrl ? [localBlobUrl] : [];
 
@@ -4781,34 +4716,32 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         : b
     ));
 
-    // Redirect to entries tab
-    const slug = getBookSlug(activeBook?.name || '', activeBook?.id || '');
-    navigate(`/cashbooks/${slug}/entries`);
-
-    // Reset AI states
-    setAiWorkflowStep('group');
-    setAiGroupSize(1);
-    setIsUploading(false);
-
     // Run direct database updates in background!
     if (supabase && session) {
+      const savedAmount = amountNum;
+      const savedDescription = aiDescription;
+      const savedCategory = aiCategory;
+      const savedBillType = aiBillType;
+      const savedDateObj = dateObj;
+      const savedFile = aiFile;
+
       (async () => {
         try {
           let imageUrl = '';
-          if (aiFile) {
-            imageUrl = await uploadToCloudinary(aiFile, cloudinaryFolder);
+          if (savedFile) {
+            imageUrl = await uploadToCloudinary(savedFile, cloudinaryFolder);
           }
 
           const payload: any = {
             id: tempId,
             cashbook_id: activeBookId,
             user_id: session.user.id,
-            amount: amountNum,
+            amount: savedAmount,
             type: 'out',
-            description: aiDescription,
-            category: aiCategory || 'General',
+            description: savedDescription,
+            category: savedCategory || 'General',
             mode: 'Online',
-            date: safeToISOString(dateObj),
+            date: safeToISOString(savedDateObj),
             image_layout: 'split'
           };
 
@@ -4824,16 +4757,15 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           }
 
           if (imageUrl) {
-            // Save inside ai_attachments
             const validatedUrl = await validateAndResolveCloudinaryUrl(imageUrl, session.user.id);
             const aiAttachmentInserts = [{
               entry_id: tempId,
               user_id: session.user.id,
               file_url: validatedUrl,
               file_name: JSON.stringify({
-                original_name: aiFile?.name || 'receipt',
+                original_name: savedFile?.name || 'receipt',
                 ocr: ocrData,
-                classification: aiBillType,
+                classification: savedBillType,
                 groupSize: aiGroupSize
               }),
               file_type: 'image'
@@ -4845,6 +4777,35 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           console.error('[AI Save BG] Database sync error:', dbErr);
         }
       })();
+    }
+
+    // Shift queue for next handwritten bill if available
+    const nextIndex = currentQueueIndex + 1;
+    if (nextIndex < handwrittenQueue.length) {
+      setCurrentQueueIndex(nextIndex);
+      const nextItem = handwrittenQueue[nextIndex];
+      setAiAmount(String(nextItem.result.amount));
+      setAiMerchant(nextItem.result.merchant || 'Unknown Vendor');
+      setAiBillType(nextItem.result.billType || 'Food');
+      setAiCategory(nextItem.result.category || 'Food');
+      setAiDate(nextItem.result.date || '27-05-2026');
+      setAiTime(nextItem.result.time || '12:00 PM');
+      setAiMealType(nextItem.result.mealType || '');
+      setAiDescription(nextItem.result.description || 'Food Expense');
+      setAiFile(nextItem.file);
+      setAiFilePreviewUrl(nextItem.previewUrl);
+      setIsUploading(false); // Let user edit next
+    } else {
+      // Completed last handwritten entry, close modal and redirect
+      setAiWorkflowStep('group');
+      setAiGroupSize(1);
+      setIsUploading(false);
+      setHandwrittenQueue([]);
+      setCurrentQueueIndex(0);
+      setAiConstructionModal(null);
+
+      const slug = getBookSlug(activeBook?.name || '', activeBook?.id || '');
+      navigate(`/cashbooks/${slug}/entries`);
     }
   };
 
@@ -4876,11 +4837,21 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            className="bg-rose-500 text-white px-4 py-2 text-center text-sm font-medium flex items-center justify-center gap-2 sticky top-0 z-[60]"
+            className="bg-rose-500 text-white px-4 py-2 text-center text-sm font-medium flex items-center justify-center gap-2 sticky top-0 z-[60] flex-wrap"
           >
-            <AlertCircle size={16} />
-            <span>{error}</span>
-            <button onClick={() => setError(null)} className="ml-2 hover:bg-white/20 rounded p-0.5 transition-colors">
+            <div className="flex items-center gap-2">
+              <AlertCircle size={16} />
+              <span>{error}</span>
+            </div>
+            {(error.toLowerCase().includes("configuration") || error.toLowerCase().includes("expired") || error.toLowerCase().includes("api key") || error.toLowerCase().includes("auth") || error.toLowerCase().includes("credentials")) && (
+              <button 
+                onClick={() => { vibrate(); setShowApiKeyModal(true); }}
+                className="bg-white/25 hover:bg-white/40 text-white text-[11px] font-black uppercase tracking-wider px-3 py-1 rounded-lg transition-transform active:scale-[0.98] outline-none border-none cursor-pointer ml-3"
+              >
+                Set Custom Gemini Key
+              </button>
+            )}
+            <button onClick={() => setError(null)} className="hover:bg-white/20 rounded p-0.5 transition-colors cursor-pointer outline-none border-none">
               <X size={14} />
             </button>
           </motion.div>
@@ -5598,6 +5569,20 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     </select>
                     <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={14} />
                   </div>
+                  {transactionDurationFilter === 'Custom' && (
+                    <div className="relative min-w-[150px]">
+                      <input 
+                        type="date"
+                        value={customFilterDate}
+                        onChange={(e) => setCustomFilterDate(e.target.value)}
+                        className={cn(
+                          "w-full px-3 h-11 border rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-sm font-bold",
+                          theme === 'dark' ? "bg-slate-900 border-slate-800 text-white [color-scheme:dark]" : "bg-white border-slate-200 text-black"
+                        )}
+                        style={{ contentVisibility: 'auto' }}
+                      />
+                    </div>
+                  )}
                 </div>
 
                 {/* Mobile Action & Filter Stacked Layout */}
@@ -5634,6 +5619,19 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={14} />
                     </div>
                   </div>
+                  {transactionDurationFilter === 'Custom' && (
+                    <div className="relative w-full">
+                      <input 
+                        type="date"
+                        value={customFilterDate}
+                        onChange={(e) => setCustomFilterDate(e.target.value)}
+                        className={cn(
+                          "w-full px-3 h-11 border rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-xs font-bold",
+                          theme === 'dark' ? "bg-slate-900 border-slate-800 text-white [color-scheme:dark]" : "bg-white border-slate-200 text-black"
+                        )}
+                      />
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -6101,23 +6099,41 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => {
-                        vibrate();
-                        setAiWorkflowStep('upload');
-                      }}
-                      className={cn(
-                        "w-full py-4 rounded-2xl font-bold text-sm tracking-wide shadow-lg cursor-pointer transform hover:translate-y-[-1px] transition-all duration-200 active:scale-95 flex items-center justify-center gap-2",
-                        theme === 'dark'
-                          ? "bg-indigo-650 text-white hover:bg-indigo-700 shadow-indigo-950/40"
-                          : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-100"
-                      )}
-                      id="btn-confirm-groupsize"
-                    >
-                      Continue
-                      <ArrowRight size={16} />
-                    </button>
+                    <div className="flex flex-col gap-2.5 w-full">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          vibrate();
+                          setAiWorkflowStep('upload');
+                        }}
+                        className={cn(
+                          "w-full py-4 rounded-2xl font-bold text-sm tracking-wide shadow-lg cursor-pointer flex items-center justify-center gap-2 text-white",
+                          theme === 'dark'
+                            ? "bg-indigo-600 md:hover:bg-indigo-500 md:hover:translate-y-[-1px] md:transition-all active:scale-95 shadow-indigo-950/40"
+                            : "bg-indigo-600 md:hover:bg-indigo-700 md:hover:translate-y-[-1px] md:transition-all active:scale-95 shadow-indigo-100"
+                        )}
+                        id="btn-confirm-groupsize"
+                      >
+                        Continue
+                        <ArrowRight size={16} />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          vibrate();
+                          setAiConstructionModal(null);
+                        }}
+                        className={cn(
+                          "w-full py-2.5 rounded-xl font-bold text-xs tracking-wide cursor-pointer flex items-center justify-center gap-1.5 border transition-all hover:bg-slate-50 dark:hover:bg-zinc-900",
+                          theme === 'dark'
+                            ? "border-zinc-800 text-zinc-400"
+                            : "border-slate-200 text-slate-500"
+                        )}
+                      >
+                        Back to Dashboard
+                      </button>
+                    </div>
                   </motion.div>
                 )}
 
@@ -6243,6 +6259,22 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       <div className="shrink-0"><Loader2 size={14} className="animate-spin" /></div>
                       <p>Full AI extraction automatically normalizes and splits currencies.</p>
                     </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        vibrate();
+                        setAiConstructionModal(null);
+                      }}
+                      className={cn(
+                        "w-full py-2.5 rounded-xl font-bold text-xs tracking-wide cursor-pointer flex items-center justify-center gap-1.5 border transition-all hover:bg-slate-50 dark:hover:bg-zinc-900 mt-2",
+                        theme === 'dark'
+                          ? "border-zinc-800 text-zinc-400"
+                          : "border-slate-200 text-slate-500"
+                      )}
+                    >
+                      Back to Dashboard
+                    </button>
                   </motion.div>
                 )}
 
@@ -6510,10 +6542,10 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                               handleSaveAiEntry();
                             }}
                             className={cn(
-                              "flex-[2] py-3.5 rounded-2xl font-black text-xs tracking-wide shadow-md active:scale-95 transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-white",
+                              "flex-[2] py-3.5 rounded-2xl font-black text-xs tracking-wide shadow-md active:scale-95 text-center flex items-center justify-center gap-1.5 cursor-pointer text-white",
                               theme === 'dark' 
-                                ? "bg-indigo-650 hover:bg-indigo-700 shadow-indigo-950/50" 
-                                : "bg-indigo-600 hover:bg-indigo-700 shadow-indigo-100"
+                                ? "bg-indigo-600 md:hover:bg-indigo-500 md:transition-colors shadow-indigo-950/50" 
+                                : "bg-indigo-600 md:hover:bg-indigo-700 md:transition-colors shadow-indigo-100"
                             )}
                             id="btn-save-ai"
                           >
@@ -6982,6 +7014,45 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         )}
       </AnimatePresence>
 
+      {/* Dynamic Full-Screen Image Lightbox Preview (Satisfies mobile-preview modal requirement) */}
+      <AnimatePresence>
+        {showFullScreenPreview && aiFilePreviewUrl && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setShowFullScreenPreview(false)}
+            className="fixed inset-0 z-[500] bg-black/95 flex flex-col items-center justify-center p-4 cursor-zoom-out backdrop-blur-md"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 10 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 10 }}
+              onClick={(e) => e.stopPropagation()}
+              className="relative max-w-full max-h-[85vh] flex items-center justify-center rounded-2xl overflow-hidden shadow-2xl bg-zinc-950 border border-zinc-800"
+            >
+              <img
+                src={aiFilePreviewUrl}
+                alt="Receipt Fullscreen Layout"
+                className="max-w-full max-h-[85vh] object-contain"
+                referrerPolicy="no-referrer"
+              />
+              <button
+                onClick={() => setShowFullScreenPreview(false)}
+                className="absolute top-4 right-4 p-2.5 rounded-full bg-black/75 text-white hover:bg-black hover:text-indigo-400 transition-colors border border-white/15 cursor-pointer"
+                title="Close Preview"
+              >
+                <X size={20} />
+              </button>
+            </motion.div>
+            <div className="mt-4 text-center select-none pointer-events-none">
+              <p className="text-white/80 font-sans text-xs font-bold uppercase tracking-wider">Fullscreen Receipt view</p>
+              <p className="text-white/45 font-sans text-[10px] mt-0.5">Click anywhere on the backdrop to exit</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* AI Under Construction / OCR Parser Modal */}
       <AnimatePresence>
         {aiConstructionModal && (
@@ -7141,8 +7212,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 transition={{ type: 'spring', damping: 28, stiffness: 220 }}
                 onClick={(e) => e.stopPropagation()}
                 className={cn(
-                  "relative w-full rounded-[32px] p-6 sm:p-8 shadow-3xl transition-all duration-300 border overflow-hidden",
-                  aiWorkflowStep === 'confirmation' ? "max-w-4xl" : "max-w-md",
+                  "relative w-full rounded-[32px] p-4 sm:p-8 shadow-3xl transition-all duration-300 border overflow-hidden",
+                  aiWorkflowStep === 'confirmation' ? "max-w-4xl max-h-[92vh] flex flex-col" : "max-w-md",
                   theme === 'dark' ? "bg-zinc-950 border-zinc-900 shadow-black/80" : "bg-white border-slate-150 shadow-slate-200/50"
                 )}
               >
@@ -7224,22 +7295,40 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => {
-                        vibrate();
-                        setAiWorkflowStep('upload');
-                      }}
-                      className={cn(
-                        "w-full py-4 rounded-2xl font-bold text-sm tracking-wide shadow-lg cursor-pointer transform hover:translate-y-[-1px] transition-all duration-200 active:scale-95 flex items-center justify-center gap-2 text-white",
-                        theme === 'dark'
-                          ? "bg-indigo-650 hover:bg-indigo-700 shadow-indigo-950/40"
-                          : "bg-indigo-600 hover:bg-indigo-700 shadow-indigo-100"
-                      )}
-                    >
-                      Continue
-                      <ArrowRight size={16} />
-                    </button>
+                    <div className="flex flex-col gap-2.5 w-full">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          vibrate();
+                          setAiWorkflowStep('upload');
+                        }}
+                        className={cn(
+                          "w-full py-4 rounded-2xl font-bold text-sm tracking-wide shadow-lg cursor-pointer flex items-center justify-center gap-2 text-white",
+                          theme === 'dark'
+                            ? "bg-indigo-600 md:hover:bg-indigo-500 md:hover:translate-y-[-1px] md:transition-all active:scale-95 shadow-indigo-950/40"
+                            : "bg-indigo-600 md:hover:bg-indigo-700 md:hover:translate-y-[-1px] md:transition-all active:scale-95 shadow-indigo-100"
+                        )}
+                      >
+                        Continue
+                        <ArrowRight size={16} />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          vibrate();
+                          setAiConstructionModal(null);
+                        }}
+                        className={cn(
+                          "w-full py-2.5 rounded-xl font-bold text-xs tracking-wide cursor-pointer flex items-center justify-center gap-1.5 border transition-all hover:bg-slate-50 dark:hover:bg-zinc-900",
+                          theme === 'dark'
+                            ? "border-zinc-800 text-zinc-400"
+                            : "border-slate-200 text-slate-500"
+                        )}
+                      >
+                        Back to Dashboard
+                      </button>
+                    </div>
                   </div>
                 )}
 
@@ -7448,6 +7537,22 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       <div className="shrink-0"><Loader2 size={13} className="animate-spin" /></div>
                       <p>Full AI extraction automatically normalizes and splits currencies.</p>
                     </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        vibrate();
+                        setAiConstructionModal(null);
+                      }}
+                      className={cn(
+                        "w-full py-2.5 rounded-xl font-bold text-xs tracking-wide cursor-pointer flex items-center justify-center gap-1.5 border transition-all hover:bg-slate-50 dark:hover:bg-zinc-900 mt-2",
+                        theme === 'dark'
+                          ? "border-zinc-800 text-zinc-400"
+                          : "border-slate-200 text-slate-500"
+                      )}
+                    >
+                      Back to Dashboard
+                    </button>
                   </div>
                 )}
 
@@ -7486,8 +7591,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
                 {/* 3. Confirmation Step */}
                 {aiWorkflowStep === 'confirmation' && (
-                  <div className="space-y-6 text-left">
-                    <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-zinc-900/60 font-sans">
+                  <div className="space-y-4 text-left flex flex-col flex-1 min-h-0 overflow-hidden">
+                    <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-zinc-900/60 font-sans shrink-0">
                       <div className="flex items-center gap-2">
                         <Sparkles size={18} className="text-indigo-600 dark:text-indigo-400 animate-pulse" />
                         <h3 className={cn(
@@ -7500,11 +7605,11 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       </span>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-5 gap-6">
+                    <div className="flex flex-col md:grid md:grid-cols-5 gap-4 overflow-hidden flex-1 min-h-0 w-full">
                       {/* Left Side: Thumbnail Preview */}
-                      <div className="md:col-span-2 space-y-4">
+                      <div className="md:col-span-2 space-y-3 shrink-0">
                         <div className={cn(
-                          "rounded-2xl border p-4 text-center space-y-3 shadow-inner",
+                          "rounded-2xl border p-3 text-center space-y-2.5 shadow-inner",
                           theme === 'dark' ? "bg-zinc-900/40 border-zinc-900" : "bg-slate-50/50 border-slate-150"
                         )}>
                           <div className="flex items-center justify-between">
@@ -7515,19 +7620,25 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                           </div>
 
                           {aiFilePreviewUrl ? (
-                            <div className="relative rounded-xl overflow-hidden aspect-[3/4] bg-slate-100 dark:bg-zinc-950 flex items-center justify-center border border-slate-200 dark:border-zinc-850 shadow-inner">
+                            <div 
+                              onClick={() => setShowFullScreenPreview(true)}
+                              className="relative rounded-xl overflow-hidden aspect-[16/9] md:aspect-[3/4] bg-slate-100 dark:bg-zinc-950 flex items-center justify-center border border-slate-200 dark:border-zinc-850 shadow-inner cursor-pointer group/preview"
+                            >
                               <img 
                                 src={aiFilePreviewUrl} 
                                 alt="Receipt Thumbnail" 
-                                className="w-full h-full object-cover"
+                                className="w-full h-full object-cover group-hover/preview:scale-105 transition-transform duration-300"
                                 referrerPolicy="no-referrer"
                               />
+                              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/preview:opacity-100 flex items-center justify-center transition-opacity duration-200">
+                                <span className="text-[10px] font-bold text-white bg-indigo-600 px-2 py-1 rounded shadow">Click to Expand</span>
+                              </div>
                             </div>
                           ) : (
-                            <div className="rounded-xl border-2 border-dashed border-slate-200 dark:border-zinc-800 flex flex-col items-center justify-center p-6 aspect-[3/4] text-slate-400 bg-slate-100/50 dark:bg-zinc-950">
-                              <FileText size={36} className="stroke-[1.5]" />
-                              <span className="text-[10px] font-bold mt-2">Document processed</span>
-                              <span className="text-[9px] text-slate-400 mt-1 truncate max-w-full px-2">
+                            <div className="rounded-xl border-2 border-dashed border-slate-200 dark:border-zinc-800 flex flex-col items-center justify-center p-3 md:p-6 aspect-[16/9] md:aspect-[3/4] text-slate-400 bg-slate-100/50 dark:bg-zinc-950">
+                              <FileText size={24} className="stroke-[1.5] text-slate-400 dark:text-zinc-600" />
+                              <span className="text-[10px] font-bold mt-1">Document processed</span>
+                              <span className="text-[9px] text-slate-400 mt-0.5 truncate max-w-full px-2 font-mono">
                                 {aiFile?.name}
                               </span>
                             </div>
@@ -7540,7 +7651,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       </div>
 
                       {/* Right Side: Form Fields to verify */}
-                      <div className="md:col-span-3 space-y-4">
+                      <div className="md:col-span-3 space-y-4 overflow-y-auto flex-1 md:h-full min-h-0 pr-1 pb-4">
                         <div className="grid grid-cols-2 gap-4 font-sans">
                           {/* Amount */}
                           <div className="space-y-1.5 col-span-2 sm:col-span-1">
@@ -7682,10 +7793,10 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                               setAiConstructionModal(null);
                             }}
                             className={cn(
-                              "flex-[2] py-3 rounded-xl font-black text-xs tracking-wide shadow-md active:scale-95 transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-white",
+                              "flex-[2] py-3 rounded-xl font-black text-xs tracking-wide shadow-md active:scale-95 text-center flex items-center justify-center gap-1.5 cursor-pointer text-white",
                               theme === 'dark' 
-                                ? "bg-indigo-650 hover:bg-indigo-700 shadow-indigo-950/50" 
-                                : "bg-indigo-600 hover:bg-indigo-700 shadow-indigo-100"
+                                ? "bg-indigo-600 md:hover:bg-indigo-500 md:transition-colors shadow-indigo-950/50" 
+                                : "bg-indigo-600 md:hover:bg-indigo-700 md:transition-colors shadow-indigo-100"
                             )}
                           >
                             <Check size={13} />
@@ -8852,6 +8963,26 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   </motion.div>
                 )}
 
+                <div className={cn(
+                  "p-4 rounded-2xl border transition-colors duration-300 flex items-center justify-between gap-3 text-left-side",
+                  theme === 'dark' ? "bg-slate-950 border-slate-800" : "bg-slate-50 border-slate-100"
+                )}>
+                  <div>
+                    <h4 className={cn("text-xs font-black uppercase tracking-wider", theme === 'dark' ? "text-slate-200" : "text-slate-800")}>
+                      AI Engine Configuration
+                    </h4>
+                    <p className="text-[10px] text-slate-400 dark:text-zinc-500 mt-0.5">
+                      {customApiKeyVal ? "Using your custom key" : "Using system container key"}
+                    </p>
+                  </div>
+                  <button 
+                    onClick={() => { vibrate(); setShowApiKeyModal(true); }}
+                    className="bg-indigo-600 hover:bg-indigo-750 text-white font-bold text-[11px] px-4 py-2 rounded-xl shadow-md cursor-pointer outline-none border-none"
+                  >
+                    Configure API Key
+                  </button>
+                </div>
+
                 <div className="pt-4 border-t border-slate-100 dark:border-slate-800 text-center">
                   <p className="text-slate-400 text-xs font-medium mb-2">Need more help?</p>
                   <a 
@@ -8906,6 +9037,111 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   "text-sm font-medium transition-colors duration-300",
                   theme === 'dark' ? "text-slate-400" : "text-slate-600"
                 )}>Please wait a moment...</p>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Custom Gemini API Key Settings Modal */}
+      <AnimatePresence>
+        {showApiKeyModal && (
+          <div className="fixed inset-0 z-[250] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className={cn(
+                "rounded-[32px] shadow-3xl w-full max-w-sm overflow-hidden border transition-colors duration-300",
+                theme === 'dark' ? "bg-zinc-950 border-zinc-900 shadow-black/80" : "bg-white border-slate-100 shadow-slate-200/50"
+              )}
+            >
+              <div className="p-6 border-b border-slate-100 dark:border-zinc-900 flex items-center justify-between bg-indigo-600 text-white">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-1.5 bg-white/20 rounded-lg">
+                    <Key size={18} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-black tracking-tight uppercase">AI Key Settings</h3>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => { vibrate(); setShowApiKeyModal(false); }}
+                  className="p-1.5 hover:bg-white/25 rounded-full transition-colors cursor-pointer outline-none border-none text-white"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-4">
+                <div className="space-y-1.5 text-center sm:text-left">
+                  <span className="text-[10px] font-black uppercase tracking-widest text-indigo-500">Gemini 3 Flash API</span>
+                  <p className={cn(
+                    "text-xs leading-relaxed font-medium transition-colors duration-300",
+                    theme === 'dark' ? "text-slate-400" : "text-slate-600"
+                  )}>
+                    If the developer's default Gemini key has expired or is busy, you can use your own custom API Key. All processing still runs safely server-side.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className={cn(
+                    "text-[10px] font-black uppercase tracking-widest transition-colors duration-300 block",
+                    theme === 'dark' ? "text-slate-500" : "text-black"
+                  )}>API Key Reference</label>
+                  <input
+                    type="password"
+                    value={customApiKeyVal}
+                    placeholder="AIzaSy..."
+                    onChange={(e) => setCustomApiKeyVal(e.target.value)}
+                    className={cn(
+                      "w-full border-2 rounded-xl p-3 text-sm outline-none focus:border-indigo-500 font-mono transition-all",
+                      theme === 'dark' ? "bg-zinc-900 border-zinc-900 text-white" : "bg-slate-50 border-slate-100 text-black"
+                    )}
+                  />
+                  <div className="flex justify-between items-center text-[10px] text-slate-400">
+                    <span>Keys are saved to your local device</span>
+                    <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer" className="text-indigo-600 dark:text-indigo-400 hover:underline">
+                      Get free key
+                    </a>
+                  </div>
+                </div>
+
+                <div className="flex gap-2 pt-2">
+                  <button
+                    onClick={() => {
+                      vibrate();
+                      localStorage.removeItem('GEMINI_API_KEY');
+                      setCustomApiKeyVal('');
+                      setShowApiKeyModal(false);
+                      setError(null);
+                    }}
+                    className={cn(
+                      "flex-1 border hover:bg-rose-50 dark:hover:bg-rose-950/20 text-rose-500 font-bold text-xs py-2.5 rounded-xl transition-all cursor-pointer outline-none bg-transparent",
+                      theme === 'dark' ? "border-zinc-900" : "border-slate-100"
+                    )}
+                  >
+                    Reset
+                  </button>
+                  <button
+                    onClick={() => {
+                      vibrate();
+                      const cleanedVal = customApiKeyVal.trim();
+                      if (cleanedVal) {
+                        localStorage.setItem('GEMINI_API_KEY', cleanedVal);
+                        setCustomApiKeyVal(cleanedVal);
+                      } else {
+                        localStorage.removeItem('GEMINI_API_KEY');
+                        setCustomApiKeyVal('');
+                      }
+                      setShowApiKeyModal(false);
+                      setError(null);
+                    }}
+                    className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-2.5 rounded-xl transition-all shadow-md cursor-pointer outline-none border-none"
+                  >
+                    Save Key
+                  </button>
+                </div>
               </div>
             </motion.div>
           </div>
