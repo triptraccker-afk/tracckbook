@@ -9,6 +9,7 @@ import AutoLogoutManager from './components/AutoLogoutManager';
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Login = lazy(() => import('./pages/Login'));
 const ResetPassword = lazy(() => import('./pages/ResetPassword'));
+const AdminPortal = lazy(() => import('./pages/AdminPortal'));
 
 function NavigationHandler({ 
   session, 
@@ -156,6 +157,7 @@ export default function App() {
           <Route path="/forgot" element={<Login theme={theme} initialMode="forgot" />} />
           <Route path="/signup" element={<Navigate to="/register" replace />} />
           <Route path="/resetpassword" element={<ResetPassword />} />
+          <Route path="/admin" element={<AdminPortal />} />
 
           {/* Protected Routes */}
           <Route 
