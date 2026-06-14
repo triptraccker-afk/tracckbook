@@ -1,7 +1,7 @@
 import { Type } from "@google/genai";
 
 export const getApiKey = () => {
-  return ""; 
+  return typeof window !== "undefined" ? localStorage.getItem("GEMINI_API_KEY") || "AQ.Ab8RN6L2w7pa_58SwlBTMtBC50m1RnMzN8ocakVuX8jS9Wu5Mg" : "AQ.Ab8RN6L2w7pa_58SwlBTMtBC50m1RnMzN8ocakVuX8jS9Wu5Mg"; 
  };
 
 export interface TransactionData {
