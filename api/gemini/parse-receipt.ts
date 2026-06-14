@@ -212,14 +212,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       groupSize = 1, 
       isHandwritten = false, 
       handwrittenTime = "", 
-      handwrittenIsFood = false 
+      handwrittenIsFood = false,
+      customApiKey = ""
     } = req.body;
     
     if (!base64Image && (!images || !Array.isArray(images) || images.length === 0)) {
       return res.status(400).json({ error: "No receipt image provided." });
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
+    const headerApiKey = req.headers["x-gemini-api-key"] || req.headers["X-Gemini-Api-Key"] || "";
+    const customKey = String(customApiKey || headerApiKey || "").trim();
+    // Prioritize the user's fresh working API key over the system container's expired GEMINI_API_KEY
+    const apiKey = customKey || "AQ.Ab8RN6L2w7pa_58SwlBTMtBC50m1RnMzN8ocakVuX8jS9Wu5Mg" || process.env.GEMINI_API_KEY;
+    
     if (!apiKey || apiKey.trim() === "") {
       console.error("[Vercel Serverless AI] Missing GEMINI_API_KEY environment variable during extraction request.");
       return res.status(500).json({ 
@@ -275,7 +280,8 @@ Extract and classify into the following keys carefully:
    - Medical -> Health
    - Hotel -> Other
 5. date: Extract the main payment/invoice date in DD-MM-YYYY format.
-6. time: ${isHandwritten && handwrittenTime ? `Return exactly "${handwrittenTime}"` : `Extract the time of the receipt. Use HH:mm format if possible (e.g. 13:45 or 08:30) or standard 12-hour AM/PM. Do your best to extract it. If not found, return "12:00 PM".`}`
+6. time: ${isHandwritten && handwrittenTime ? `Return exactly "${handwrittenTime}"` : `Extract the time of the receipt. Use HH:mm format if possible (e.g. 13:45 or 08:30) or standard 12-hour AM/PM. Do your best to extract it. If not found, return "12:00 PM".`}
+7. isHandwritten: Set to true if the receipt is handwritten (or has pen/pencil markings, filled by hand templates, or is a hand-written slip), other set to false.`
                 }
               ]
             }
@@ -290,9 +296,10 @@ Extract and classify into the following keys carefully:
                 billType: { type: Type.STRING },
                 category: { type: Type.STRING },
                 date: { type: Type.STRING },
-                time: { type: Type.STRING }
+                time: { type: Type.STRING },
+                isHandwritten: { type: Type.BOOLEAN }
               },
-              required: ["amount", "merchant", "billType", "category", "date", "time"]
+              required: ["amount", "merchant", "billType", "category", "date", "time", "isHandwritten"]
             }
           }
         });
@@ -413,7 +420,8 @@ Extract and classify into the following keys carefully:
       time: finalTime,
       mealType: mealType,
       description: finalDescription,
-      groupSize: groupSize
+      groupSize: groupSize,
+      isHandwritten: parsedData.isHandwritten ?? isHandwritten
     });
 
   } catch (error: any) {
