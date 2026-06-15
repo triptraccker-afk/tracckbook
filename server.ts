@@ -16,11 +16,20 @@ if (envConfig.parsed) {
 }
 
 // Startup health check for Gemini API Key configuration
-const geminiApiKey = process.env.GEMINI_API_KEY;
-if (geminiApiKey && geminiApiKey.trim() !== "") {
-  console.log("[Startup Check] Gemini API Ready");
+const getActiveApiKey = (): string => {
+  return (process.env.GEMINI_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || "").trim();
+};
+
+const geminiApiKey = getActiveApiKey();
+if (geminiApiKey !== "") {
+  // Override the environment variable so that the GoogleGenAI client (and submodules) use the working key
+  process.env.GEMINI_API_KEY = geminiApiKey;
+  let matchedName = "GEMINI_API_KEY";
+  if (process.env.GEMINI_KEY) matchedName = "GEMINI_KEY";
+  else if (process.env.GOOGLE_API_KEY) matchedName = "GOOGLE_API_KEY";
+  console.log(`[Startup Check] Gemini API Ready (matched ${matchedName})`);
 } else {
-  console.log("[Startup Check] Gemini API Not Configured");
+  console.log("[Startup Check] Gemini API Not Configured (missing GEMINI_API_KEY, GEMINI_KEY, or GOOGLE_API_KEY)");
 }
 
 const app = express();
@@ -39,11 +48,48 @@ app.post("/api/gemini/parse-receipt", async (req, res) => {
   }
 });
 
+// AI Ask Endpoint
+app.post("/api/gemini/ask", async (req, res) => {
+  const { query } = req.body;
+  if (!query) {
+    return res.status(400).json({ error: "Missing query parameter." });
+  }
+
+  const apiKey = getActiveApiKey();
+  if (apiKey === "") {
+    return res.status(500).json({ error: "AI is not configured. Please add GEMINI_API_KEY, GEMINI_KEY, or GOOGLE_API_KEY under Settings > Secrets on the platform." });
+  }
+
+  try {
+    const ai = new GoogleGenAI({
+      apiKey: apiKey,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        }
+      }
+    });
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: query,
+      config: {
+        systemInstruction: "You are a helpful assistant for 'Track Book', a financial management app. The app allows users to create multiple books, add transactions (Cash In/Out), upload receipt images for AI detection (using TrackBook AI), and export reports in Excel/PDF. Users can also filter transactions by type, category, and duration. Answer the user's question about how to use the app or general financial advice within the context of this app. Keep it concise.",
+      },
+    });
+
+    res.json({ text: response.text || "I'm sorry, I couldn't generate a response." });
+  } catch (err: any) {
+    console.error("[Server help query] Error asking AI:", err);
+    res.status(500).json({ error: err.message || "An unexpected error occurred" });
+  }
+});
+
 // Gemini Health Check & Diagnostics Endpoint
 app.get("/api/gemini/health", async (req, res) => {
   const modelName = "gemini-3.5-flash";
-  const apiKey = process.env.GEMINI_API_KEY;
-  const keyLoaded = apiKey && apiKey.trim() !== "";
+  const apiKey = getActiveApiKey();
+  const keyLoaded = apiKey !== "";
   
   if (!keyLoaded) {
     console.error("[Health Check] API Key Missing");
@@ -52,7 +98,7 @@ app.get("/api/gemini/health", async (req, res) => {
       modelUsed: modelName,
       keyLoaded: false,
       apiConnectivity: "Failed (API key missing)",
-      error: "Gemini API key is not loaded or is empty in process.env.GEMINI_API_KEY"
+      error: "Gemini API key is not loaded or is empty in GEMINI_API_KEY, GEMINI_KEY, and GOOGLE_API_KEY environmental variables."
     });
   }
 

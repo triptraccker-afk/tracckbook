@@ -88,15 +88,17 @@ function generateSmartDescription(billType: string, groupSize: number, meal?: st
 
 // Helper to classify Gemini errors accurately
 function classifyGeminiError(error: any, apiKeyExists: boolean): { type: string; message: string; isRetryable: boolean } {
+  const originalMessage = error?.message || (error?.error && error?.error?.message) || String(error);
+  
   if (!apiKeyExists) {
     return {
       type: "MISSING_API_KEY",
-      message: "AI configuration error. Contact administrator.",
+      message: "AI configuration error. GEMINI_API_KEY, GEMINI_KEY, or GOOGLE_API_KEY is not defined in system environment secrets.",
       isRetryable: false
     };
   }
 
-  const msg = String(error?.message || error || "").toUpperCase();
+  const msg = String(originalMessage).toUpperCase();
   const status = error?.status || error?.statusCode || (error?.error && error?.error?.status) || "";
   const code = error?.code || (error?.error && error?.error?.code) || 0;
   const statusStr = String(status).toUpperCase();
@@ -115,7 +117,7 @@ function classifyGeminiError(error: any, apiKeyExists: boolean): { type: string;
   if (isInvalidKey) {
     return {
       type: "INVALID_API_KEY",
-      message: "AI configuration error. Contact administrator.",
+      message: `Gemini API Key is invalid or has expired: ${originalMessage}. Please check GEMINI_API_KEY, GEMINI_KEY, or GOOGLE_API_KEY secret under Settings > Secrets.`,
       isRetryable: false
     };
   }
@@ -132,7 +134,7 @@ function classifyGeminiError(error: any, apiKeyExists: boolean): { type: string;
   if (isRateLimit) {
     return {
       type: "RATE_LIMIT",
-      message: "Daily AI quota exceeded. Please try later.",
+      message: `Daily AI quota or rate limit exceeded: ${originalMessage}. Please try again later.`,
       isRetryable: true
     };
   }
@@ -148,7 +150,7 @@ function classifyGeminiError(error: any, apiKeyExists: boolean): { type: string;
   if (isTimeout) {
     return {
       type: "TIMEOUT",
-      message: "AI request timed out. Please try again.",
+      message: `AI request timed out: ${originalMessage}. Please try again.`,
       isRetryable: true
     };
   }
@@ -165,7 +167,7 @@ function classifyGeminiError(error: any, apiKeyExists: boolean): { type: string;
   if (isTooLarge) {
     return {
       type: "FILE_TOO_LARGE",
-      message: "File too large. Please upload an image under 10MB.",
+      message: `The uploaded receipt image is too large: ${originalMessage}. Please compress or resize the image under 10MB.`,
       isRetryable: false
     };
   }
@@ -186,7 +188,7 @@ function classifyGeminiError(error: any, apiKeyExists: boolean): { type: string;
   if (isServiceUnavailable) {
     return {
       type: "TEMPORARY_BUSY",
-      message: "Gemini service is temporarily busy. Retrying...",
+      message: `AI backend service is temporarily busy or returned a 5xx error: ${originalMessage}`,
       isRetryable: true
     };
   }
@@ -194,7 +196,7 @@ function classifyGeminiError(error: any, apiKeyExists: boolean): { type: string;
   // Fallback
   return {
     type: "UNKNOWN_ERROR",
-    message: "Gemini service is temporarily busy. Retrying...",
+    message: `Gemini API Error: ${originalMessage}`,
     isRetryable: true
   };
 }
@@ -212,23 +214,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       groupSize = 1, 
       isHandwritten = false, 
       handwrittenTime = "", 
-      handwrittenIsFood = false,
-      customApiKey = ""
+      handwrittenIsFood = false
     } = req.body;
     
     if (!base64Image && (!images || !Array.isArray(images) || images.length === 0)) {
       return res.status(400).json({ error: "No receipt image provided." });
     }
 
-    const headerApiKey = req.headers["x-gemini-api-key"] || req.headers["X-Gemini-Api-Key"] || "";
-    const customKey = String(customApiKey || headerApiKey || "").trim();
-    // Prioritize the user's fresh working API key over the system container's expired GEMINI_API_KEY
-    const apiKey = customKey || "AQ.Ab8RN6L2w7pa_58SwlBTMtBC50m1RnMzN8ocakVuX8jS9Wu5Mg" || process.env.GEMINI_API_KEY;
+    const apiKey = (process.env.GEMINI_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || "").trim();
     
-    if (!apiKey || apiKey.trim() === "") {
-      console.error("[Vercel Serverless AI] Missing GEMINI_API_KEY environment variable during extraction request.");
+    if (apiKey === "") {
+      console.error("[Vercel Serverless AI] Missing GEMINI_API_KEY, GEMINI_KEY, or GOOGLE_API_KEY environment variable during extraction request.");
       return res.status(500).json({ 
-        error: "AI configuration error. Contact administrator." 
+        error: "AI is not configured. Please add GEMINI_API_KEY, GEMINI_KEY, or GOOGLE_API_KEY under Settings > Secrets on the platform." 
       });
     }
 

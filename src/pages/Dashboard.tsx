@@ -59,10 +59,9 @@ import {
   Camera
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { GoogleGenAI } from "@google/genai";
 import ReactMarkdown from 'react-markdown';
 import { cn, formatCurrency, vibrate } from '../lib/utils';
-import { parseReceipt, parseMultipleReceipts, getApiKey } from '../services/gemini';
+import { parseReceipt, parseMultipleReceipts } from '../services/gemini';
 import { supabase } from '../lib/supabase';
 import { uploadToCloudinary, getOptimizedCloudinaryUrl, getExportOptimizedCloudinaryUrl } from '../services/cloudinary';
 import imageCompression from 'browser-image-compression';
@@ -1448,14 +1447,13 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [showDropZone, setShowDropZone] = useState(false);
   const [aiMode, setAiMode] = useState<'split' | 'merge'>('split');
   const [error, setError] = useState<string | null>(null);
-  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
-  const [customApiKeyVal, setCustomApiKeyVal] = useState(() => typeof window !== 'undefined' ? localStorage.getItem('GEMINI_API_KEY') || '' : '');
 
   // Intelligent TrackBook AI Upload states
   const [aiWorkflowStep, setAiWorkflowStep] = useState<'group' | 'upload' | 'scanning' | 'confirmation'>('group');
   const [aiGroupSize, setAiGroupSize] = useState<number>(1);
   const [showGroupSizeModal, setShowGroupSizeModal] = useState(false);
   const [aiScanStatus, setAiScanStatus] = useState<string>('Analyzing bill...');
+  const [aiProgress, setAiProgress] = useState<number>(0);
   const [aiFile, setAiFile] = useState<File | null>(null);
   const [aiFilePreviewUrl, setAiFilePreviewUrl] = useState<string>('');
   const [isHandwritten, setIsHandwritten] = useState<boolean>(false);
@@ -2722,18 +2720,24 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     setHelpResponse('');
     
     try {
-      const ai = new GoogleGenAI({ apiKey: getApiKey() });
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: helpQuery,
-        config: {
-          systemInstruction: "You are a helpful assistant for 'Track Book', a financial management app. The app allows users to create multiple books, add transactions (Cash In/Out), upload receipt images for AI detection (using TrackBook AI), and export reports in Excel/PDF. Users can also filter transactions by type, category, and duration. Answer the user's question about how to use the app or general financial advice within the context of this app. Keep it concise.",
+      const res = await fetch("/api/gemini/ask", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
         },
+        body: JSON.stringify({ query: helpQuery }),
       });
-      setHelpResponse(response.text || "I'm sorry, I couldn't generate a response.");
-    } catch (err) {
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || `HTTP error ${res.status}`);
+      }
+
+      const data = await res.json();
+      setHelpResponse(data.text || "I'm sorry, I couldn't generate a response.");
+    } catch (err: any) {
       console.error('Error asking AI:', err);
-      setHelpResponse("Sorry, I encountered an error while processing your request.");
+      setHelpResponse(err.message || "Sorry, I encountered an error while processing your request.");
     } finally {
       setIsHelpLoading(false);
     }
@@ -4385,6 +4389,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
     setAiWorkflowStep('scanning');
     setError(null);
+    setAiProgress(0); // Reset progress
 
     const totalFiles = files.length;
     const userIdentifier = session?.user?.email || session?.user?.id || 'anonymous';
@@ -4394,9 +4399,27 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     const cacheUpdates: Array<{ id: string; item: any }> = [];
     const tempHandwrittenQueue: Array<{ file: File; result: any; previewUrl: string }> = [];
 
+    // Progressive progress bar helper variables
+    let currentProgress = 0;
+    let progressCap = 0;
+    const segmentShare = 100 / totalFiles;
+
+    const progressInterval = setInterval(() => {
+      if (currentProgress < progressCap) {
+        const diff = progressCap - currentProgress;
+        const increment = Math.max(0.1, Math.min(2.5, diff * 0.08));
+        currentProgress = parseFloat((currentProgress + increment).toFixed(2));
+        if (currentProgress > progressCap) {
+          currentProgress = progressCap;
+        }
+        setAiProgress(currentProgress);
+      }
+    }, 80);
+
     for (let i = 0; i < totalFiles; i++) {
       const file = files[i];
       setAiScanStatus(`Analyzing bill ${i + 1} of ${totalFiles}...`);
+      progressCap = (i + 0.92) * segmentShare;
 
       try {
         // Read file to base64
@@ -4462,6 +4485,11 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         if (!response) throw new Error("No response from server.");
 
         const result = await response.json();
+
+        // Fast-forward this file's chunk of progress to its completion boundary
+        currentProgress = (i + 1) * segmentShare;
+        setAiProgress(currentProgress);
+        progressCap = currentProgress;
 
         // Extracted values
         const parsedAmount = parseFloat(result.amount) || 0;
@@ -4597,9 +4625,27 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           }
         }
       } catch (err: any) {
+        clearInterval(progressInterval);
         console.error(`[AI Unified Parse Error] file ${file.name}:`, err);
         setError(err.message || `Failed to process document: ${file.name}`);
       }
+    }
+
+    clearInterval(progressInterval);
+
+    // If an error occurred and no files succeeded, terminate early without holding up
+    if (error && newTransactionsToAppend.length === 0 && tempHandwrittenQueue.length === 0) {
+      setAiWorkflowStep('group');
+      setIsUploading(false);
+      return;
+    }
+
+    // Animate smoothly to exactly 100% before adding bills and finishing
+    setAiScanStatus("All bills processed! Compiling data...");
+    while (currentProgress < 100) {
+      currentProgress = Math.min(100, currentProgress + 4);
+      setAiProgress(currentProgress);
+      await new Promise(resolve => setTimeout(resolve, 40));
     }
 
     // Apply auto-saved transactions to local React state
@@ -4843,14 +4889,6 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               <AlertCircle size={16} />
               <span>{error}</span>
             </div>
-            {(error.toLowerCase().includes("configuration") || error.toLowerCase().includes("expired") || error.toLowerCase().includes("api key") || error.toLowerCase().includes("auth") || error.toLowerCase().includes("credentials")) && (
-              <button 
-                onClick={() => { vibrate(); setShowApiKeyModal(true); }}
-                className="bg-white/25 hover:bg-white/40 text-white text-[11px] font-black uppercase tracking-wider px-3 py-1 rounded-lg transition-transform active:scale-[0.98] outline-none border-none cursor-pointer ml-3"
-              >
-                Set Custom Gemini Key
-              </button>
-            )}
             <button onClick={() => setError(null)} className="hover:bg-white/20 rounded p-0.5 transition-colors cursor-pointer outline-none border-none">
               <X size={14} />
             </button>
@@ -6304,6 +6342,22 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       )}>
                         {aiScanStatus}
                       </h4>
+
+                      {/* 0 to 100% Progressive Loading Design / Line Loading Animation */}
+                      <div className="max-w-xs mx-auto space-y-2 pt-1 pb-2">
+                        <div className="flex items-center justify-between text-[11px] font-black text-indigo-600 dark:text-indigo-400 uppercase tracking-widest leading-none">
+                          <span>Scanning progress</span>
+                          <span className="font-mono text-xs">{Math.round(aiProgress)}%</span>
+                        </div>
+                        <div className="w-full bg-slate-100 dark:bg-zinc-900 h-2 rounded-full overflow-hidden border border-slate-200/40 dark:border-zinc-800/40 relative">
+                          <motion.div 
+                            className="bg-indigo-600 dark:bg-indigo-400 h-full absolute left-0 top-0 rounded-full"
+                            style={{ width: `${aiProgress}%` }}
+                            transition={{ type: 'spring', damping: 20, stiffness: 80 }}
+                          />
+                        </div>
+                      </div>
+
                       <p className="text-xs text-slate-400 dark:text-slate-500 max-w-sm mx-auto">
                         TrackBook AI is reading text, classifying merchants, and matching time structures.
                       </p>
@@ -7581,6 +7635,21 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       <p className="text-indigo-600 dark:text-indigo-400 font-bold text-xs uppercase tracking-widest animate-pulse max-w-xs mx-auto">
                         {aiScanStatus}
                       </p>
+
+                      {/* 0 to 100% Progressive Loading Design / Line Loading Animation */}
+                      <div className="max-w-xs mx-auto space-y-2 pt-1 pb-2">
+                        <div className="flex items-center justify-between text-[11px] font-black text-indigo-600 dark:text-indigo-400 uppercase tracking-widest leading-none">
+                          <span>Scanning progress</span>
+                          <span className="font-mono text-xs">{Math.round(aiProgress)}%</span>
+                        </div>
+                        <div className="w-full bg-slate-100 dark:bg-zinc-900 h-2 rounded-full overflow-hidden border border-slate-200/40 dark:border-zinc-800/40 relative">
+                          <motion.div 
+                            className="bg-indigo-600 dark:bg-indigo-400 h-full absolute left-0 top-0 rounded-full"
+                            style={{ width: `${aiProgress}%` }}
+                            transition={{ type: 'spring', damping: 20, stiffness: 80 }}
+                          />
+                        </div>
+                      </div>
                     </div>
 
                     <div className="text-xs text-slate-400 dark:text-zinc-500 max-w-xs mx-auto leading-relaxed">
@@ -8971,16 +9040,10 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     <h4 className={cn("text-xs font-black uppercase tracking-wider", theme === 'dark' ? "text-slate-200" : "text-slate-800")}>
                       AI Engine Configuration
                     </h4>
-                    <p className="text-[10px] text-slate-400 dark:text-zinc-500 mt-0.5">
-                      {customApiKeyVal ? "Using your custom key" : "Using system container key"}
+                    <p className="text-[10px] text-emerald-500 dark:text-emerald-400 mt-0.5 font-bold">
+                      ● Active & Integrated
                     </p>
                   </div>
-                  <button 
-                    onClick={() => { vibrate(); setShowApiKeyModal(true); }}
-                    className="bg-indigo-600 hover:bg-indigo-750 text-white font-bold text-[11px] px-4 py-2 rounded-xl shadow-md cursor-pointer outline-none border-none"
-                  >
-                    Configure API Key
-                  </button>
                 </div>
 
                 <div className="pt-4 border-t border-slate-100 dark:border-slate-800 text-center">
@@ -9043,110 +9106,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         )}
       </AnimatePresence>
 
-      {/* Custom Gemini API Key Settings Modal */}
-      <AnimatePresence>
-        {showApiKeyModal && (
-          <div className="fixed inset-0 z-[250] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 15 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 15 }}
-              className={cn(
-                "rounded-[32px] shadow-3xl w-full max-w-sm overflow-hidden border transition-colors duration-300",
-                theme === 'dark' ? "bg-zinc-950 border-zinc-900 shadow-black/80" : "bg-white border-slate-100 shadow-slate-200/50"
-              )}
-            >
-              <div className="p-6 border-b border-slate-100 dark:border-zinc-900 flex items-center justify-between bg-indigo-600 text-white">
-                <div className="flex items-center gap-2.5">
-                  <div className="p-1.5 bg-white/20 rounded-lg">
-                    <Key size={18} />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-black tracking-tight uppercase">AI Key Settings</h3>
-                  </div>
-                </div>
-                <button 
-                  onClick={() => { vibrate(); setShowApiKeyModal(false); }}
-                  className="p-1.5 hover:bg-white/25 rounded-full transition-colors cursor-pointer outline-none border-none text-white"
-                >
-                  <X size={18} />
-                </button>
-              </div>
 
-              <div className="p-6 space-y-4">
-                <div className="space-y-1.5 text-center sm:text-left">
-                  <span className="text-[10px] font-black uppercase tracking-widest text-indigo-500">Gemini 3 Flash API</span>
-                  <p className={cn(
-                    "text-xs leading-relaxed font-medium transition-colors duration-300",
-                    theme === 'dark' ? "text-slate-400" : "text-slate-600"
-                  )}>
-                    If the developer's default Gemini key has expired or is busy, you can use your own custom API Key. All processing still runs safely server-side.
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  <label className={cn(
-                    "text-[10px] font-black uppercase tracking-widest transition-colors duration-300 block",
-                    theme === 'dark' ? "text-slate-500" : "text-black"
-                  )}>API Key Reference</label>
-                  <input
-                    type="password"
-                    value={customApiKeyVal}
-                    placeholder="AIzaSy..."
-                    onChange={(e) => setCustomApiKeyVal(e.target.value)}
-                    className={cn(
-                      "w-full border-2 rounded-xl p-3 text-sm outline-none focus:border-indigo-500 font-mono transition-all",
-                      theme === 'dark' ? "bg-zinc-900 border-zinc-900 text-white" : "bg-slate-50 border-slate-100 text-black"
-                    )}
-                  />
-                  <div className="flex justify-between items-center text-[10px] text-slate-400">
-                    <span>Keys are saved to your local device</span>
-                    <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer" className="text-indigo-600 dark:text-indigo-400 hover:underline">
-                      Get free key
-                    </a>
-                  </div>
-                </div>
-
-                <div className="flex gap-2 pt-2">
-                  <button
-                    onClick={() => {
-                      vibrate();
-                      localStorage.removeItem('GEMINI_API_KEY');
-                      setCustomApiKeyVal('');
-                      setShowApiKeyModal(false);
-                      setError(null);
-                    }}
-                    className={cn(
-                      "flex-1 border hover:bg-rose-50 dark:hover:bg-rose-950/20 text-rose-500 font-bold text-xs py-2.5 rounded-xl transition-all cursor-pointer outline-none bg-transparent",
-                      theme === 'dark' ? "border-zinc-900" : "border-slate-100"
-                    )}
-                  >
-                    Reset
-                  </button>
-                  <button
-                    onClick={() => {
-                      vibrate();
-                      const cleanedVal = customApiKeyVal.trim();
-                      if (cleanedVal) {
-                        localStorage.setItem('GEMINI_API_KEY', cleanedVal);
-                        setCustomApiKeyVal(cleanedVal);
-                      } else {
-                        localStorage.removeItem('GEMINI_API_KEY');
-                        setCustomApiKeyVal('');
-                      }
-                      setShowApiKeyModal(false);
-                      setError(null);
-                    }}
-                    className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-2.5 rounded-xl transition-all shadow-md cursor-pointer outline-none border-none"
-                  >
-                    Save Key
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
 
       {/* Bulk Transaction Delete Confirmation Modal */}
       <AnimatePresence>

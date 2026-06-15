@@ -1,9 +1,5 @@
 import { Type } from "@google/genai";
 
-export const getApiKey = () => {
-  return typeof window !== "undefined" ? localStorage.getItem("GEMINI_API_KEY") || "AQ.Ab8RN6L2w7pa_58SwlBTMtBC50m1RnMzN8ocakVuX8jS9Wu5Mg" : "AQ.Ab8RN6L2w7pa_58SwlBTMtBC50m1RnMzN8ocakVuX8jS9Wu5Mg"; 
-};
-
 export interface TransactionData {
   amount: number;
   type: 'in' | 'out';
@@ -14,18 +10,15 @@ export interface TransactionData {
 }
 
 export async function parseReceipt(base64Image: string, mimeType: string): Promise<TransactionData | null> {
-  const customKey = getApiKey();
   try {
     const res = await fetch("/api/gemini/parse-receipt", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(customKey ? { "x-gemini-api-key": customKey } : {})
       },
       body: JSON.stringify({
         base64Image,
-        mimeType,
-        customApiKey: customKey
+        mimeType
       })
     });
 
@@ -50,17 +43,14 @@ export async function parseReceipt(base64Image: string, mimeType: string): Promi
 }
 
 export async function parseMultipleReceipts(images: { base64: string, mimeType: string }[]): Promise<TransactionData | null> {
-  const customKey = getApiKey();
   try {
     const res = await fetch("/api/gemini/parse-receipt", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(customKey ? { "x-gemini-api-key": customKey } : {})
       },
       body: JSON.stringify({
-        images,
-        customApiKey: customKey
+        images
       })
     });
 

@@ -742,29 +742,7 @@ export default function Auth({
             )}
           </motion.button>
 
-          {mode === 'signin' && !isDesktop && (
-            <>
-              <div className="flex items-center my-3.5 relative">
-                <div className="flex-grow border-t border-slate-200 dark:border-zinc-805" />
-                <span className="mx-2.5 text-[8.5px] font-black uppercase text-slate-450 dark:text-slate-500 tracking-widest bg-transparent">or</span>
-                <div className="flex-grow border-t border-slate-200 dark:border-zinc-805" />
-              </div>
-              
-              <button
-                type="button"
-                onClick={handleDemoLogin}
-                disabled={loading}
-                className={cn(
-                  "w-full rounded-2xl py-3 font-extrabold transition-all flex items-center justify-center gap-1.5 disabled:opacity-75 disabled:cursor-not-allowed text-[10px] border cursor-pointer uppercase tracking-wider",
-                  theme === 'dark'
-                    ? "bg-emerald-950/20 hover:bg-emerald-950/30 text-emerald-400 border-emerald-900/30"
-                    : "bg-emerald-50 hover:bg-[#d1fae5] text-emerald-600 border-emerald-100"
-                )}
-              >
-                {loading ? <Loader2 className="animate-spin" size={14} /> : "⚡ Quick Executive Demo"}
-              </button>
-            </>
-          )}
+
         </form>
 
         <div className="mt-6 text-center space-y-3 pt-2 border-t border-dashed border-slate-200/60 dark:border-zinc-900">

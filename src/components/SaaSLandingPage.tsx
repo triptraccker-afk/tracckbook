@@ -1236,9 +1236,18 @@ export default function SaaSLandingPage({
       )}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-2">
           <p className="font-black text-blue-600 uppercase tracking-widest text-[10px]">
-            TrackBook Inc. • Secure Origin Isolated Platform • <a href="https://trackbook.xyz" target="_blank" rel="noopener noreferrer" className="underline hover:text-blue-500 transition-colors">trackbook.xyz</a>
+            TrackBook Inc. • Secure Origin Isolated Platform • <a href="https://trackbook.xyz" target="_blank" rel="noopener noreferrer" className="underline hover:text-blue-500 transition-colors normal-case">trackbook.xyz</a>
           </p>
           <p>© 2026 TrackBook. All rights reserved. Inactivity protection is active.</p>
+          
+          <div className="pt-3 border-t border-[#E5E7EB]/40 dark:border-zinc-900/40 max-w-xs mx-auto flex justify-center">
+            <button 
+              onClick={() => window.location.href = '/admin'}
+              className="flex items-center gap-1.5 font-bold text-[#4B5563] dark:text-zinc-500 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors cursor-pointer justify-center uppercase tracking-widest text-[8.5px] lg:text-[9px]"
+            >
+              <ShieldCheck size={11} className="text-slate-400 dark:text-zinc-650" /> Admin Control System
+            </button>
+          </div>
         </div>
       </footer>
 
