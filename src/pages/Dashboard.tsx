@@ -8450,12 +8450,11 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                                   type="button"
                                   onClick={() => removeImage(i)}
                                   className={cn(
-                                    "absolute -top-2 -right-2 p-1 bg-rose-600 text-white rounded-full transition-opacity z-10",
-                                    theme === 'dark' ? "shadow-none" : "shadow-lg",
-                                    "opacity-0 group-hover:opacity-100"
+                                    "absolute -top-2 -right-2 p-1.5 bg-red-600 hover:bg-red-700 active:scale-95 text-white rounded-full transition-all z-20 shadow-md border-2 border-white dark:border-zinc-900 flex items-center justify-center cursor-pointer"
                                   )}
+                                  title="Remove image"
                                 >
-                                  <X size={12} />
+                                  <X size={12} className="stroke-[3]" />
                                 </button>
                                 
                                 <div className="absolute bottom-1 left-1/2 -translate-x-1/2 bg-black/50 text-[8px] text-white px-1.5 rounded-full">
