@@ -87,6 +87,18 @@ interface Transaction {
   imported_from_share_code?: string;
   is_imported?: boolean;
   import_batch_id?: string;
+  source?: 'AI' | 'Imported' | 'Manual' | string;
+}
+
+function getTransactionSource(t: any): 'AI' | 'Imported' | 'Manual' {
+  if (t?.source === 'AI') return 'AI';
+  if (t?.source === 'Imported') return 'Imported';
+  if (t?.source === 'Manual') return 'Manual';
+  
+  // Backward compatibility
+  if (t?.isAi) return 'AI';
+  if (t?.is_imported || t?.imported_from_share_code) return 'Imported';
+  return 'Manual';
 }
 
 interface Cashbook {
@@ -623,7 +635,16 @@ const MobileTransactionRow = React.memo(({
           )}>
             {t.mode}
           </span>
-          {(t.imported_from_share_code || t.is_imported) && (
+          {getTransactionSource(t) === 'AI' && (
+            <span className={cn(
+              "px-2.5 py-1 text-[10px] font-black tracking-wider uppercase rounded-lg transition-colors shrink-0 flex items-center gap-0.5",
+              theme === 'dark' ? "bg-amber-955/30 text-amber-400 border border-amber-900/40" : "bg-amber-50 text-amber-600 border-amber-200"
+            )}>
+              <Sparkles size={10} />
+              AI
+            </span>
+          )}
+          {getTransactionSource(t) === 'Imported' && (
             <span className={cn(
               "px-2.5 py-1 text-[10px] font-black tracking-wider uppercase rounded-lg transition-colors shrink-0",
               theme === 'dark' ? "bg-sky-950 text-sky-400 border border-sky-900/30" : "bg-sky-50 text-sky-700 border border-sky-100"
@@ -657,7 +678,7 @@ const MobileTransactionRow = React.memo(({
         </p>
         
         <div className="flex items-center gap-1.5">
-          {t.isAi && (
+          {getTransactionSource(t) === 'AI' && (
             <div className="bg-amber-500/10 text-amber-600 dark:text-amber-400 text-[9px] font-extrabold tracking-wide uppercase px-2 py-0.5 rounded-md flex items-center gap-0.5 shadow-sm border border-amber-500/15">
               <Sparkles size={10} />
               AI
@@ -885,7 +906,7 @@ const DesktopTransactionRow = React.memo(({
             "text-sm font-bold transition-colors duration-300",
             theme === 'dark' ? "text-slate-300" : "text-black"
           )}>{t.description || '--'}</p>
-          {(t.imported_from_share_code || t.is_imported) && (
+          {getTransactionSource(t) === 'Imported' && (
             <span className={cn(
               "px-1.5 py-0.5 text-[9px] font-black rounded-full border uppercase shrink-0 transition-all",
               theme === 'dark' ? "bg-sky-950/40 text-sky-400 border-sky-800/40" : "bg-sky-50 text-sky-600 border-sky-200"
@@ -893,7 +914,7 @@ const DesktopTransactionRow = React.memo(({
               Imported
             </span>
           )}
-          {t.isAi && (
+          {getTransactionSource(t) === 'AI' && (
             <span className={cn(
               "px-1.5 py-0.5 text-[9px] font-black rounded-full flex items-center gap-0.5 border",
               theme === 'dark' ? "bg-amber-900/40 text-amber-400 border-amber-800" : "bg-amber-50 text-amber-600 border-amber-200"
@@ -1526,14 +1547,97 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
   // Highlights and Undo manager states
   const [justEditedTransactionId, setJustEditedTransactionId] = useState<string | null>(null);
+  const [justEditedBookId, setJustEditedBookId] = useState<string | null>(null);
   const [undoAction, setUndoAction] = useState<{
-    type: 'book' | 'transaction';
+    type: 'book' | 'transaction' | 'bulk_books' | 'bulk_transactions';
     data: any;
     originalIndex?: number;
+    originalIndexes?: number[];
     parentBookId?: string;
   } | null>(null);
   const [showUndoToast, setShowUndoToast] = useState(false);
   const [undoTimeLeft, setUndoTimeLeft] = useState(8);
+
+  // Keep a ref of undoAction to commit on unmount
+  const pendingActionRef = useRef<any>(null);
+  useEffect(() => {
+    pendingActionRef.current = undoAction;
+  }, [undoAction]);
+
+  const commitPendingDeletion = async (action: {
+    type: 'book' | 'transaction' | 'bulk_books' | 'bulk_transactions';
+    data: any;
+    originalIndex?: number;
+    originalIndexes?: number[];
+    parentBookId?: string;
+  }) => {
+    if (!supabase || !session) return;
+    try {
+      if (action.type === 'book') {
+        const bookId = action.data.book?.id || action.data.id;
+        console.log('[DelayedDelete] Committing book deletion to database:', bookId);
+        const { error } = await supabase
+          .from('cashbooks')
+          .delete()
+          .eq('id', bookId)
+          .eq('user_id', session.user.id);
+        if (error) throw error;
+      } else if (action.type === 'bulk_books') {
+        const ids = action.data.map((item: any) => item.book.id);
+        console.log('[DelayedDelete] Committing bulk book deletion to database:', ids);
+        const { error } = await supabase
+          .from('cashbooks')
+          .delete()
+          .in('id', ids)
+          .eq('user_id', session.user.id);
+        if (error) throw error;
+      } else if (action.type === 'transaction') {
+        console.log('[DelayedDelete] Committing transaction deletion to database:', action.data.id);
+        const { error } = await supabase
+          .from('entries')
+          .delete()
+          .eq('id', action.data.id)
+          .eq('user_id', session.user.id);
+        if (error) throw error;
+      } else if (action.type === 'bulk_transactions') {
+        const ids = action.data.map((t: any) => t.id);
+        console.log('[DelayedDelete] Committing bulk transaction deletion to database:', ids);
+        const { error } = await supabase
+          .from('entries')
+          .delete()
+          .in('id', ids)
+          .eq('user_id', session.user.id);
+        if (error) throw error;
+      }
+    } catch (err) {
+      console.error('[DelayedDelete] Failure committing database deletion:', err);
+    }
+  };
+
+  const handleStartUndoableDelete = async (newAction: {
+    type: 'book' | 'transaction' | 'bulk_books' | 'bulk_transactions';
+    data: any;
+    originalIndex?: number;
+    originalIndexes?: number[];
+    parentBookId?: string;
+  }) => {
+    // If there is an existing pending deletion, commit it now!
+    if (pendingActionRef.current) {
+      await commitPendingDeletion(pendingActionRef.current);
+    }
+    setUndoAction(newAction);
+    setUndoTimeLeft(8);
+    setShowUndoToast(true);
+  };
+
+  // Commit on unmount
+  useEffect(() => {
+    return () => {
+      if (pendingActionRef.current) {
+        commitPendingDeletion(pendingActionRef.current);
+      }
+    };
+  }, []);
 
   // Lock body scroll when transaction form is visible (prevents underlying scroll)
   useEffect(() => {
@@ -1555,11 +1659,14 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         setUndoTimeLeft(prev => prev - 1);
       }, 1000);
     } else if (showUndoToast && undoTimeLeft === 0) {
+      if (undoAction) {
+        commitPendingDeletion(undoAction);
+      }
       setShowUndoToast(false);
       setUndoAction(null);
     }
     return () => clearTimeout(timer);
-  }, [showUndoToast, undoTimeLeft]);
+  }, [showUndoToast, undoTimeLeft, undoAction]);
 
   // Debounce logic for active book transaction search
   useEffect(() => {
@@ -2040,22 +2147,36 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               entriesCache.set(b.id, b.transactions);
             }
           });
-          setBooks(parsed.map((b: any) => ({
+          const mappedBooks = parsed.map((b: any) => ({
             ...b,
             transactions: (b.transactions || []).map((t: any) => ({
               ...t,
               date: new Date(t.date),
-              images: t.images || []
+              images: t.images || [],
+              source: t.source || (t.isAi ? 'AI' : ((t.is_imported || t.imported_from_share_code) ? 'Imported' : 'Manual'))
             })),
             createdAt: new Date(b.created_at || b.createdAt)
-          })));
+          }));
+          setBooks(mappedBooks);
+
+          // EAGER ROOT SYNC: Solve loading delay entirely by resolving activeBookId immediately!
+          if (bookSlug) {
+            const foundBook = mappedBooks.find(b => getBookSlug(b.name, b.id) === bookSlug);
+            if (foundBook) {
+              setActiveBookIdState(foundBook.id);
+              const cached = entriesCache.get(foundBook.id);
+              if (!cached || cached.length === 0) {
+                setIsEntriesLoading(true);
+              }
+            }
+          }
         } catch (e) {
           console.error('Error pre-loading from cache:', e);
         }
       }
       setIsLoading(false); // Enable immediate frame rendering!
     }
-  }, [session]);
+  }, [session, bookSlug]);
 
   // Stable component-level data fetch and sync function
   const fetchData = useCallback(async (force: boolean = false) => {
@@ -2086,7 +2207,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 date: t.date ? new Date(t.date) : new Date(),
                 images: cachedImg ? cachedImg.images : (t.images || []),
                 imageLayout: t.image_layout || t.imageLayout || 'split',
-                isAi: cachedImg ? cachedImg.isAi : (t.isAi || false)
+                isAi: cachedImg ? cachedImg.isAi : (t.isAi || false),
+                source: t.source || (cachedImg?.isAi ? 'AI' : (t.isAi ? 'AI' : ((t.is_imported || t.imported_from_share_code) ? 'Imported' : 'Manual')))
               };
             }),
             createdAt: cb.created_at ? new Date(cb.created_at) : (cb.createdAt ? new Date(cb.createdAt) : new Date())
@@ -2115,66 +2237,73 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       if (activeBookId && (!entriesCache.has(activeBookId) || entriesCache.get(activeBookId)?.length === 0 || !lastFetchTimeCache.has(activeBookId))) {
         setIsEntriesLoading(true);
       }
-      console.log('[fetchData] Refreshing books from Supabase...');
-      const { data: cashbooks, error: cbError } = await supabase
+      console.log('[fetchData] Refreshing cashbooks and entries from Supabase in parallel...');
+
+      // Run queries in parallel to completely eliminate waterfalls and optimize speed!
+      const cashbooksPromise = supabase
         .from('cashbooks')
         .select('id, name, created_at, user_id')
         .eq('user_id', session.user.id);
 
-      if (cbError) throw cbError;
+      let entriesPromise = Promise.resolve({ data: null as any[] | null, error: null as any });
 
-      if (cashbooks) {
-        cachedCashbooks = cashbooks;
-        let activeBookEntries: any[] = [];
-        if (activeBookId) {
-          console.log('[fetchData] Fetching required columns for active book:', activeBookId);
-          // PART 2: Select ONLY required columns! Optimize queries aggressively!
+      if (activeBookId) {
+        entriesPromise = (async () => {
           let entries: any[] | null = null;
           let entError: any = null;
-
           try {
-            // Attempt 1: Fetch with is_imported and import_batch_id
+            // Select Attempt 1: Fetch with is_imported and import_batch_id
             const { data, error } = await supabase
               .from('entries')
               .select('id, amount, type, description, category, mode, date, image_layout, cashbook_id, user_id, imported_from_share_code, is_imported, import_batch_id')
               .eq('cashbook_id', activeBookId)
               .eq('user_id', session.user.id)
               .order('date', { ascending: false });
-            
             if (error) throw error;
             entries = data;
           } catch (e1: any) {
-            console.warn('[fetchData] Select Attempt 1 warning or missing columns:', e1?.message);
+            console.warn('[fetchData] Parallel Select Attempt 1 warning or missing columns:', e1?.message);
             try {
-              // Attempt 2: Fetch with imported_from_share_code only
+              // Select Attempt 2: Fetch with imported_from_share_code only
               const { data, error } = await supabase
                 .from('entries')
                 .select('id, amount, type, description, category, mode, date, image_layout, cashbook_id, user_id, imported_from_share_code')
                 .eq('cashbook_id', activeBookId)
                 .eq('user_id', session.user.id)
                 .order('date', { ascending: false });
-              
               if (error) throw error;
               entries = data;
             } catch (e2: any) {
-              console.warn('[fetchData] Select Attempt 2 warning:', e2?.message);
-              // Attempt 3: Strict minimal fallback
+              console.warn('[fetchData] Parallel Select Attempt 2 warning:', e2?.message);
+              // Select Attempt 3: Strict minimal fallback
               const { data, error } = await supabase
                 .from('entries')
                 .select('id, amount, type, description, category, mode, date, image_layout, cashbook_id, user_id')
                 .eq('cashbook_id', activeBookId)
                 .eq('user_id', session.user.id)
                 .order('date', { ascending: false });
-              
               if (error) entError = error;
               entries = data;
             }
           }
+          return { data: entries, error: entError };
+        })();
+      }
 
-          if (entError) throw entError;
-          if (entries) {
-            activeBookEntries = entries;
-            entriesCache.set(activeBookId, entries);
+      const [cashbooksResult, entriesResult] = await Promise.all([cashbooksPromise, entriesPromise]);
+
+      if (cashbooksResult.error) throw cashbooksResult.error;
+      const cashbooks = cashbooksResult.data;
+
+      if (cashbooks) {
+        cachedCashbooks = cashbooks;
+        let activeBookEntries: any[] = [];
+        
+        if (activeBookId) {
+          if (entriesResult.error) throw entriesResult.error;
+          if (entriesResult.data) {
+            activeBookEntries = entriesResult.data;
+            entriesCache.set(activeBookId, entriesResult.data);
             lastFetchTimeCache.set(activeBookId, Date.now());
           }
         }
@@ -2221,7 +2350,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   isAi: existing ? existing.isAi : false,
                   imported_from_share_code: importedCode,
                   is_imported: t.is_imported || !!importedCode,
-                  import_batch_id: t.import_batch_id || importedCode
+                  import_batch_id: t.import_batch_id || importedCode,
+                  source: t.source || (existing?.isAi ? 'AI' : (t.isAi ? 'AI' : ((t.is_imported || !!importedCode) ? 'Imported' : 'Manual')))
                 };
               }),
               createdAt: cb.created_at ? new Date(cb.created_at) : (cb.createdAt ? new Date(cb.createdAt) : new Date())
@@ -2335,7 +2465,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               transactions: (b.transactions || []).map((t: any) => ({
                 ...t,
                 date: t.date ? new Date(t.date) : new Date(),
-                images: t.images || []
+                images: t.images || [],
+                source: t.source || (t.isAi ? 'AI' : ((t.is_imported || t.imported_from_share_code) ? 'Imported' : 'Manual'))
               })),
               createdAt: b.created_at ? new Date(b.created_at) : (b.createdAt ? new Date(b.createdAt) : new Date())
             })));
@@ -2541,13 +2672,30 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const activeBook = useMemo(() => 
-    books.find(b => b.id === activeBookId), 
-  [books, activeBookId]);
+  const activeBook = useMemo(() => {
+    const found = books.find(b => b.id === activeBookId);
+    if (!found) return undefined;
+    const uniques = new Map<string, typeof found.transactions[0]>();
+    (found.transactions || []).forEach(t => {
+      if (t && t.id && !uniques.has(t.id)) {
+        uniques.set(t.id, t);
+      }
+    });
+    return {
+      ...found,
+      transactions: Array.from(uniques.values())
+    };
+  }, [books, activeBookId]);
 
-  const filteredBooks = useMemo(() => 
-    books.filter(b => b.name.toLowerCase().includes(searchQuery.toLowerCase())),
-  [books, searchQuery]);
+  const filteredBooks = useMemo(() => {
+    const uniques = new Map<string, typeof books[0]>();
+    books.forEach(b => {
+      if (b && b.id && !uniques.has(b.id)) {
+        uniques.set(b.id, b);
+      }
+    });
+    return Array.from(uniques.values()).filter(b => b.name.toLowerCase().includes(searchQuery.toLowerCase()));
+  }, [books, searchQuery]);
 
   const totals = useMemo(() => {
     if (!activeBook) return { in: 0, out: 0, net: 0 };
@@ -2763,6 +2911,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     e.preventDefault();
     if (!editBookName.trim() || !isEditingBook || !session) return;
 
+    const savedId = isEditingBook;
+
     if (supabase) {
       try {
         const { error } = await supabase
@@ -2779,6 +2929,11 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     setBooks(books.map(b => b.id === isEditingBook ? { ...b, name: editBookName } : b));
     setIsEditingBook(null);
     setEditBookName('');
+
+    setJustEditedBookId(savedId);
+    setTimeout(() => {
+      setJustEditedBookId(null);
+    }, 2000);
   };
 
   const handleAskAi = async () => {
@@ -2822,26 +2977,14 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       const originalIndex = books.findIndex(b => b.id === deleteConfirmId);
 
       if (bookToDeleteObj) {
-        setUndoAction({
+        await handleStartUndoableDelete({
           type: 'book',
-          data: bookToDeleteObj,
+          data: {
+            book: bookToDeleteObj,
+            cachedEntries: entriesCache.get(deleteConfirmId) || []
+          },
           originalIndex
         });
-        setUndoTimeLeft(8);
-        setShowUndoToast(true);
-      }
-
-      if (supabase) {
-        try {
-          const { error } = await supabase
-            .from('cashbooks')
-            .delete()
-            .eq('id', deleteConfirmId)
-            .eq('user_id', session.user.id);
-          if (error) throw error;
-        } catch (error) {
-          console.error('Error deleting book from Supabase:', error);
-        }
       }
 
       setBooks(books.filter(b => b.id !== deleteConfirmId));
@@ -2854,21 +2997,27 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
   const handleBulkDeleteBooks = async () => {
     if (selectedBooks.size === 0 || !session) return;
-    
-    if (supabase) {
-      try {
-        const { error } = await supabase
-          .from('cashbooks')
-          .delete()
-          .in('id', Array.from(selectedBooks))
-          .eq('user_id', session.user.id);
-        if (error) throw error;
-      } catch (error) {
-        console.error('Error bulk deleting books from Supabase:', error);
-      }
-    }
 
-    setBooks(books.filter(b => !selectedBooks.has(b.id)));
+    const booksToDelete = Array.from(selectedBooks).map(id => {
+      const book = books.find(b => b.id === id);
+      return {
+        book,
+        cachedEntries: entriesCache.get(id) || []
+      };
+    }).filter(item => item.book !== undefined);
+
+    const originalIndexes = Array.from(selectedBooks).map(id => {
+      return books.findIndex(b => b.id === id);
+    });
+
+    await handleStartUndoableDelete({
+      type: 'bulk_books',
+      data: booksToDelete,
+      originalIndexes
+    });
+
+    const idsSet = new Set(selectedBooks);
+    setBooks(books.filter(b => !idsSet.has(b.id)));
     setSelectedBooks(new Set());
     setShowBulkDeleteConfirm(false);
   };
@@ -3100,7 +3249,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           mode: finalMode,
           date: dateObj,
           images: selectedImages,
-          imageLayout: imageLayout
+          imageLayout: imageLayout,
+          source: 'Manual'
         };
 
         // Instantly save images in attachmentCache so they persist even if user switches or scrolls immediately
@@ -3118,7 +3268,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           date: dateObj, 
           image_layout: imageLayout,
           user_id: session.user.id,
-          cashbook_id: activeBookId
+          cashbook_id: activeBookId,
+          source: 'Manual'
         }, ...currCached]);
 
         setBooks(prevBooks => prevBooks.map(b => 
@@ -3156,7 +3307,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             description: description,
             category: finalCategory || 'General',
             mode: finalMode,
-            date: safeToISOString(dateObj)
+            date: safeToISOString(dateObj),
+            source: 'Manual'
           };
 
           (async () => {
@@ -3167,11 +3319,13 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 .insert([{ ...payload, image_layout: imageLayout }]);
               
               if (entryError) {
-                if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist')) {
-                  console.warn('[BackgroundSave] image_layout missing in schema, falling back to schema fields only...');
+                if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist') || entryError.message?.includes('column "source" does not exist')) {
+                  console.warn('[BackgroundSave] image_layout or source missing in schema, falling back...');
+                  const fallbackPayload = { ...payload };
+                  delete fallbackPayload.source;
                   const { error: retryError } = await supabase
                     .from('entries')
-                    .insert([payload]);
+                    .insert([fallbackPayload]);
                   if (retryError) throw retryError;
                 } else {
                   throw entryError;
@@ -3223,14 +3377,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     const originalIndex = activeBook?.transactions.findIndex(t => t.id === idToDelete);
 
     if (transactionObj) {
-      setUndoAction({
+      await handleStartUndoableDelete({
         type: 'transaction',
         data: transactionObj,
         originalIndex,
         parentBookId: activeBookId
       });
-      setUndoTimeLeft(8);
-      setShowUndoToast(true);
     }
 
     // Close the confirmation modal to keep UI responsive
@@ -3241,19 +3393,6 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
     // Wait for the animation (300ms)
     await new Promise(resolve => setTimeout(resolve, 300));
-
-    if (supabase) {
-      try {
-        const { error } = await supabase
-          .from('entries')
-          .delete()
-          .eq('id', idToDelete)
-          .eq('user_id', session.user.id);
-        if (error) throw error;
-      } catch (error) {
-        console.error('Error deleting entry from Supabase:', error);
-      }
-    }
 
     // Synchronize entries cache for the active book
     const currCached = entriesCache.get(activeBookId);
@@ -3277,24 +3416,38 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const handleBulkDelete = async () => {
     if (!activeBookId || selectedTransactions.size === 0 || !session) return;
 
-    if (supabase) {
-      try {
-        const { error } = await supabase
-          .from('entries')
-          .delete()
-          .in('id', Array.from(selectedTransactions))
-          .eq('user_id', session.user.id);
-        if (error) throw error;
-      } catch (error) {
-        console.error('Error bulk deleting entries from Supabase:', error);
-      }
+    // Get transactions list to back up before deleting from local state
+    const activeBook = books.find(b => b.id === activeBookId);
+    if (!activeBook) return;
+
+    const txsToDelete = Array.from(selectedTransactions).map(id => {
+      return activeBook.transactions.find(t => t.id === id);
+    }).filter(t => t !== undefined);
+
+    const originalIndexes = Array.from(selectedTransactions).map(id => {
+      return activeBook.transactions.findIndex(t => t.id === id);
+    });
+
+    await handleStartUndoableDelete({
+      type: 'bulk_transactions',
+      data: txsToDelete,
+      originalIndexes,
+      parentBookId: activeBookId
+    });
+
+    // Local filter and state updates
+    const idsSet = new Set(selectedTransactions);
+    const currCached = entriesCache.get(activeBookId);
+    if (currCached) {
+      entriesCache.set(activeBookId, currCached.filter(t => !idsSet.has(t.id)));
     }
 
     setBooks(books.map(b => 
       b.id === activeBookId 
-        ? { ...b, transactions: b.transactions.filter(t => !selectedTransactions.has(t.id)) }
+        ? { ...b, transactions: b.transactions.filter(t => !idsSet.has(t.id)) }
         : b
     ));
+
     setSelectedTransactions(new Set());
     setShowBulkTransactionDeleteConfirm(false);
   };
@@ -3668,7 +3821,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             imported_from_share_code: cleanedCode, // Rule 6
             is_imported: true,
             import_batch_id: cleanedCode,
-            images: t.images || [] // kept in memory for attachments insert
+            images: t.images || [], // kept in memory for attachments insert
+            source: 'Imported'
           });
         }
       }
@@ -3703,7 +3857,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         if (isColumnError) {
           // Rescue Step: Retry without is_imported and import_batch_id first (keep original column set)
           console.log('[Import] Retrying without is_imported and import_batch_id...');
-          const baseInserts = cleanInserts.map(({ is_imported, import_batch_id, ...rest }) => rest);
+          const baseInserts = cleanInserts.map(({ is_imported, import_batch_id, source, ...rest }) => rest);
           const { error: errBase } = await supabase
             .from('entries')
             .insert(baseInserts);
@@ -4289,16 +4443,19 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 description: result.description,
                 category: result.category,
                 mode: 'Online',
-                date: safeToISOString(parseAIDate(result.date))
+                date: safeToISOString(parseAIDate(result.date)),
+                source: 'AI'
               };
 
               // Try with image_layout first
               const { error: entryError } = await supabase.from('entries').insert([{ ...payload, image_layout: 'merge' }]);
               
               if (entryError) {
-                if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist')) {
-                  console.warn('[processFiles] image_layout missing in schema, retrying fallback...');
-                  const { error: retryError } = await supabase.from('entries').insert([payload]);
+                if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist') || entryError.message?.includes('column "source" does not exist')) {
+                  console.warn('[processFiles] image_layout or source missing in schema, retrying fallback...');
+                  const fallbackPayload = { ...payload };
+                  delete fallbackPayload.source;
+                  const { error: retryError } = await supabase.from('entries').insert([fallbackPayload]);
                   if (retryError) throw retryError;
                 } else {
                   throw entryError;
@@ -4342,7 +4499,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               date: parseAIDate(result.date),
               images: cloudinaryUrls,
               isAi: true,
-              imageLayout: 'merge'
+              imageLayout: 'merge',
+              source: 'AI'
             };
             setBooks(prev => prev.map(b => 
               b.id === activeBookId 
@@ -4397,15 +4555,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                         description: result.description,
                         category: result.category,
                         mode: 'Online',
-                        date: safeToISOString(parseAIDate(result.date))
+                        date: safeToISOString(parseAIDate(result.date)),
+                        source: 'AI'
                       };
 
                       // Try with image_layout first
                       const { error: entryError } = await supabase.from('entries').insert([{ ...payload, image_layout: 'split' }]);
                       
                       if (entryError) {
-                        if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist')) {
-                          const { error: retryError } = await supabase.from('entries').insert([payload]);
+                        if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist') || entryError.message?.includes('column "source" does not exist')) {
+                          const fallbackPayload = { ...payload };
+                          delete fallbackPayload.source;
+                          const { error: retryError } = await supabase.from('entries').insert([fallbackPayload]);
                           if (retryError) throw retryError;
                         } else {
                           throw entryError;
@@ -4441,7 +4602,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       date: parseAIDate(result.date),
                       images: [cloudinaryUrl],
                       isAi: true,
-                      imageLayout: 'split'
+                      imageLayout: 'split',
+                      source: 'AI'
                     };
                     setBooks(prev => prev.map(b => 
                       b.id === activeBookId 
@@ -5321,8 +5483,16 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     <motion.div
                       key={book.id}
                       initial={{ opacity: 0, y: 15 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1], delay: Math.min(index * 0.035, 0.3) }}
+                      animate={
+                        justEditedBookId === book.id
+                          ? { scale: [1, 1.05, 1.05, 1], y: 0, opacity: 1 }
+                          : { opacity: 1, y: 0, scale: 1 }
+                      }
+                      transition={
+                        justEditedBookId === book.id
+                          ? { duration: 1.5, times: [0, 0.2, 0.8, 1], ease: "easeInOut" }
+                          : { duration: 0.35, ease: [0.16, 1, 0.3, 1], delay: Math.min(index * 0.035, 0.3) }
+                      }
                       onMouseDown={() => onTouchStartBook(book.id)}
                       onMouseUp={onTouchEndBook}
                       onTouchStart={() => onTouchStartBook(book.id)}
@@ -5330,7 +5500,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       onClick={() => handleBookPress(book.id)}
                       className={cn(
                         "group p-4 sm:p-5 border rounded-2xl sm:rounded-3xl transition-all duration-200 relative overflow-hidden select-none flex items-center justify-between cursor-pointer",
-                        theme === 'dark' ? "bg-zinc-950 border-zinc-800" : "bg-white border-slate-100",
+                        justEditedBookId === book.id
+                          ? (theme === 'dark' ? "bg-indigo-950/40 border-indigo-500 ring-2 ring-indigo-500/20 font-bold" : "bg-indigo-50/50 border-indigo-500 ring-2 ring-indigo-500/30 font-bold")
+                          : theme === 'dark' ? "bg-zinc-950 border-zinc-800" : "bg-white border-slate-100",
                       )}
                     >
                       {selectedBooks.has(book.id) && (
@@ -8281,9 +8453,14 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       ? (showForm === 'in' ? 'Edit Cash In' : 'Edit Cash Out') 
                       : (showForm === 'in' ? 'Add Cash In' : 'Add Cash Out')}
                   </h3>
-                  {editingTransaction && (editingTransaction.imported_from_share_code || editingTransaction.is_imported) && (
+                  {editingTransaction && getTransactionSource(editingTransaction) === 'Imported' && (
                     <span className="text-[9px] sm:text-[10px] font-extrabold text-sky-600 dark:text-sky-400 mt-1 uppercase tracking-widest flex items-center gap-1 bg-sky-50 dark:bg-sky-950/30 px-2.5 py-1 rounded-lg border border-sky-100 dark:border-sky-900/30 w-max select-none">
                       ✓ Imported Entry
+                    </span>
+                  )}
+                  {editingTransaction && getTransactionSource(editingTransaction) === 'AI' && (
+                    <span className="text-[9px] sm:text-[10px] font-extrabold text-amber-600 dark:text-amber-400 mt-1 uppercase tracking-widest flex items-center gap-1 bg-amber-50 dark:bg-amber-950/30 px-2.5 py-1 rounded-lg border border-amber-100 dark:border-amber-900/30 w-max select-none">
+                      <Sparkles size={11} /> AI Generated Entry
                     </span>
                   )}
                 </div>
@@ -9896,75 +10073,60 @@ Open TrackBook → Import Shared Entries`)}`}
                   </div>
                   <div className="space-y-0.5 text-left">
                     <p className="text-xs font-black tracking-wider uppercase text-zinc-400 dark:text-zinc-500">
-                      Deleted {undoAction.type === 'book' ? 'Cashbook' : 'Entry'}
+                      Deleted {undoAction.type.includes('bulk') ? 'Items' : (undoAction.type === 'book' ? 'Cashbook' : 'Entry')}
                     </p>
                     <p className="text-sm font-bold truncate max-w-[180px]">
-                      {undoAction.type === 'book' ? undoAction.data.name : (undoAction.data.description || 'Untitled Entry')}
+                      {undoAction.type === 'book' 
+                        ? (undoAction.data.book?.name || undoAction.data.name) 
+                        : undoAction.type === 'bulk_books' 
+                          ? `${undoAction.data.length} Cashbooks`
+                          : undoAction.type === 'bulk_transactions'
+                            ? `${undoAction.data.length} Entries`
+                            : (undoAction.data.description || 'Untitled Entry')}
                     </p>
                   </div>
                 </div>
 
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={async () => {
+                    onClick={() => {
                       vibrate(40);
-                      // Trigger undo
                       try {
                         if (undoAction.type === 'book') {
-                          // 1. Re-insert book to db in background
-                          if (supabase && session) {
-                            await supabase.from('cashbooks').insert([{
-                              id: undoAction.data.id,
-                              name: undoAction.data.name,
-                              created_at: safeToISOString(undoAction.data.createdAt || new Date()),
-                              user_id: session.user.id
-                            }]);
-
-                            // Re-insert transactions if any
-                            if (undoAction.data.transactions && undoAction.data.transactions.length > 0) {
-                              const payloads = undoAction.data.transactions.map((t: any) => ({
-                                id: t.id,
-                                amount: t.amount,
-                                type: t.type,
-                                description: t.description,
-                                category: t.category,
-                                mode: t.mode,
-                                date: safeToISOString(t.date),
-                                cashbook_id: undoAction.data.id,
-                                user_id: session.user.id
-                              }));
-                              await supabase.from('entries').insert(payloads);
-                            }
-                          }
-
-                          // 2. Put back in local state
+                          // Restore cashbook metadata
                           setBooks(prevBooks => {
                             const next = [...prevBooks];
                             const insertIdx = undoAction.originalIndex !== undefined ? undoAction.originalIndex : next.length;
-                            next.splice(insertIdx, 0, undoAction.data);
+                            next.splice(insertIdx, 0, undoAction.data.book || undoAction.data);
+                            return next;
+                          });
+                          // Restore entries cache
+                          const bookId = undoAction.data.book?.id || undoAction.data.id;
+                          if (undoAction.data.cachedEntries) {
+                            entriesCache.set(bookId, undoAction.data.cachedEntries);
+                          }
+                          // Do NOT navigate or select! Fulfills user requirement of no automatic navigation!
+
+                        } else if (undoAction.type === 'bulk_books') {
+                          setBooks(prevBooks => {
+                            const next = [...prevBooks];
+                            const items = undoAction.data;
+                            const sortedPairs = items.map((item: any, i: number) => ({
+                              item,
+                              index: undoAction.originalIndexes?.[i] ?? next.length
+                            })).sort((a: any, b: any) => a.index - b.index);
+
+                            sortedPairs.forEach((pair: any) => {
+                              next.splice(pair.index, 0, pair.item.book);
+                              if (pair.item.cachedEntries) {
+                                entriesCache.set(pair.item.book.id, pair.item.cachedEntries);
+                              }
+                            });
                             return next;
                           });
 
-                          // Select the restored book
-                          handleSelectBook(undoAction.data.id);
-
-                        } else {
-                          // 1. Re-insert transaction to db in background
-                          if (supabase && session) {
-                            await supabase.from('entries').insert([{
-                              id: undoAction.data.id,
-                              amount: undoAction.data.amount,
-                              type: undoAction.data.type,
-                              description: undoAction.data.description,
-                              category: undoAction.data.category,
-                              mode: undoAction.data.mode,
-                              date: safeToISOString(undoAction.data.date),
-                              cashbook_id: undoAction.parentBookId,
-                              user_id: session.user.id
-                            }]);
-                          }
-
-                          // 2. Put back in local state
+                        } else if (undoAction.type === 'transaction') {
+                          // Put back in active book transactions
                           setBooks(prevBooks => prevBooks.map(b => {
                             if (b.id === undoAction.parentBookId) {
                               const nextTx = [...b.transactions];
@@ -9975,7 +10137,7 @@ Open TrackBook → Import Shared Entries`)}`}
                             return b;
                           }));
 
-                          // 3. Update entries cache
+                          // Update entries cache
                           const cached = entriesCache.get(undoAction.parentBookId || '');
                           if (cached) {
                             const nextCached = [...cached];
@@ -9988,10 +10150,43 @@ Open TrackBook → Import Shared Entries`)}`}
                               mode: undoAction.data.mode,
                               date: undoAction.data.date,
                               cashbook_id: undoAction.parentBookId,
-                              user_id: session.user.id
+                              user_id: session?.user?.id
                             };
                             const insertIdx = undoAction.originalIndex !== undefined ? undoAction.originalIndex : 0;
                             nextCached.splice(insertIdx, 0, entryForCache);
+                            entriesCache.set(undoAction.parentBookId || '', nextCached);
+                          }
+
+                        } else if (undoAction.type === 'bulk_transactions') {
+                          // Put back in active book transactions
+                          setBooks(prevBooks => prevBooks.map(b => {
+                            if (b.id === undoAction.parentBookId) {
+                              const nextTx = [...b.transactions];
+                              const sortedPairs = undoAction.data.map((tx: any, i: number) => ({
+                                tx,
+                                index: undoAction.originalIndexes?.[i] ?? 0
+                              })).sort((a: any, b: any) => a.index - b.index);
+
+                              sortedPairs.forEach((pair: any) => {
+                                nextTx.splice(pair.index, 0, pair.tx);
+                              });
+                              return { ...b, transactions: nextTx };
+                            }
+                            return b;
+                          }));
+
+                          // Update main entries cache
+                          const cached = entriesCache.get(undoAction.parentBookId || '');
+                          if (cached) {
+                            const nextCached = [...cached];
+                            const sortedPairs = undoAction.data.map((tx: any, i: number) => ({
+                              tx,
+                              index: undoAction.originalIndexes?.[i] ?? 0
+                            })).sort((a: any, b: any) => a.index - b.index);
+
+                            sortedPairs.forEach((pair: any) => {
+                              nextCached.splice(pair.index, 0, pair.tx);
+                            });
                             entriesCache.set(undoAction.parentBookId || '', nextCached);
                           }
                         }
@@ -10013,6 +10208,9 @@ Open TrackBook → Import Shared Entries`)}`}
                   </button>
                   <button
                     onClick={() => {
+                      if (undoAction) {
+                        commitPendingDeletion(undoAction);
+                      }
                       setShowUndoToast(false);
                       setUndoAction(null);
                     }}
