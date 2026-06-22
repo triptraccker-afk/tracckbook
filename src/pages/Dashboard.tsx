@@ -556,7 +556,8 @@ const MobileTransactionRow = React.memo(({
   handleEditTransaction,
   handleDeleteTransaction,
   theme,
-  index
+  index,
+  isJustEdited
 }: {
   t: Transaction;
   runningBalance: number;
@@ -575,12 +576,24 @@ const MobileTransactionRow = React.memo(({
   handleDeleteTransaction: (id: string) => void;
   theme: string;
   index: number;
+  isJustEdited?: boolean;
 }) => {
   return (
     <motion.div
+      id={`entry-${t.id}`}
       initial={{ opacity: 0, y: 16 }}
-      animate={isCurrentlyDeleting ? { opacity: 0, x: -100, scale: 0.9, height: 0, margin: 0, padding: 0 } : { opacity: 1, y: 0 }}
-      transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1], delay: Math.min(index * 0.03, 0.35) }}
+      animate={
+        isCurrentlyDeleting 
+          ? { opacity: 0, x: -100, scale: 0.9, height: 0, margin: 0, padding: 0 } 
+          : isJustEdited
+            ? { scale: [1, 1.08, 1.08, 1], y: 0, opacity: 1 }
+            : { opacity: 1, y: 0, scale: 1 }
+      }
+      transition={
+        isJustEdited
+          ? { duration: 1.5, times: [0, 0.2, 0.8, 1], ease: "easeInOut" }
+          : { duration: 0.4, ease: [0.16, 1, 0.3, 1], delay: Math.min(index * 0.03, 0.35) }
+      }
       onMouseDown={() => onTouchStart(t.id)}
       onMouseUp={onTouchEnd}
       onTouchStart={() => onTouchStart(t.id)}
@@ -589,9 +602,11 @@ const MobileTransactionRow = React.memo(({
       className={cn(
         "rounded-[20px] border shadow-sm relative transition-all select-none overflow-hidden hover:scale-[1.005] duration-200 cursor-pointer",
         isCurrentlyDeleting ? "border-transparent bg-transparent" : "p-4.5 sm:p-5",
-        selected
-          ? (theme === 'dark' ? "border-indigo-500 ring-2 ring-indigo-500/40 bg-indigo-950/20" : "border-indigo-500 ring-2 ring-indigo-500/20 bg-indigo-50/20 shadow-md") 
-          : (theme === 'dark' ? "bg-zinc-950 border-zinc-900 hover:border-zinc-800" : "bg-white border-slate-100 hover:border-slate-200")
+        isJustEdited
+          ? (theme === 'dark' ? "border-indigo-500 ring-4 ring-indigo-500/40 bg-indigo-950/30 font-bold" : "border-indigo-500 ring-4 ring-indigo-500/30 bg-indigo-50/40 shadow-xl font-bold")
+          : selected
+            ? (theme === 'dark' ? "border-indigo-500 ring-2 ring-indigo-500/40 bg-indigo-950/20" : "border-indigo-500 ring-2 ring-indigo-500/20 bg-indigo-50/20 shadow-md") 
+            : (theme === 'dark' ? "bg-zinc-950 border-zinc-900 hover:border-zinc-800" : "bg-white border-slate-100 hover:border-slate-200")
       )}
     >
       <div className="flex justify-between items-center gap-3 mb-3">
@@ -791,7 +806,8 @@ const DesktopTransactionRow = React.memo(({
   setPreviewRotation,
   setPreviewZoom,
   theme,
-  index
+  index,
+  isJustEdited
 }: {
   t: Transaction;
   runningBalance: number;
@@ -808,15 +824,29 @@ const DesktopTransactionRow = React.memo(({
   setPreviewZoom: (zoom: number) => void;
   theme: string;
   index: number;
+  isJustEdited?: boolean;
 }) => {
   return (
     <motion.tr 
+      id={`entry-${t.id}`}
       initial={{ opacity: 0, y: 12 }}
-      animate={isCurrentlyDeleting ? { opacity: 0, x: -50, scale: 0.95 } : { opacity: 1, x: 0, scale: 1, y: 0 }}
-      transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1], delay: Math.min(index * 0.03, 0.35) }}
+      animate={
+        isCurrentlyDeleting 
+          ? { opacity: 0, x: -50, scale: 0.95 } 
+          : isJustEdited
+            ? { scale: [1, 1.05, 1.05, 1], y: 0, opacity: 1 }
+            : { opacity: 1, x: 0, scale: 1, y: 0 }
+      }
+      transition={
+        isJustEdited
+          ? { duration: 1.5, times: [0, 0.2, 0.8, 1], ease: "easeInOut" }
+          : { duration: 0.35, ease: [0.16, 1, 0.3, 1], delay: Math.min(index * 0.03, 0.35) }
+      }
       className={cn(
-        "group transition-colors",
-        theme === 'dark' ? "hover:bg-slate-800/30" : "hover:bg-slate-50/50",
+        "group transition-all",
+        isJustEdited
+          ? (theme === 'dark' ? "bg-indigo-950/40 border-l-4 border-indigo-500 font-bold" : "bg-indigo-50/50 border-l-4 border-indigo-500 font-bold")
+          : theme === 'dark' ? "hover:bg-slate-800/30" : "hover:bg-slate-50/50",
         selected && (theme === 'dark' ? "bg-indigo-900/10" : "bg-indigo-50/50"),
         isCurrentlyDeleting && "pointer-events-none opacity-50"
       )}
@@ -1493,6 +1523,43 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [importSummary, setImportSummary] = useState('');
   const [transactionSearchQuery, setTransactionSearchQuery] = useState('');
   const [transactionSearchQueryInput, setTransactionSearchQueryInput] = useState('');
+
+  // Highlights and Undo manager states
+  const [justEditedTransactionId, setJustEditedTransactionId] = useState<string | null>(null);
+  const [undoAction, setUndoAction] = useState<{
+    type: 'book' | 'transaction';
+    data: any;
+    originalIndex?: number;
+    parentBookId?: string;
+  } | null>(null);
+  const [showUndoToast, setShowUndoToast] = useState(false);
+  const [undoTimeLeft, setUndoTimeLeft] = useState(8);
+
+  // Lock body scroll when transaction form is visible (prevents underlying scroll)
+  useEffect(() => {
+    if (showForm) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, [showForm]);
+
+  // Undo Timer Countdown logic
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (showUndoToast && undoTimeLeft > 0) {
+      timer = setTimeout(() => {
+        setUndoTimeLeft(prev => prev - 1);
+      }, 1000);
+    } else if (showUndoToast && undoTimeLeft === 0) {
+      setShowUndoToast(false);
+      setUndoAction(null);
+    }
+    return () => clearTimeout(timer);
+  }, [showUndoToast, undoTimeLeft]);
 
   // Debounce logic for active book transaction search
   useEffect(() => {
@@ -2751,6 +2818,19 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
   const confirmDeleteBook = async () => {
     if (deleteConfirmId && session) {
+      const bookToDeleteObj = books.find(b => b.id === deleteConfirmId);
+      const originalIndex = books.findIndex(b => b.id === deleteConfirmId);
+
+      if (bookToDeleteObj) {
+        setUndoAction({
+          type: 'book',
+          data: bookToDeleteObj,
+          originalIndex
+        });
+        setUndoTimeLeft(8);
+        setShowUndoToast(true);
+      }
+
       if (supabase) {
         try {
           const { error } = await supabase
@@ -2932,11 +3012,21 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             : b
         ));
 
+        const savedId = editingTransaction.id;
         // Let form shut down instantly!
         setShowForm(null);
         setEditingTransaction(null);
         resetForm();
         setIsSubmitting(false);
+
+        // Scroll to and highlight the edited transaction
+        setTimeout(() => {
+          setJustEditedTransactionId(savedId);
+          document.getElementById(`entry-${savedId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setTimeout(() => {
+            setJustEditedTransactionId(null);
+          }, 2000);
+        }, 150);
 
         // Run direct database updates on textual metadata in background
         if (supabase) {
@@ -3126,6 +3216,22 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     if (!activeBookId || !transactionToDelete || !session) return;
 
     const idToDelete = transactionToDelete;
+
+    // Get the transaction object to back up before deleting from local state
+    const activeBook = books.find(b => b.id === activeBookId);
+    const transactionObj = activeBook?.transactions.find(t => t.id === idToDelete);
+    const originalIndex = activeBook?.transactions.findIndex(t => t.id === idToDelete);
+
+    if (transactionObj) {
+      setUndoAction({
+        type: 'transaction',
+        data: transactionObj,
+        originalIndex,
+        parentBookId: activeBookId
+      });
+      setUndoTimeLeft(8);
+      setShowUndoToast(true);
+    }
 
     // Close the confirmation modal to keep UI responsive
     setTransactionToDelete(null);
@@ -5828,6 +5934,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                                   setPreviewZoom={setPreviewZoom}
                                   theme={theme}
                                   index={visibleSlice.indexOf(t)}
+                                  isJustEdited={justEditedTransactionId === t.id}
                                 />
                               ))}
                             </div>
@@ -5964,6 +6071,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                                   setPreviewZoom={setPreviewZoom}
                                   theme={theme}
                                   index={index}
+                                  isJustEdited={justEditedTransactionId === t.id}
                                 />
                               ))}
                               {desktopPaddingBottom > 0 && (
@@ -9759,6 +9867,168 @@ Open TrackBook → Import Shared Entries`)}`}
           }
         }}
       />
+
+      {/* Premium Undo Toast Overlay */}
+      <AnimatePresence>
+        {showUndoToast && undoAction && (
+          <motion.div
+            initial={{ opacity: 0, y: 50, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.95 }}
+            className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[200] w-[calc(100%-2rem)] max-w-sm"
+          >
+            <div className={cn(
+              "rounded-2xl border p-4.5 shadow-2xl flex flex-col gap-3 relative overflow-hidden transition-all duration-300",
+              theme === 'dark' 
+                ? "bg-zinc-950/95 border-zinc-800 text-white backdrop-blur-md" 
+                : "bg-white/95 border-slate-200 text-slate-800 backdrop-blur-md shadow-indigo-150"
+            )}>
+              {/* Top border animated indicator */}
+              <div className="absolute top-0 left-0 h-[3px] bg-indigo-600 transition-all duration-1000" style={{ width: `${(undoTimeLeft / 8) * 100}%` }} />
+              
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className={cn(
+                    "p-2.5 rounded-xl shrink-0 flex items-center justify-center",
+                    theme === 'dark' ? "bg-red-950/40 text-rose-400" : "bg-rose-50 text-rose-600"
+                  )}>
+                    <Trash2 size={18} className="animate-pulse" />
+                  </div>
+                  <div className="space-y-0.5 text-left">
+                    <p className="text-xs font-black tracking-wider uppercase text-zinc-400 dark:text-zinc-500">
+                      Deleted {undoAction.type === 'book' ? 'Cashbook' : 'Entry'}
+                    </p>
+                    <p className="text-sm font-bold truncate max-w-[180px]">
+                      {undoAction.type === 'book' ? undoAction.data.name : (undoAction.data.description || 'Untitled Entry')}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={async () => {
+                      vibrate(40);
+                      // Trigger undo
+                      try {
+                        if (undoAction.type === 'book') {
+                          // 1. Re-insert book to db in background
+                          if (supabase && session) {
+                            await supabase.from('cashbooks').insert([{
+                              id: undoAction.data.id,
+                              name: undoAction.data.name,
+                              created_at: safeToISOString(undoAction.data.createdAt || new Date()),
+                              user_id: session.user.id
+                            }]);
+
+                            // Re-insert transactions if any
+                            if (undoAction.data.transactions && undoAction.data.transactions.length > 0) {
+                              const payloads = undoAction.data.transactions.map((t: any) => ({
+                                id: t.id,
+                                amount: t.amount,
+                                type: t.type,
+                                description: t.description,
+                                category: t.category,
+                                mode: t.mode,
+                                date: safeToISOString(t.date),
+                                cashbook_id: undoAction.data.id,
+                                user_id: session.user.id
+                              }));
+                              await supabase.from('entries').insert(payloads);
+                            }
+                          }
+
+                          // 2. Put back in local state
+                          setBooks(prevBooks => {
+                            const next = [...prevBooks];
+                            const insertIdx = undoAction.originalIndex !== undefined ? undoAction.originalIndex : next.length;
+                            next.splice(insertIdx, 0, undoAction.data);
+                            return next;
+                          });
+
+                          // Select the restored book
+                          handleSelectBook(undoAction.data.id);
+
+                        } else {
+                          // 1. Re-insert transaction to db in background
+                          if (supabase && session) {
+                            await supabase.from('entries').insert([{
+                              id: undoAction.data.id,
+                              amount: undoAction.data.amount,
+                              type: undoAction.data.type,
+                              description: undoAction.data.description,
+                              category: undoAction.data.category,
+                              mode: undoAction.data.mode,
+                              date: safeToISOString(undoAction.data.date),
+                              cashbook_id: undoAction.parentBookId,
+                              user_id: session.user.id
+                            }]);
+                          }
+
+                          // 2. Put back in local state
+                          setBooks(prevBooks => prevBooks.map(b => {
+                            if (b.id === undoAction.parentBookId) {
+                              const nextTx = [...b.transactions];
+                              const insertIdx = undoAction.originalIndex !== undefined ? undoAction.originalIndex : 0;
+                              nextTx.splice(insertIdx, 0, undoAction.data);
+                              return { ...b, transactions: nextTx };
+                            }
+                            return b;
+                          }));
+
+                          // 3. Update entries cache
+                          const cached = entriesCache.get(undoAction.parentBookId || '');
+                          if (cached) {
+                            const nextCached = [...cached];
+                            const entryForCache = {
+                              id: undoAction.data.id,
+                              amount: undoAction.data.amount,
+                              type: undoAction.data.type,
+                              description: undoAction.data.description,
+                              category: undoAction.data.category,
+                              mode: undoAction.data.mode,
+                              date: undoAction.data.date,
+                              cashbook_id: undoAction.parentBookId,
+                              user_id: session.user.id
+                            };
+                            const insertIdx = undoAction.originalIndex !== undefined ? undoAction.originalIndex : 0;
+                            nextCached.splice(insertIdx, 0, entryForCache);
+                            entriesCache.set(undoAction.parentBookId || '', nextCached);
+                          }
+                        }
+                      } catch (err) {
+                        console.error('Error undoing deletion:', err);
+                      } finally {
+                        setShowUndoToast(false);
+                        setUndoAction(null);
+                      }
+                    }}
+                    className={cn(
+                      "px-3 py-1.5 rounded-lg text-xs font-black tracking-wider uppercase transition-all duration-200 shadow-sm grow-0 shrink-0 cursor-pointer",
+                      theme === 'dark' 
+                        ? "bg-indigo-600 hover:bg-indigo-500 text-white" 
+                        : "bg-indigo-600 hover:bg-indigo-700 text-white"
+                    )}
+                  >
+                    UNDO
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowUndoToast(false);
+                      setUndoAction(null);
+                    }}
+                    className={cn(
+                      "p-1.5 rounded-lg transition-colors duration-200 shrink-0 cursor-pointer",
+                      theme === 'dark' ? "hover:bg-slate-800 text-slate-400" : "hover:bg-slate-100 text-slate-500"
+                    )}
+                  >
+                    <X size={15} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
