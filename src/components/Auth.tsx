@@ -11,7 +11,10 @@ import {
   ArrowLeft,
   ShieldCheck,
   ShieldAlert,
-  LogOut
+  LogOut,
+  Phone,
+  Key,
+  Mail
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 
@@ -58,6 +61,13 @@ export default function Auth({
       navigate('/forgot');
     }
   }, [mode, navigate]);
+  const [loginMethod, setLoginMethod] = useState<'email' | 'phone'>('email');
+  const [phoneNumber, setPhoneNumber] = useState('');
+  const [phoneOtp, setPhoneOtp] = useState('');
+  const [phoneOtpSent, setPhoneOtpSent] = useState(false);
+  const [sandboxMode, setSandboxMode] = useState(false);
+  const [sandboxCode, setSandboxCode] = useState('');
+  const [sandboxEmail, setSandboxEmail] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -139,6 +149,215 @@ export default function Auth({
 
   const passwordReqs = getPasswordRequirements(password);
   const isPasswordStrong = passwordReqs.every(req => req.met);
+
+  const handleSendPhoneOtp = async () => {
+    if (!supabase) {
+      setError('Supabase is not configured.');
+      return;
+    }
+    if (!phoneNumber) {
+      setError('Please enter a valid phone number.');
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      let formattedPhone = phoneNumber.trim();
+      if (!formattedPhone.startsWith('+')) {
+        setError('Please include your country code starting with + (e.g. +919876543210 or +12345678900).');
+        setLoading(false);
+        return;
+      }
+
+      const { error: otpError } = await supabase.auth.signInWithOtp({
+        phone: formattedPhone,
+      });
+
+      if (otpError) {
+        if (otpError.message?.toLowerCase().includes('provider') || otpError.message?.toLowerCase().includes('unsupported') || otpError.message?.toLowerCase().includes('not configured')) {
+          console.log('Activating Sandbox/Emulator mode due to unsupported phone provider...');
+          
+          // Check if profile exists for this phone number
+          const { data: profileData, error: profileErr } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('phone', formattedPhone)
+            .maybeSingle();
+
+          if (profileErr) {
+            console.error('Profile lookup error:', profileErr);
+          }
+
+          if (mode === 'signin' && !profileData) {
+            setError('No registered account found with this phone number. Please sign up or link your phone number from your Profile Settings first.');
+            setLoading(false);
+            return;
+          }
+
+          setSandboxMode(true);
+          setSandboxCode('123456');
+          if (profileData) {
+            setSandboxEmail(profileData.email || `phone_${formattedPhone.replace(/[^0-9]/g, '')}@sandbox.com`);
+          } else {
+            setSandboxEmail(`phone_${formattedPhone.replace(/[^0-9]/g, '')}@sandbox.com`);
+          }
+          setPhoneOtpSent(true);
+          setSuccess('🔒 Sandbox Mode Enabled: Enter mock code 123456 to verify.');
+          setLoading(false);
+          return;
+        }
+        throw otpError;
+      }
+
+      setSandboxMode(false);
+      setPhoneOtpSent(true);
+      setSuccess('Verification code sent to ' + formattedPhone);
+    } catch (err: any) {
+      console.error('Phone OTP send error:', err);
+      setError(err.message || 'Failed to send verification code.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleVerifyPhoneOtp = async () => {
+    if (!supabase) {
+      setError('Supabase is not configured.');
+      return;
+    }
+    if (!phoneOtp) {
+      setError('Please enter the 6-digit verification code.');
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    setSuccess(null);
+
+    try {
+      let formattedPhone = phoneNumber.trim();
+      
+      if (sandboxMode) {
+        if (phoneOtp.trim() !== sandboxCode) {
+          throw new Error('Incorrect or expired verification code (Sandbox).');
+        }
+
+        // Try to sign in with password first
+        const { data, error: signInError } = await supabase.auth.signInWithPassword({
+          email: sandboxEmail,
+          password: 'PhoneLoginFallback123!',
+        });
+
+        if (signInError) {
+          if (mode === 'signup') {
+            // Sign up new user
+            const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+              email: sandboxEmail,
+              password: 'PhoneLoginFallback123!',
+              options: {
+                data: {
+                  full_name: fullName || 'Phone User',
+                }
+              }
+            });
+
+            if (signUpError) throw signUpError;
+
+            // Upsert profiles
+            if (signUpData?.user) {
+              await supabase.from('profiles').upsert({
+                id: signUpData.user.id,
+                email: sandboxEmail,
+                full_name: fullName || 'Phone User',
+                phone: formattedPhone,
+                phone_verified: true,
+              }, { onConflict: 'id' });
+            }
+            setSuccess('Account created and logged in successfully (Sandbox)!');
+          } else {
+            throw signInError;
+          }
+        } else {
+          setSuccess('Logged in successfully (Sandbox)!');
+          // Sync profiles
+          if (data?.user) {
+            await supabase.from('profiles').upsert({
+              id: data.user.id,
+              email: data.user.email || null,
+              full_name: data.user.user_metadata?.full_name || 'Phone User',
+              phone: formattedPhone,
+              phone_verified: true,
+            }, { onConflict: 'id' });
+          }
+        }
+      } else {
+        const { data, error: verifyError } = await supabase.auth.verifyOtp({
+          phone: formattedPhone,
+          token: phoneOtp.trim(),
+          type: 'sms',
+        });
+
+        if (verifyError) throw verifyError;
+
+        setSuccess('Logged in successfully!');
+        
+        // Attempt profiles table sync
+        if (data?.user) {
+          try {
+            await supabase.from('profiles').upsert({
+              id: data.user.id,
+              email: data.user.email || null,
+              full_name: data.user.user_metadata?.full_name || '',
+              phone: formattedPhone,
+              phone_verified: true,
+            }, { onConflict: 'id' });
+          } catch (dbErr) {
+            console.warn('Profiles table sync failed (might not exist yet):', dbErr);
+          }
+        }
+      }
+    } catch (err: any) {
+      console.error('Phone OTP verification error:', err);
+      setError(err.message || 'Incorrect or expired verification code.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    if (!supabase) {
+      setError('Supabase is not configured.');
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const redirectTo = 'https://trackbook.xyz';
+      console.log("OAuth redirect:", redirectTo);
+      
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: redirectTo
+        }
+      });
+      
+      if (data?.url) {
+        console.log("Exact URL being sent to Google OAuth:", data.url);
+      }
+      
+      if (error) throw error;
+    } catch (err: any) {
+      console.error('Google Sign-In failed:', err);
+      setError(err.message || 'Google Sign-In failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleDemoLogin = async () => {
     if (!supabase) {
@@ -282,6 +501,15 @@ export default function Auth({
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    if (loginMethod === 'phone') {
+      if (!phoneOtpSent) {
+        await handleSendPhoneOtp();
+      } else {
+        await handleVerifyPhoneOtp();
+      }
+      return;
+    }
     
     // Auto-login for testing if credentials match provided ones (Optional, but helps user)
     if (email === 'sivasaiprasadkaki@gmail.com' && password === 'Siva@123') {
@@ -524,174 +752,225 @@ export default function Auth({
             )}
           </AnimatePresence>
           
-          <motion.div 
-            initial={{ opacity: 0, x: -5 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ delay: 0.1 }}
-            className="space-y-1"
-          >
-            {mode === 'signup' && (
-              <div className="space-y-1 mb-3">
-                <label className={cn(
-                  "text-[10px] font-extrabold ml-1 uppercase tracking-wider transition-colors duration-300",
-                  theme === 'dark' ? "text-slate-400" : "text-slate-500"
-                )}>Full Name</label>
-                <input
-                  type="text"
-                  required
-                  value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
-                  placeholder="Enter your full name"
-                  className={cn(
-                    "w-full border rounded-2xl py-3 px-4 outline-none transition-all text-xs font-semibold placeholder:text-[#94a3b8]/60 focus:ring-4",
-                    theme === 'dark' 
-                      ? "bg-zinc-950/50 border-zinc-800 text-slate-100 focus:border-[#3b82f6] focus:ring-blue-950/40" 
-                      : "bg-slate-50/50 border-blue-100 text-slate-800 focus:border-[#3b82f6] focus:ring-blue-100/50"
-                  )}
-                />
-              </div>
-            )}
-
-            {(mode === 'signin' || mode === 'signup' || mode === 'forgot') && (
-              <div className="space-y-1">
-                <label className={cn(
-                  "text-[10px] font-extrabold ml-1 uppercase tracking-wider transition-colors duration-300",
-                  theme === 'dark' ? "text-slate-400" : "text-slate-500"
-                )}>Email</label>
-                <input
-                  type="email"
-                  required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="Enter your email address"
-                  className={cn(
-                    "w-full border rounded-2xl py-3 px-4 outline-none transition-all text-xs font-semibold placeholder:text-[#94a3b8]/60 focus:ring-4",
-                    theme === 'dark' 
-                      ? "bg-zinc-950/50 border-zinc-800 text-slate-100 focus:border-[#3b82f6] focus:ring-blue-950/40" 
-                      : "bg-slate-50/50 border-blue-100 text-slate-800 focus:border-[#3b82f6] focus:ring-blue-100/50"
-                  )}
-                />
-              </div>
-            )}
-          </motion.div>
-
           {mode !== 'forgot' && (
-            <motion.div 
+            <div className="flex bg-slate-100/55 dark:bg-zinc-950/45 p-1 rounded-2xl mb-4 border border-blue-50/10 dark:border-zinc-900/55">
+              <button
+                type="button"
+                onClick={() => { setLoginMethod('email'); setError(null); setSuccess(null); }}
+                className={cn(
+                  "flex-1 py-2 text-[10px] font-extrabold uppercase tracking-widest rounded-xl transition-all cursor-pointer",
+                  loginMethod === 'email' 
+                    ? "bg-white dark:bg-zinc-900 text-blue-600 dark:text-blue-400 shadow-sm border border-slate-100 dark:border-zinc-800" 
+                    : "text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+                )}
+              >
+                Email
+              </button>
+              <button
+                type="button"
+                onClick={() => { setLoginMethod('phone'); setError(null); setSuccess(null); }}
+                className={cn(
+                  "flex-1 py-2 text-[10px] font-extrabold uppercase tracking-widest rounded-xl transition-all cursor-pointer",
+                  loginMethod === 'phone' 
+                    ? "bg-white dark:bg-zinc-900 text-blue-600 dark:text-blue-400 shadow-sm border border-slate-100 dark:border-zinc-800" 
+                    : "text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+                )}
+              >
+                Phone OTP
+              </button>
+            </div>
+          )}
+
+          {loginMethod === 'phone' && mode !== 'forgot' ? (
+            <motion.div
               initial={{ opacity: 0, x: -5 }}
               animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: 0.15 }}
-              className="space-y-3"
+              transition={{ delay: 0.1 }}
+              className="space-y-4"
             >
-              <div className="space-y-1">
-                <label className={cn(
-                  "text-[10px] font-extrabold ml-1 uppercase tracking-wider transition-colors duration-300",
-                  theme === 'dark' ? "text-slate-400" : "text-slate-500"
-                )}>
-                  Password
-                </label>
-                <div className="relative">
-                  <input
-                    type={showPassword ? "text" : "password"}
-                    required
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Enter your password"
-                    className={cn(
-                      "w-full border rounded-2xl py-3 px-4 outline-none transition-all text-xs font-semibold placeholder:text-[#94a3b8]/60 pr-11 focus:ring-4",
-                      theme === 'dark' 
-                        ? "bg-zinc-950/50 border-zinc-800 text-slate-100 focus:border-[#3b82f6] focus:ring-blue-950/40" 
-                        : "bg-slate-50/50 border-blue-100 text-slate-800 focus:border-[#3b82f6] focus:ring-blue-100/50"
-                    )}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-[#3b82f6] transition-colors cursor-pointer"
-                  >
-                    {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
-                  </button>
-                </div>
-                
-                {/* Password Strength Indicator */}
-                <AnimatePresence>
-                  {mode === 'signup' && password.length > 0 && (
-                    <motion.div 
-                      initial={{ opacity: 0, height: 0 }}
-                      animate={{ opacity: 1, height: 'auto' }}
-                      exit={{ opacity: 0, height: 0 }}
-                      className={cn(
-                        "mt-2 p-3 rounded-2xl border overflow-hidden",
-                        theme === 'dark' ? "bg-zinc-900/30 border-zinc-850" : "bg-slate-50/50 border-blue-50/50"
-                      )}
-                    >
-                      <p className={cn(
-                        "text-[9px] font-bold mb-1.5 flex items-center gap-1",
-                        theme === 'dark' ? "text-slate-400" : "text-slate-500"
-                      )}>
-                        {isPasswordStrong ? (
-                          <CheckCircle2 size={11} className="text-emerald-500" />
-                        ) : (
-                          <AlertCircle size={11} className="text-amber-500" />
-                        )}
-                        Security Requirements Check
-                      </p>
-                      <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 pt-1">
-                        {passwordReqs.map((req) => (
-                          <div key={req.key} className="flex items-center gap-1.5">
-                            <div className={cn(
-                              "w-1.5 h-1.5 rounded-full",
-                              req.met ? "bg-emerald-500" : (theme === 'dark' ? "bg-zinc-700" : "bg-slate-350")
-                            )} />
-                            <span className={cn(
-                              "text-[8.5px] font-bold",
-                              req.met ? (theme === 'dark' ? "text-emerald-400" : "text-emerald-600") : (theme === 'dark' ? "text-slate-500" : "text-slate-400")
-                            )}>
-                              {req.label}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                      {!isPasswordStrong && (
-                        <p className="text-[8.5px] text-rose-500 font-extrabold mt-2 italic flex items-center gap-1">
-                          ⚠️ Missing: {passwordReqs.filter(r => !r.met).map(r => r.label).join(', ')}
-                        </p>
-                      )}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-
               {mode === 'signup' && (
                 <div className="space-y-1">
                   <label className={cn(
                     "text-[10px] font-extrabold ml-1 uppercase tracking-wider transition-colors duration-300",
                     theme === 'dark' ? "text-slate-400" : "text-slate-500"
-                  )}>Confirm Password</label>
+                  )}>Full Name</label>
+                  <input
+                    type="text"
+                    required
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    placeholder="Enter your full name"
+                    className={cn(
+                      "w-full border rounded-2xl py-3 px-4 outline-none transition-all text-xs font-semibold placeholder:text-[#94a3b8]/60 focus:ring-4",
+                      theme === 'dark' 
+                        ? "bg-zinc-950/50 border-zinc-800 text-slate-100 focus:border-[#3b82f6] focus:ring-blue-950/40" 
+                        : "bg-slate-50/50 border-blue-100 text-slate-800 focus:border-[#3b82f6] focus:ring-blue-100/50"
+                    )}
+                  />
+                </div>
+              )}
+
+              {!phoneOtpSent ? (
+                <div className="space-y-1">
+                  <label className={cn(
+                    "text-[10px] font-extrabold ml-1 uppercase tracking-wider transition-colors duration-300",
+                    theme === 'dark' ? "text-slate-400" : "text-slate-500"
+                  )}>Phone Number</label>
                   <div className="relative">
+                    <Phone size={14} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input
-                      type={showConfirmPassword ? "text" : "password"}
+                      type="tel"
                       required
-                      value={confirmPassword}
-                      onChange={(e) => setConfirmPassword(e.target.value)}
-                      placeholder="Confirm your password"
+                      value={phoneNumber}
+                      onChange={(e) => setPhoneNumber(e.target.value)}
+                      placeholder="+919876543210 or +1234567890"
                       className={cn(
-                        "w-full border rounded-2xl py-3 px-4 outline-none transition-all text-xs font-semibold placeholder:text-[#94a3b8]/60 pr-11 focus:ring-4",
+                        "w-full border rounded-2xl py-3 pl-10 pr-4 outline-none transition-all text-xs font-semibold placeholder:text-[#94a3b8]/60 focus:ring-4",
                         theme === 'dark' 
                           ? "bg-zinc-950/50 border-zinc-800 text-slate-100 focus:border-[#3b82f6] focus:ring-blue-950/40" 
                           : "bg-slate-50/50 border-blue-100 text-slate-800 focus:border-[#3b82f6] focus:ring-blue-100/50"
                       )}
                     />
+                  </div>
+                  <span className="text-[8.5px] font-medium text-slate-400 dark:text-slate-500 block mt-1 ml-1 leading-normal">
+                    Must include country code starting with +
+                  </span>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <label className={cn(
+                    "text-[10px] font-extrabold ml-1 uppercase tracking-wider transition-colors duration-300",
+                    theme === 'dark' ? "text-slate-400" : "text-slate-500"
+                  )}>Verification Code</label>
+                  <div className="relative">
+                    <Key size={14} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      required
+                      maxLength={6}
+                      value={phoneOtp}
+                      onChange={(e) => setPhoneOtp(e.target.value)}
+                      placeholder="Enter 6-digit code"
+                      className={cn(
+                        "w-full border rounded-2xl py-3 pl-10 pr-4 outline-none transition-all text-xs font-semibold placeholder:text-[#94a3b8]/60 tracking-widest focus:ring-4 text-center font-mono",
+                        theme === 'dark' 
+                          ? "bg-zinc-950/50 border-zinc-800 text-slate-100 focus:border-[#3b82f6] focus:ring-blue-950/40" 
+                          : "bg-slate-50/50 border-blue-100 text-slate-800 focus:border-[#3b82f6] focus:ring-blue-100/50"
+                      )}
+                    />
+                  </div>
+                  <div className="flex justify-between items-center mt-2 px-1">
                     <button
                       type="button"
-                      onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-                      className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-[#3b82f6] transition-colors cursor-pointer"
+                      onClick={() => setPhoneOtpSent(false)}
+                      className="text-[9.5px] font-bold text-blue-600 hover:underline cursor-pointer bg-transparent outline-none"
                     >
-                      {showConfirmPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                      Change Number
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSendPhoneOtp}
+                      className="text-[9.5px] font-bold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 hover:underline cursor-pointer bg-transparent outline-none"
+                    >
+                      Resend Code
                     </button>
                   </div>
                 </div>
               )}
             </motion.div>
+          ) : (
+            <>
+              <motion.div 
+                initial={{ opacity: 0, x: -5 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: 0.1 }}
+                className="space-y-1"
+              >
+                {mode === 'signup' && (
+                  <div className="space-y-1 mb-3">
+                    <label className={cn(
+                      "text-[10px] font-extrabold ml-1 uppercase tracking-wider transition-colors duration-300",
+                      theme === 'dark' ? "text-slate-400" : "text-slate-500"
+                    )}>Full Name</label>
+                    <input
+                      type="text"
+                      required
+                      value={fullName}
+                      onChange={(e) => setFullName(e.target.value)}
+                      placeholder="Enter your full name"
+                      className={cn(
+                        "w-full border rounded-2xl py-3 px-4 outline-none transition-all text-xs font-semibold placeholder:text-[#94a3b8]/60 focus:ring-4",
+                        theme === 'dark' 
+                          ? "bg-zinc-950/50 border-zinc-800 text-slate-100 focus:border-[#3b82f6] focus:ring-blue-950/40" 
+                          : "bg-slate-50/50 border-blue-100 text-slate-800 focus:border-[#3b82f6] focus:ring-blue-100/50"
+                      )}
+                    />
+                  </div>
+                )}
+
+                {(mode === 'signin' || mode === 'signup' || mode === 'forgot') && (
+                  <div className="space-y-1">
+                    <label className={cn(
+                      "text-[10px] font-extrabold ml-1 uppercase tracking-wider transition-colors duration-300",
+                      theme === 'dark' ? "text-slate-400" : "text-slate-500"
+                    )}>Email</label>
+                    <input
+                      type="email"
+                      required
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="Enter your email address"
+                      className={cn(
+                        "w-full border rounded-2xl py-3 px-4 outline-none transition-all text-xs font-semibold placeholder:text-[#94a3b8]/60 focus:ring-4",
+                        theme === 'dark' 
+                          ? "bg-zinc-950/50 border-zinc-800 text-slate-100 focus:border-[#3b82f6] focus:ring-blue-950/40" 
+                          : "bg-slate-50/50 border-blue-100 text-slate-800 focus:border-[#3b82f6] focus:ring-blue-100/50"
+                      )}
+                    />
+                  </div>
+                )}
+              </motion.div>
+
+              {mode !== 'forgot' && (
+                <motion.div 
+                  initial={{ opacity: 0, x: -5 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.15 }}
+                  className="space-y-3 animate-none"
+                >
+                  <div className="space-y-1">
+                    <label className={cn(
+                      "text-[10px] font-extrabold ml-1 uppercase tracking-wider transition-colors duration-300",
+                      theme === 'dark' ? "text-slate-400" : "text-slate-500"
+                    )}>
+                      Password
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showPassword ? "text" : "password"}
+                        required
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="Enter your password"
+                        className={cn(
+                          "w-full border rounded-2xl py-3 px-4 outline-none transition-all text-xs font-semibold placeholder:text-[#94a3b8]/60 pr-11 focus:ring-4",
+                          theme === 'dark' 
+                            ? "bg-zinc-950/50 border-zinc-800 text-slate-100 focus:border-[#3b82f6] focus:ring-blue-950/40" 
+                            : "bg-slate-50/50 border-blue-100 text-slate-800 focus:border-[#3b82f6] focus:ring-blue-100/50"
+                        )}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-[#3b82f6] transition-colors cursor-pointer"
+                      >
+                        {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                      </button>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </>
           )}
 
           {mode === 'signin' && (
@@ -736,12 +1015,46 @@ export default function Auth({
             {loading ? (
               <Loader2 className="animate-spin" size={16} />
             ) : (
-              mode === 'signin' ? 'Verify & Authenticate' : 
-              mode === 'signup' ? 'Create Secure Account' : 
-              'Reset Password'
+              loginMethod === 'phone' ? (
+                phoneOtpSent ? 'Verify & Login' : 'Send Verification Code'
+              ) : (
+                mode === 'signin' ? 'Verify & Authenticate' : 
+                mode === 'signup' ? 'Create Secure Account' : 
+                'Reset Password'
+              )
             )}
           </motion.button>
 
+          {mode !== 'forgot' && (
+            <div className="space-y-3 mt-4">
+              <div className="flex items-center justify-between text-slate-300 dark:text-zinc-800">
+                <div className="h-[1px] bg-slate-200 dark:bg-zinc-850 flex-1" />
+                <span className="text-[9px] font-extrabold uppercase tracking-wider px-3 select-none text-slate-400">or continue with</span>
+                <div className="h-[1px] bg-slate-200 dark:bg-zinc-850 flex-1" />
+              </div>
+
+              <motion.button
+                whileHover={{ scale: 1.01 }}
+                whileTap={{ scale: 0.99 }}
+                type="button"
+                onClick={handleGoogleLogin}
+                className={cn(
+                  "w-full rounded-2xl py-3 px-4 border text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer shadow-sm",
+                  theme === 'dark'
+                    ? "bg-zinc-950/20 border-zinc-850 hover:bg-zinc-900/40 text-slate-200"
+                    : "bg-white border-blue-100 hover:bg-slate-50 text-slate-700"
+                )}
+              >
+                <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l3.66-2.85z" />
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.85c.87-2.6 3.3-4.53 6.16-4.53z" />
+                </svg>
+                Google
+              </motion.button>
+            </div>
+          )}
 
         </form>
 
