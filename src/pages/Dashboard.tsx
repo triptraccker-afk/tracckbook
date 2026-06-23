@@ -59,7 +59,8 @@ import {
   Camera,
   Phone,
   CheckCircle2,
-  Mail
+  Mail,
+  Lock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -75,6 +76,8 @@ import html2canvas from 'html2canvas';
 import { backgroundExportManager } from '../services/exportManager';
 import DownloadCenter, { DownloadCenterTrigger } from '../components/DownloadCenter';
 import MediaPickerSheet from '../components/MediaPickerSheet';
+import { CountryCodePicker, COUNTRIES, Country } from '../components/CountryCodePicker';
+import { PhoneComingSoonModal } from '../components/PhoneComingSoonModal';
 
 interface Transaction {
   id: string;
@@ -1494,6 +1497,11 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileSuccess, setProfileSuccess] = useState<string | null>(null);
   const [userPhone, setUserPhone] = useState<string | null>(null);
+  const [userPhoneVerified, setUserPhoneVerified] = useState(false);
+  const [userPhoneLinkedAt, setUserPhoneLinkedAt] = useState<string | null>(null);
+  const [showPhoneSecurityModal, setShowPhoneSecurityModal] = useState(false);
+  const [showPhoneLinkingComingSoon, setShowPhoneLinkingComingSoon] = useState(false);
+  const [linkingSelectedCountry, setLinkingSelectedCountry] = useState<Country>(COUNTRIES[0]);
   const [profileSandboxMode, setProfileSandboxMode] = useState(false);
   const [isEditingBook, setIsEditingBook] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -2146,7 +2154,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       try {
         const { data, error } = await supabase
           .from('profiles')
-          .select('phone, full_name')
+          .select('phone, full_name, phone_verified, phone_linked_at')
           .eq('id', session.user.id)
           .maybeSingle();
         
@@ -2156,6 +2164,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           } else {
             setUserPhone(session.user.phone || null);
           }
+          setUserPhoneVerified(!!data.phone_verified);
+          setUserPhoneLinkedAt(data.phone_linked_at || null);
           if (data.full_name) {
             setUserName(data.full_name);
           } else if (session.user.user_metadata?.full_name) {
@@ -2163,6 +2173,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           }
         } else {
           setUserPhone(session.user.phone || null);
+          setUserPhoneVerified(!!session.user.phone_confirmed_at);
+          setUserPhoneLinkedAt(session.user.phone_confirmed_at || null);
           if (session.user.user_metadata?.full_name) {
             setUserName(session.user.user_metadata.full_name);
           }
@@ -2170,6 +2182,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       } catch (err) {
         console.error('Error fetching profile in useEffect:', err);
         setUserPhone(session.user.phone || null);
+        setUserPhoneVerified(!!session.user.phone_confirmed_at);
+        setUserPhoneLinkedAt(session.user.phone_confirmed_at || null);
         if (session.user.user_metadata?.full_name) {
           setUserName(session.user.user_metadata.full_name);
         }
@@ -5308,6 +5322,11 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                           "font-bold truncate transition-colors duration-300",
                           theme === 'dark' ? "text-slate-100" : "text-black"
                         )}>{userName}</p>
+                        {userPhoneVerified && (
+                          <div className="flex items-center gap-1 mt-1.5 px-2 py-0.5 rounded-full text-[8.5px] font-extrabold uppercase tracking-widest bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-400 border border-emerald-200/40 dark:border-emerald-900/30 w-fit">
+                            ✓ Verified Mobile Number
+                          </div>
+                        )}
                       </div>
 
                       <button 
@@ -5415,10 +5434,15 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div className="space-y-0.5 sm:space-y-1">
                     <h2 className={cn(
-                      "text-2xl sm:text-3xl font-bold transition-colors duration-300",
+                      "text-2xl sm:text-3xl font-bold transition-colors duration-300 flex items-center gap-2 flex-wrap",
                       theme === 'dark' ? "text-slate-100" : "text-slate-800"
                     )}>
                       Hello, <span className="text-indigo-600 dark:text-indigo-400">{userName}</span>!
+                      {userPhoneVerified && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-400 border border-emerald-200/40 dark:border-emerald-900/30">
+                          ✓ Verified
+                        </span>
+                      )}
                     </h2>
                     <p className={cn(
                       "text-sm sm:text-base transition-colors duration-300",
@@ -8413,124 +8437,15 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           setProfileError(null);
           setProfileSuccess(null);
           
-          try {
-            let formattedPhone = phoneNumberToLink.trim();
-            if (!formattedPhone.startsWith('+')) {
-              setProfileError('Please include your country code starting with + (e.g. +919876543210 or +12345678900).');
-              setProfileLoading(false);
-              return;
-            }
-            
-            const { error: err } = await supabase.auth.updateUser({
-              phone: formattedPhone
-            });
-            
-            if (err) {
-              if (err.message?.toLowerCase().includes('provider') || err.message?.toLowerCase().includes('unsupported') || err.message?.toLowerCase().includes('not configured')) {
-                console.log('Activating Sandbox Link Emulator mode...');
-                setProfileSandboxMode(true);
-                setLinkingOtpSent(true);
-                setProfileSuccess('🔒 OTP Emulator Active: Enter code 123456 to link phone.');
-                setProfileLoading(false);
-                return;
-              }
-              throw err;
-            }
-            
-            setProfileSandboxMode(false);
-            setLinkingOtpSent(true);
-            setProfileSuccess('Verification code sent to ' + formattedPhone);
-          } catch (err: any) {
-            console.error('Error sending link OTP:', err);
-            setProfileError(err.message || 'Failed to send verification code.');
-          } finally {
-            setProfileLoading(false);
-          }
+          // Disable phone linking and trigger coming soon flow
+          setShowPhoneLinkingComingSoon(true);
+          setProfileLoading(false);
+          return;
         };
 
         const handleVerifyLinkingOtp = async () => {
-          if (!supabase || !session?.user) return;
-          if (!linkingOtp) {
-            setProfileError('Please enter the 6-digit verification code.');
-            return;
-          }
-          
-          setProfileLoading(true);
-          setProfileError(null);
-          setProfileSuccess(null);
-          
-          try {
-            let formattedPhone = phoneNumberToLink.trim();
-            
-            if (profileSandboxMode) {
-              if (linkingOtp.trim() !== '123456') {
-                throw new Error('Incorrect or expired verification code (Sandbox).');
-              }
-              
-              // Set fallback password on authenticated user so they can login via Sandbox Phone Login
-              try {
-                await supabase.auth.updateUser({
-                  password: 'PhoneLoginFallback123!'
-                });
-              } catch (pwErr) {
-                console.warn('Sandbox password update ignored:', pwErr);
-              }
-              
-              // Direct save to profiles table
-              try {
-                await supabase.from('profiles').upsert({
-                  id: session.user.id,
-                  email: session.user.email || null,
-                  full_name: userName,
-                  phone: formattedPhone,
-                  phone_verified: true,
-                }, { onConflict: 'id' });
-              } catch (dbErr) {
-                console.warn('Profiles table sync failed (might not exist yet):', dbErr);
-              }
-              
-              setUserPhone(formattedPhone);
-              setProfileSuccess('Phone number successfully linked (Sandbox)!');
-              setLinkingOtpSent(false);
-              setLinkingMode('view');
-              setPhoneNumberToLink('');
-              setLinkingOtp('');
-              setProfileSandboxMode(false);
-            } else {
-              const { error: err } = await supabase.auth.verifyOtp({
-                phone: formattedPhone,
-                token: linkingOtp.trim(),
-                type: 'phone_change'
-              });
-              
-              if (err) throw err;
-              
-              setProfileSuccess('Phone number successfully linked!');
-              setLinkingOtpSent(false);
-              setLinkingMode('view');
-              setPhoneNumberToLink('');
-              setLinkingOtp('');
-              
-              // Update profiles table
-              try {
-                await supabase.from('profiles').upsert({
-                  id: session.user.id,
-                  email: session.user.email || null,
-                  full_name: userName,
-                  phone: formattedPhone,
-                  phone_verified: true,
-                }, { onConflict: 'id' });
-              } catch (dbErr) {
-                console.warn('Profiles table sync failed (might not exist yet):', dbErr);
-              }
-              setUserPhone(formattedPhone);
-            }
-          } catch (err: any) {
-            console.error('Error verifying link OTP:', err);
-            setProfileError(err.message || 'Incorrect or expired verification code.');
-          } finally {
-            setProfileLoading(false);
-          }
+          setProfileError('Phone number linking is currently under development.');
+          return;
         };
 
         const handleSaveProfileName = async () => {
@@ -8712,9 +8627,13 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                               theme === 'dark' ? "text-slate-300" : "text-slate-700"
                             )}>Phone Authentication</span>
                           </div>
-                          {userPhone ? (
+                          {userPhoneVerified ? (
                             <span className="px-2 py-0.5 rounded-full text-[8.5px] font-black uppercase tracking-wider bg-emerald-100 text-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-900/30">
-                              Linked
+                              ✓ Verified Mobile Number
+                            </span>
+                          ) : userPhone ? (
+                            <span className="px-2 py-0.5 rounded-full text-[8.5px] font-black uppercase tracking-wider bg-yellow-100 text-yellow-850 dark:bg-yellow-950/30 dark:text-yellow-400 border border-yellow-200">
+                              Unverified
                             </span>
                           ) : (
                             <span className="px-2 py-0.5 rounded-full text-[8.5px] font-black uppercase tracking-wider bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 border border-slate-200 dark:border-slate-700">
@@ -8724,24 +8643,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                         </div>
 
                         {userPhone ? (
-                          <div className="flex items-center justify-between gap-3 mt-1">
-                            <span className="text-xs font-mono font-bold tracking-wider text-slate-800 dark:text-slate-200">
-                              {userPhone}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setLinkingMode('change');
-                                setPhoneNumberToLink('');
-                                setLinkingOtp('');
-                                setLinkingOtpSent(false);
-                                setProfileError(null);
-                                setProfileSuccess(null);
-                              }}
-                              className="text-[10px] font-black uppercase tracking-widest text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
-                            >
-                              Change Phone
-                            </button>
+                          <div className="flex flex-col gap-2 mt-1">
+                            <div className="flex items-center justify-between gap-3 bg-slate-100/30 dark:bg-zinc-900/30 p-2.5 rounded-xl border border-slate-150/50 dark:border-zinc-800/50">
+                              <div className="flex items-center gap-2">
+                                <Lock size={12} className="text-slate-400 dark:text-slate-500 shrink-0" />
+                                <span className="text-xs font-mono font-black tracking-wider text-slate-800 dark:text-slate-200">
+                                  {userPhone}
+                                </span>
+                              </div>
+                            </div>
+                            <p className="text-[9.5px] font-bold text-rose-500 dark:text-rose-400 bg-rose-500/5 p-2.5 rounded-xl border border-rose-500/10 leading-normal mt-1">
+                              ⚠️ This mobile number is permanently linked to your account. For security reasons it cannot be changed without administrator verification.
+                            </p>
                           </div>
                         ) : (
                           <div className="flex flex-col gap-2 mt-1">
@@ -8751,12 +8664,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                             <button
                               type="button"
                               onClick={() => {
-                                setLinkingMode('link');
-                                setPhoneNumberToLink('');
-                                setLinkingOtp('');
-                                setLinkingOtpSent(false);
-                                setProfileError(null);
-                                setProfileSuccess(null);
+                                setShowPhoneLinkingComingSoon(true);
                               }}
                               className="text-[10.5px] font-black uppercase tracking-widest text-indigo-600 dark:text-indigo-400 hover:underline text-left cursor-pointer self-start"
                             >
@@ -8791,24 +8699,16 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                         <div className="space-y-3">
                           <div className="space-y-1">
                             <label className="text-[10px] font-extrabold text-slate-400 dark:text-slate-500 uppercase tracking-widest block ml-1">Phone Number</label>
-                            <div className="relative">
-                              <Phone size={14} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
-                              <input
-                                type="tel"
-                                autoFocus
-                                value={phoneNumberToLink}
-                                onChange={(e) => setPhoneNumberToLink(e.target.value)}
-                                placeholder="+919876543210 or +1234567890"
-                                className={cn(
-                                  "w-full pl-10 pr-4 py-3 rounded-2xl border outline-none text-xs font-semibold focus:ring-4 transition-all",
-                                  theme === 'dark' 
-                                    ? "border-slate-800 bg-slate-900 text-white focus:border-indigo-500 focus:ring-indigo-950/40" 
-                                    : "border-slate-200 bg-slate-50 text-slate-800 focus:border-indigo-500 focus:ring-indigo-100"
-                                )}
-                              />
-                            </div>
+                            <CountryCodePicker
+                              selectedCountry={linkingSelectedCountry}
+                              onSelectCountry={setLinkingSelectedCountry}
+                              phoneNumber={phoneNumberToLink}
+                              onPhoneNumberChange={setPhoneNumberToLink}
+                              theme={theme === 'dark' ? 'dark' : 'light'}
+                              isDesktop={false}
+                            />
                             <span className="text-[8.5px] font-bold text-slate-400 dark:text-slate-500 block ml-1 leading-normal">
-                              Include your country code starting with +
+                              Select your country code and enter your mobile number.
                             </span>
                           </div>
 
@@ -8887,11 +8787,77 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     </div>
                   )}
                 </motion.div>
+
+                {/* Security Confirmation Modal */}
+                <AnimatePresence>
+                  {showPhoneSecurityModal && (
+                    <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+                      <motion.div
+                        initial={{ opacity: 0, scale: 0.95 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.95 }}
+                        className={cn(
+                          "w-full max-w-sm rounded-3xl p-6 shadow-2xl border",
+                          theme === 'dark' ? "bg-slate-900 border-slate-800 text-white" : "bg-white border-slate-150 text-slate-900"
+                        )}
+                      >
+                        <h4 className="text-sm font-extrabold uppercase tracking-wider mb-2 flex items-center gap-2">
+                          <Lock size={15} className="text-indigo-500" />
+                          Link Mobile Number
+                        </h4>
+                        <p className="text-xs font-medium text-slate-500 dark:text-slate-400 leading-relaxed mb-6">
+                          After verification this mobile number will become part of your account authentication methods. Ensure you are using your permanent mobile number.
+                        </p>
+                        <div className="flex gap-3">
+                          <button
+                            type="button"
+                            onClick={() => setShowPhoneSecurityModal(false)}
+                            className={cn(
+                              "flex-1 py-3 rounded-2xl font-bold text-xs cursor-pointer transition-all border",
+                              theme === 'dark' 
+                                ? "bg-transparent border-slate-800 hover:bg-slate-800 text-slate-300" 
+                                : "bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-600"
+                            )}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowPhoneSecurityModal(false);
+                              setLinkingMode('link');
+                              setPhoneNumberToLink('');
+                              setLinkingOtp('');
+                              setLinkingOtpSent(false);
+                              setProfileError(null);
+                              setProfileSuccess(null);
+                            }}
+                            className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-bold text-xs cursor-pointer transition-all shadow-md shadow-indigo-500/15"
+                          >
+                            Continue
+                          </button>
+                        </div>
+                      </motion.div>
+                    </div>
+                  )}
+                </AnimatePresence>
               </div>
             )}
           </AnimatePresence>
         );
       })()}
+
+      {/* Mobile Linking Coming Soon Modal */}
+      <AnimatePresence>
+        {showPhoneLinkingComingSoon && (
+          <PhoneComingSoonModal
+            isOpen={showPhoneLinkingComingSoon}
+            onClose={() => setShowPhoneLinkingComingSoon(false)}
+            type="link"
+            theme={theme === 'dark' ? 'dark' : 'light'}
+          />
+        )}
+      </AnimatePresence>
 
       {/* Transaction Form Modal */}
       <AnimatePresence>

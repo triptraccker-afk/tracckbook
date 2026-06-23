@@ -233,11 +233,11 @@ export default function Login({
     )}>
       {/* Show Auth on Desktop has the full split-layout screen */}
       {isDesktop ? (
-        <div className="grid grid-cols-12 min-h-screen">
+        <div className="flex flex-row min-h-screen">
           
-          {/* LEFT SIDE: Feature Showcase Grid (65% width equivalent) */}
+          {/* LEFT SIDE: Feature Showcase Grid (60% width, 55% on xl) */}
           <div className={cn(
-            "col-span-7 flex flex-col justify-between p-12 relative overflow-hidden border-r",
+            "w-[60%] xl:w-[55%] flex flex-col justify-between p-12 relative overflow-hidden border-r shrink-0",
             theme === 'dark' 
               ? "bg-zinc-950/20 border-zinc-950" 
               : "bg-gradient-to-br from-[#eff6ff] via-white to-[#f5f3ff] border-slate-100 shadow-[20px_0_50px_-20px_rgba(0,0,0,0.015)]"
@@ -355,9 +355,9 @@ export default function Login({
             </div>
           </div>
 
-          {/* RIGHT SIDE: Dedicated Auth Box area (35% equivalent) */}
+          {/* RIGHT SIDE: Dedicated Auth Box area (40% width, 45% on xl) */}
           <div className={cn(
-            "col-span-5 flex flex-col justify-center items-center p-8 relative overflow-y-auto",
+            "w-[40%] xl:w-[45%] flex flex-col justify-center items-center p-8 relative overflow-y-auto shrink-0",
             theme === 'dark' ? "bg-black" : "bg-white shadow-[inset_1px_0_0_0_rgba(148,163,184,0.1)]"
           )}>
             {hasLogoutReason && (

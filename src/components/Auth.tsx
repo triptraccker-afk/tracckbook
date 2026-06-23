@@ -14,9 +14,12 @@ import {
   LogOut,
   Phone,
   Key,
-  Mail
+  Mail,
+  Smartphone
 } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { CountryCodePicker, COUNTRIES, Country } from './CountryCodePicker';
+import { PhoneComingSoonModal } from './PhoneComingSoonModal';
 
 type AuthMode = 'signin' | 'signup' | 'forgot';
 
@@ -62,6 +65,8 @@ export default function Auth({
     }
   }, [mode, navigate]);
   const [loginMethod, setLoginMethod] = useState<'email' | 'phone'>('email');
+  const [showPhoneComingSoon, setShowPhoneComingSoon] = useState(false);
+  const [selectedCountry, setSelectedCountry] = useState<Country>(COUNTRIES[0]);
   const [phoneNumber, setPhoneNumber] = useState('');
   const [phoneOtp, setPhoneOtp] = useState('');
   const [phoneOtpSent, setPhoneOtpSent] = useState(false);
@@ -164,63 +169,9 @@ export default function Auth({
     setError(null);
     setSuccess(null);
 
-    try {
-      let formattedPhone = phoneNumber.trim();
-      if (!formattedPhone.startsWith('+')) {
-        setError('Please include your country code starting with + (e.g. +919876543210 or +12345678900).');
-        setLoading(false);
-        return;
-      }
-
-      const { error: otpError } = await supabase.auth.signInWithOtp({
-        phone: formattedPhone,
-      });
-
-      if (otpError) {
-        if (otpError.message?.toLowerCase().includes('provider') || otpError.message?.toLowerCase().includes('unsupported') || otpError.message?.toLowerCase().includes('not configured')) {
-          console.log('Activating Sandbox/Emulator mode due to unsupported phone provider...');
-          
-          // Check if profile exists for this phone number
-          const { data: profileData, error: profileErr } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('phone', formattedPhone)
-            .maybeSingle();
-
-          if (profileErr) {
-            console.error('Profile lookup error:', profileErr);
-          }
-
-          if (mode === 'signin' && !profileData) {
-            setError('No registered account found with this phone number. Please sign up or link your phone number from your Profile Settings first.');
-            setLoading(false);
-            return;
-          }
-
-          setSandboxMode(true);
-          setSandboxCode('123456');
-          if (profileData) {
-            setSandboxEmail(profileData.email || `phone_${formattedPhone.replace(/[^0-9]/g, '')}@sandbox.com`);
-          } else {
-            setSandboxEmail(`phone_${formattedPhone.replace(/[^0-9]/g, '')}@sandbox.com`);
-          }
-          setPhoneOtpSent(true);
-          setSuccess('🔒 Sandbox Mode Enabled: Enter mock code 123456 to verify.');
-          setLoading(false);
-          return;
-        }
-        throw otpError;
-      }
-
-      setSandboxMode(false);
-      setPhoneOtpSent(true);
-      setSuccess('Verification code sent to ' + formattedPhone);
-    } catch (err: any) {
-      console.error('Phone OTP send error:', err);
-      setError(err.message || 'Failed to send verification code.');
-    } finally {
-      setLoading(false);
-    }
+    // Bypass phone authentication and show coming soon modal
+    setShowPhoneComingSoon(true);
+    setLoading(false);
   };
 
   const handleVerifyPhoneOtp = async () => {
@@ -238,7 +189,8 @@ export default function Auth({
     setSuccess(null);
 
     try {
-      let formattedPhone = phoneNumber.trim();
+      let cleanNumber = phoneNumber.replace(/\s+/g, '');
+      let formattedPhone = `${selectedCountry.dialCode}${cleanNumber}`;
       
       if (sandboxMode) {
         if (phoneOtp.trim() !== sandboxCode) {
@@ -670,45 +622,66 @@ export default function Auth({
 
   return (
     <div className={cn(
-      "min-h-screen flex items-center justify-center p-4 font-lora transition-colors duration-300",
-      theme === 'dark' ? "bg-[#030303]" : "bg-gradient-to-br from-blue-50/40 via-white to-indigo-50/30"
+      isDesktop ? "w-full p-0 flex items-center justify-center" : "min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-blue-50/40 via-white to-indigo-50/30",
+      isDesktop ? "" : (theme === 'dark' ? "bg-[#030303]" : "bg-gradient-to-br from-blue-50/40 via-white to-indigo-50/30"),
+      "font-lora transition-colors duration-300"
     )}>
       <motion.div 
         initial={{ opacity: 0, y: 15 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5 }}
         className={cn(
-          "w-full max-w-[400px] rounded-[32px] p-6 sm:p-9 border transition-all duration-350 relative overflow-hidden",
+          "w-full transition-all duration-350 relative overflow-hidden",
+          isDesktop 
+            ? "max-w-[720px] xl:max-w-[760px] rounded-[36px] p-8 lg:p-10 border" 
+            : "max-w-[400px] rounded-[32px] p-6 sm:p-9 border",
           theme === 'dark' 
-            ? "bg-[#0a0a0a]/65 border-zinc-900/80 backdrop-blur-2xl shadow-none" 
-            : "bg-white/80 border-blue-100/50 backdrop-blur-2xl shadow-[0_20px_50px_rgba(59,130,246,0.06)]"
+            ? "bg-[#0a0a0a]/85 border-zinc-900/95 backdrop-blur-3xl shadow-none" 
+            : "bg-white/95 border-blue-100/60 backdrop-blur-3xl shadow-[0_25px_60px_rgba(59,130,246,0.08)]"
         )}
       >
         {/* Glow effect decorative element */}
-        <div className="absolute top-0 right-0 w-24 h-24 bg-blue-500/10 rounded-full blur-2xl pointer-events-none" />
+        <div className="absolute top-0 right-0 w-32 h-32 bg-blue-500/10 rounded-full blur-3xl pointer-events-none" />
 
-        <div className="text-center mb-6">
-          <div className="flex flex-col items-center justify-center mb-3 font-lora">
-            <div className="flex items-center">
-              <span className="text-[22px] font-black text-blue-650 text-blue-600 tracking-tight">Track</span>
-              <span className={cn(
-                "text-[22px] font-black tracking-tight transition-colors duration-300",
-                theme === 'dark' ? "text-slate-100" : "text-slate-900"
-              )}>Book</span>
-            </div>
-          </div>
-
-          <p className={cn(
-            "text-[11px] font-semibold tracking-wide uppercase transition-colors duration-350 opacity-80",
-            theme === 'dark' ? "text-slate-400" : "text-slate-500"
+        <div className={cn(
+          isDesktop ? "grid grid-cols-12 gap-8" : "space-y-6"
+        )}>
+          {/* Left Column (Main Authentication Form & Headers) */}
+          <div className={cn(
+            isDesktop ? "col-span-12 md:col-span-7 space-y-5 pr-0 md:pr-8 md:border-r border-dashed border-slate-200 dark:border-zinc-900" : "space-y-4"
           )}>
-            {mode === 'signin' ? 'Welcome Back Premium Suite' : 
-             mode === 'signup' ? 'Initiate Private Accountant Access' : 
-             'Verify Code Reset'}
-          </p>
-        </div>
+            <div className="text-center mb-6">
+              <div className="flex flex-col items-center justify-center mb-3 font-lora">
+                <div className="flex items-center">
+                  <span className="text-[22px] font-black text-blue-650 text-blue-600 tracking-tight">Track</span>
+                  <span className={cn(
+                    "text-[22px] font-black tracking-tight transition-colors duration-300",
+                    theme === 'dark' ? "text-slate-100" : "text-slate-900"
+                  )}>Book</span>
+                </div>
+              </div>
 
-        <form onSubmit={handleAuth} className="space-y-4">
+              <p className={cn(
+                "text-[10px] font-semibold tracking-wide uppercase transition-colors duration-350 opacity-80",
+                theme === 'dark' ? "text-slate-400" : "text-slate-500"
+              )}>
+                {mode === 'signin' ? 'Welcome Back Premium Suite' : 
+                 mode === 'signup' ? 'Initiate Private Accountant Access' : 
+                 'Verify Code Reset'}
+              </p>
+
+              <h2 className={cn(
+                "font-black tracking-tight mt-1 transition-colors duration-300",
+                isDesktop ? "text-2xl" : "text-lg",
+                theme === 'dark' ? "text-white" : "text-slate-900"
+              )}>
+                {mode === 'signin' ? 'Account Login' : 
+                 mode === 'signup' ? 'Create Account' : 
+                 'Reset Password'}
+              </h2>
+            </div>
+
+            <form onSubmit={handleAuth} className={cn("space-y-4", isDesktop && "space-y-5")}>
           <AnimatePresence mode="wait">
             {error && (
               <motion.div 
@@ -753,30 +726,49 @@ export default function Auth({
           </AnimatePresence>
           
           {mode !== 'forgot' && (
-            <div className="flex bg-slate-100/55 dark:bg-zinc-950/45 p-1 rounded-2xl mb-4 border border-blue-50/10 dark:border-zinc-900/55">
+            <div className="relative flex bg-slate-100/55 dark:bg-zinc-950/45 p-1 rounded-2xl mb-5 border border-blue-50/10 dark:border-zinc-900/55 overflow-hidden">
+              {/* Dynamic sliding selection background */}
+              <motion.div
+                className="absolute top-1 bottom-1 rounded-xl bg-white dark:bg-zinc-900 shadow-md border border-slate-150 dark:border-zinc-800"
+                layoutId="activeTabBackground"
+                transition={{ type: "spring", stiffness: 380, damping: 28 }}
+                style={{
+                  left: loginMethod === 'email' ? '4px' : 'calc(50% + 2px)',
+                  width: 'calc(50% - 6px)',
+                }}
+              />
+              
               <button
                 type="button"
                 onClick={() => { setLoginMethod('email'); setError(null); setSuccess(null); }}
                 className={cn(
-                  "flex-1 py-2 text-[10px] font-extrabold uppercase tracking-widest rounded-xl transition-all cursor-pointer",
+                  "relative z-10 flex-1 py-3 flex items-center justify-center gap-2 text-[10.5px] font-extrabold uppercase tracking-wider transition-colors duration-200 cursor-pointer",
                   loginMethod === 'email' 
-                    ? "bg-white dark:bg-zinc-900 text-blue-600 dark:text-blue-400 shadow-sm border border-slate-100 dark:border-zinc-800" 
-                    : "text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+                    ? "text-blue-600 dark:text-blue-400 font-black" 
+                    : "text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300"
                 )}
               >
-                Email
+                <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22-.04-.63z" />
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+                </svg>
+                Gmail
               </button>
+              
               <button
                 type="button"
                 onClick={() => { setLoginMethod('phone'); setError(null); setSuccess(null); }}
                 className={cn(
-                  "flex-1 py-2 text-[10px] font-extrabold uppercase tracking-widest rounded-xl transition-all cursor-pointer",
+                  "relative z-10 flex-1 py-3 flex items-center justify-center gap-2 text-[10.5px] font-extrabold uppercase tracking-wider transition-colors duration-200 cursor-pointer",
                   loginMethod === 'phone' 
-                    ? "bg-white dark:bg-zinc-900 text-blue-600 dark:text-blue-400 shadow-sm border border-slate-100 dark:border-zinc-800" 
-                    : "text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+                    ? "text-blue-600 dark:text-blue-400 font-black" 
+                    : "text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300"
                 )}
               >
-                Phone OTP
+                <Smartphone size={13} className={loginMethod === 'phone' ? "text-blue-600 dark:text-blue-400" : "text-slate-400"} />
+                Phone
               </button>
             </div>
           )}
@@ -786,7 +778,7 @@ export default function Auth({
               initial={{ opacity: 0, x: -5 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ delay: 0.1 }}
-              className="space-y-4"
+              className={cn("space-y-4", isDesktop && "space-y-5")}
             >
               {mode === 'signup' && (
                 <div className="space-y-1">
@@ -801,7 +793,8 @@ export default function Auth({
                     onChange={(e) => setFullName(e.target.value)}
                     placeholder="Enter your full name"
                     className={cn(
-                      "w-full border rounded-2xl py-3 px-4 outline-none transition-all text-xs font-semibold placeholder:text-[#94a3b8]/60 focus:ring-4",
+                      "w-full border rounded-2xl outline-none transition-all font-semibold placeholder:text-[#94a3b8]/60 focus:ring-4",
+                      isDesktop ? "py-3.5 px-5 text-[13px]" : "py-3 px-4 text-xs",
                       theme === 'dark' 
                         ? "bg-zinc-950/50 border-zinc-800 text-slate-100 focus:border-[#3b82f6] focus:ring-blue-950/40" 
                         : "bg-slate-50/50 border-blue-100 text-slate-800 focus:border-[#3b82f6] focus:ring-blue-100/50"
@@ -816,24 +809,16 @@ export default function Auth({
                     "text-[10px] font-extrabold ml-1 uppercase tracking-wider transition-colors duration-300",
                     theme === 'dark' ? "text-slate-400" : "text-slate-500"
                   )}>Phone Number</label>
-                  <div className="relative">
-                    <Phone size={14} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
-                    <input
-                      type="tel"
-                      required
-                      value={phoneNumber}
-                      onChange={(e) => setPhoneNumber(e.target.value)}
-                      placeholder="+919876543210 or +1234567890"
-                      className={cn(
-                        "w-full border rounded-2xl py-3 pl-10 pr-4 outline-none transition-all text-xs font-semibold placeholder:text-[#94a3b8]/60 focus:ring-4",
-                        theme === 'dark' 
-                          ? "bg-zinc-950/50 border-zinc-800 text-slate-100 focus:border-[#3b82f6] focus:ring-blue-950/40" 
-                          : "bg-slate-50/50 border-blue-100 text-slate-800 focus:border-[#3b82f6] focus:ring-blue-100/50"
-                      )}
-                    />
-                  </div>
+                  <CountryCodePicker
+                    selectedCountry={selectedCountry}
+                    onSelectCountry={setSelectedCountry}
+                    phoneNumber={phoneNumber}
+                    onPhoneNumberChange={setPhoneNumber}
+                    theme={theme === 'dark' ? 'dark' : 'light'}
+                    isDesktop={isDesktop}
+                  />
                   <span className="text-[8.5px] font-medium text-slate-400 dark:text-slate-500 block mt-1 ml-1 leading-normal">
-                    Must include country code starting with +
+                    Select your country code and enter your mobile number.
                   </span>
                 </div>
               ) : (
@@ -852,7 +837,8 @@ export default function Auth({
                       onChange={(e) => setPhoneOtp(e.target.value)}
                       placeholder="Enter 6-digit code"
                       className={cn(
-                        "w-full border rounded-2xl py-3 pl-10 pr-4 outline-none transition-all text-xs font-semibold placeholder:text-[#94a3b8]/60 tracking-widest focus:ring-4 text-center font-mono",
+                        "w-full border rounded-2xl outline-none transition-all font-semibold placeholder:text-[#94a3b8]/60 tracking-widest focus:ring-4 text-center font-mono",
+                        isDesktop ? "py-3.5 pl-11 pr-5 text-[13px]" : "py-3 pl-10 pr-4 text-xs",
                         theme === 'dark' 
                           ? "bg-zinc-950/50 border-zinc-800 text-slate-100 focus:border-[#3b82f6] focus:ring-blue-950/40" 
                           : "bg-slate-50/50 border-blue-100 text-slate-800 focus:border-[#3b82f6] focus:ring-blue-100/50"
@@ -884,7 +870,7 @@ export default function Auth({
                 initial={{ opacity: 0, x: -5 }}
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ delay: 0.1 }}
-                className="space-y-1"
+                className={cn("space-y-1", isDesktop && "space-y-2")}
               >
                 {mode === 'signup' && (
                   <div className="space-y-1 mb-3">
@@ -899,7 +885,8 @@ export default function Auth({
                       onChange={(e) => setFullName(e.target.value)}
                       placeholder="Enter your full name"
                       className={cn(
-                        "w-full border rounded-2xl py-3 px-4 outline-none transition-all text-xs font-semibold placeholder:text-[#94a3b8]/60 focus:ring-4",
+                        "w-full border rounded-2xl outline-none transition-all font-semibold placeholder:text-[#94a3b8]/60 focus:ring-4",
+                        isDesktop ? "py-3.5 px-5 text-[13px]" : "py-3 px-4 text-xs",
                         theme === 'dark' 
                           ? "bg-zinc-950/50 border-zinc-800 text-slate-100 focus:border-[#3b82f6] focus:ring-blue-950/40" 
                           : "bg-slate-50/50 border-blue-100 text-slate-800 focus:border-[#3b82f6] focus:ring-blue-100/50"
@@ -921,7 +908,8 @@ export default function Auth({
                       onChange={(e) => setEmail(e.target.value)}
                       placeholder="Enter your email address"
                       className={cn(
-                        "w-full border rounded-2xl py-3 px-4 outline-none transition-all text-xs font-semibold placeholder:text-[#94a3b8]/60 focus:ring-4",
+                        "w-full border rounded-2xl outline-none transition-all font-semibold placeholder:text-[#94a3b8]/60 focus:ring-4",
+                        isDesktop ? "py-3.5 px-5 text-[13px]" : "py-3 px-4 text-xs",
                         theme === 'dark' 
                           ? "bg-zinc-950/50 border-zinc-800 text-slate-100 focus:border-[#3b82f6] focus:ring-blue-950/40" 
                           : "bg-slate-50/50 border-blue-100 text-slate-800 focus:border-[#3b82f6] focus:ring-blue-100/50"
@@ -936,7 +924,7 @@ export default function Auth({
                   initial={{ opacity: 0, x: -5 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.15 }}
-                  className="space-y-3 animate-none"
+                  className={cn("space-y-3", isDesktop && "space-y-4")}
                 >
                   <div className="space-y-1">
                     <label className={cn(
@@ -953,7 +941,8 @@ export default function Auth({
                         onChange={(e) => setPassword(e.target.value)}
                         placeholder="Enter your password"
                         className={cn(
-                          "w-full border rounded-2xl py-3 px-4 outline-none transition-all text-xs font-semibold placeholder:text-[#94a3b8]/60 pr-11 focus:ring-4",
+                          "w-full border rounded-2xl outline-none transition-all font-semibold placeholder:text-[#94a3b8]/60 focus:ring-4",
+                          isDesktop ? "py-3.5 pl-5 pr-12 text-[13px]" : "py-3 pl-4 pr-11 text-xs",
                           theme === 'dark' 
                             ? "bg-zinc-950/50 border-zinc-800 text-slate-100 focus:border-[#3b82f6] focus:ring-blue-950/40" 
                             : "bg-slate-50/50 border-blue-100 text-slate-800 focus:border-[#3b82f6] focus:ring-blue-100/50"
@@ -1010,7 +999,10 @@ export default function Auth({
             whileTap={{ scale: 0.99 }}
             type="submit"
             disabled={loading}
-            className="w-full rounded-2xl py-3.5 font-extrabold tracking-wider uppercase transition-all flex items-center justify-center gap-2 disabled:opacity-75 disabled:cursor-not-allowed mt-3 text-xs cursor-pointer bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white shadow-md shadow-blue-500/10 border-none outline-none"
+            className={cn(
+              "w-full rounded-2xl font-extrabold tracking-wider uppercase transition-all flex items-center justify-center gap-2 disabled:opacity-75 disabled:cursor-not-allowed mt-3 cursor-pointer bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white shadow-md shadow-blue-500/10 border-none outline-none",
+              isDesktop ? "py-4 text-[13px]" : "py-3.5 text-xs"
+            )}
           >
             {loading ? (
               <Loader2 className="animate-spin" size={16} />
@@ -1039,7 +1031,8 @@ export default function Auth({
                 type="button"
                 onClick={handleGoogleLogin}
                 className={cn(
-                  "w-full rounded-2xl py-3 px-4 border text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer shadow-sm",
+                  "w-full rounded-2xl border font-bold transition-all flex items-center justify-center gap-2 cursor-pointer shadow-sm",
+                  isDesktop ? "py-3.5 px-5 text-[13px]" : "py-3 px-4 text-xs",
                   theme === 'dark'
                     ? "bg-zinc-950/20 border-zinc-850 hover:bg-zinc-900/40 text-slate-200"
                     : "bg-white border-blue-100 hover:bg-slate-50 text-slate-700"
@@ -1113,7 +1106,115 @@ export default function Auth({
             </div>
           )}
         </div>
+      </div>
+
+          {/* Right Column (Premium Benefits checklist) */}
+          {isDesktop && (
+            <div className="col-span-12 md:col-span-5 flex flex-col justify-between py-1 space-y-6">
+              {/* Premium Heading */}
+              <div>
+                <div className="flex items-center gap-1.5 mb-2">
+                  <span className="px-2 py-0.5 rounded-full text-[8.5px] font-black uppercase tracking-wider bg-blue-100 text-blue-800 dark:bg-blue-950/40 dark:text-blue-400">
+                    Premium Suite
+                  </span>
+                </div>
+                <h3 className={cn(
+                  "text-base font-black tracking-tight",
+                  theme === 'dark' ? "text-white" : "text-slate-900"
+                )}>
+                  Enterprise-Grade Ledger
+                </h3>
+                <p className="text-[11px] text-slate-400 dark:text-slate-500 leading-relaxed font-medium mt-1">
+                  Secure, automated business accounting and receipt synchronization.
+                </p>
+              </div>
+
+              {/* Benefits Checklist */}
+              <div className="space-y-4">
+                {[
+                  {
+                    title: "Secure Cloud Sync",
+                    desc: "Real-time, end-to-end encrypted backup.",
+                    badge: "256-bit AES"
+                  },
+                  {
+                    title: "AI Receipt Extraction",
+                    desc: "Scan bills & extract data instantly with Gemini.",
+                    badge: "AI Powered"
+                  },
+                  {
+                    title: "Unlimited Ledger Tracking",
+                    desc: "Track infinite cashbooks, customers, and margins.",
+                  },
+                  {
+                    title: "Google Authentication",
+                    desc: "1-click secure authentication with absolute trust.",
+                    badge: "OAuth 2.0"
+                  },
+                  {
+                    title: "Phone OTP Login",
+                    desc: "Instant passwordless verification code validation.",
+                    badge: "Secure"
+                  },
+                ].map((benefit, i) => (
+                  <div key={i} className="flex items-start gap-2.5">
+                    <div className="mt-0.5 bg-emerald-500/15 text-emerald-500 dark:bg-emerald-950/40 p-0.5 rounded-full shrink-0">
+                      <CheckCircle2 size={13} className="stroke-[2.5px]" />
+                    </div>
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-1.5">
+                        <span className={cn(
+                          "text-[11px] font-bold tracking-tight",
+                          theme === 'dark' ? "text-slate-200" : "text-slate-800"
+                        )}>
+                          {benefit.title}
+                        </span>
+                        {benefit.badge && (
+                          <span className="text-[7.5px] font-black tracking-wider text-slate-400 dark:text-zinc-500 bg-slate-100 dark:bg-zinc-900 px-1 py-0.2 rounded border border-slate-200/10 uppercase font-mono">
+                            {benefit.badge}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[9.5px] text-slate-450 leading-normal font-medium">
+                        {benefit.desc}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Security Trust Seals */}
+              <div className="pt-4 border-t border-dashed border-slate-200/60 dark:border-zinc-900/60 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5">
+                  <ShieldCheck size={14} className="text-emerald-500 shrink-0" />
+                  <span className="text-[9px] font-bold text-slate-400 dark:text-slate-500">
+                    Encrypted Storage
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <ShieldCheck size={14} className="text-blue-500 shrink-0" />
+                  <span className="text-[9px] font-bold text-slate-400 dark:text-slate-500">
+                    GDPR Compliant
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       </motion.div>
+
+      {/* Phone Coming Soon Modal */}
+      <AnimatePresence>
+        {showPhoneComingSoon && (
+          <PhoneComingSoonModal
+            isOpen={showPhoneComingSoon}
+            onClose={() => setShowPhoneComingSoon(false)}
+            type="login"
+            theme={theme === 'dark' ? 'dark' : 'light'}
+            onContinueWithGmail={handleGoogleLogin}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }
