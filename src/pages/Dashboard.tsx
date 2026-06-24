@@ -2127,10 +2127,16 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
   const safeUUID = () => {
     try {
-      return crypto.randomUUID();
-    } catch (e) {
-      return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-    }
+      if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+      }
+    } catch (e) {}
+    // RFC4122 v4 compliant UUID generator fallback
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      const r = Math.random() * 16 | 0;
+      const v = c === 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
   };
 
   const [transactionDate, setTransactionDate] = useState(safeToDateTimeLocal(new Date()));
@@ -3136,6 +3142,14 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           transactions: b.transactions.map(t => {
             if (t.id !== transactionId) return t;
             const updatedImages = (t.images || []).map(img => img === blobUrl ? cloudUrl : img);
+            
+            // Also update attachmentCache permanently so that subsequent fetch revalidation gets correct Cloudinary URL
+            const cacheAtt = attachmentCache.get(transactionId);
+            attachmentCache.set(transactionId, {
+              images: cacheAtt ? cacheAtt.images.map(img => img === blobUrl ? cloudUrl : img) : updatedImages,
+              isAi: cacheAtt ? cacheAtt.isAi : false
+            });
+
             return {
               ...t,
               images: updatedImages
@@ -3381,22 +3395,42 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           (async () => {
             try {
               console.log('[BackgroundSave] Inserting new entry core into Supabase:', tempId);
-              const { error: entryError } = await supabase
+              let entryError: any = null;
+              
+              // Stepwise Fallback Insert Strategy: Check every column combination dynamically
+              const firstTry = await supabase
                 .from('entries')
                 .insert([{ ...payload, image_layout: imageLayout }]);
-              
-              if (entryError) {
-                if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist') || entryError.message?.includes('column "source" does not exist')) {
-                  console.warn('[BackgroundSave] image_layout or source missing in schema, falling back...');
-                  const fallbackPayload = { ...payload };
-                  delete fallbackPayload.source;
-                  const { error: retryError } = await supabase
+              entryError = firstTry.error;
+
+              if (entryError && (entryError.code === '42703' || entryError.message?.toLowerCase().includes('column'))) {
+                console.warn('[BackgroundSave] Try 1 failed on column mismatch. Trying Try 2 (with source, but no image_layout)...');
+                const secondTry = await supabase
+                  .from('entries')
+                  .insert([payload]);
+                entryError = secondTry.error;
+
+                if (entryError && (entryError.code === '42703' || entryError.message?.toLowerCase().includes('column'))) {
+                  console.warn('[BackgroundSave] Try 2 failed. Trying Try 3 (no source, but with image_layout)...');
+                  const payloadNoSource = { ...payload };
+                  delete payloadNoSource.source;
+                  const thirdTry = await supabase
                     .from('entries')
-                    .insert([fallbackPayload]);
-                  if (retryError) throw retryError;
-                } else {
-                  throw entryError;
+                    .insert([{ ...payloadNoSource, image_layout: imageLayout }]);
+                  entryError = thirdTry.error;
+
+                  if (entryError && (entryError.code === '42703' || entryError.message?.toLowerCase().includes('column'))) {
+                    console.warn('[BackgroundSave] Try 3 failed. Trying Try 4 (minimum payload: no source, no image_layout)...');
+                    const fourthTry = await supabase
+                      .from('entries')
+                      .insert([payloadNoSource]);
+                    entryError = fourthTry.error;
+                  }
                 }
+              }
+
+              if (entryError) {
+                throw entryError;
               }
 
               // Start parallel background upload tasks for selected local blob images

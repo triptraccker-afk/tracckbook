@@ -64,7 +64,7 @@ export function getOptimizedCloudinaryUrl(url: string, type: 'preview' | 'fullsc
   const transformation = type === 'preview' ? 'f_auto,q_auto,w_300' : 'f_auto,q_auto,w_1200';
 
   if (!url.includes('cloudinary.com')) {
-    if (url.startsWith('data:')) {
+    if (url.startsWith('data:') || url.startsWith('blob:')) {
       return url;
     }
     // Egress protection: proxy non-Cloudinary images through Cloudinary image/fetch API
@@ -108,7 +108,7 @@ export function getExportOptimizedCloudinaryUrl(url: string, isCompressed: boole
   }
 
   if (!url.includes('cloudinary.com')) {
-    if (url.startsWith('data:')) {
+    if (url.startsWith('data:') || url.startsWith('blob:')) {
       return url;
     }
     // Egress protection: proxy non-Cloudinary images through Cloudinary image/fetch API
