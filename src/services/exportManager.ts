@@ -573,10 +573,16 @@ export class BackgroundExportManager {
 
                 const pageWidth = doc.internal.pageSize.getWidth();
                 const pageHeight = doc.internal.pageSize.getHeight();
-                const imgWidth = pageWidth * 0.85;
-                const imgHeight = pageHeight * 0.72; // leaves spacing below image for footer (Requirement 6)
+                
+                // Centered, tall and slim layout
+                const safeTop = 16;
+                const safeBottom = pageHeight - 25;
+                const availableHeight = safeBottom - safeTop;
+                
+                const imgWidth = pageWidth * 0.62;
+                const imgHeight = Math.min(pageHeight * 0.70, availableHeight);
                 const x = (pageWidth - imgWidth) / 2;
-                const y = 18; // start below header
+                const y = safeTop + (availableHeight - imgHeight) / 2;
 
                 doc.setFontSize(10);
                 doc.setTextColor(80);
