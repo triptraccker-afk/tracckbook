@@ -66,6 +66,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import { cn, formatCurrency, vibrate } from '../lib/utils';
 import { parseReceipt, parseMultipleReceipts } from '../services/gemini';
+import { processAndOcrImage } from '../services/ocrService';
 import { supabase } from '../lib/supabase';
 import { uploadToCloudinary, getOptimizedCloudinaryUrl, getExportOptimizedCloudinaryUrl } from '../services/cloudinary';
 import imageCompression from 'browser-image-compression';
@@ -78,6 +79,7 @@ import DownloadCenter, { DownloadCenterTrigger } from '../components/DownloadCen
 import MediaPickerSheet from '../components/MediaPickerSheet';
 import { CountryCodePicker, COUNTRIES, Country } from '../components/CountryCodePicker';
 import { PhoneComingSoonModal } from '../components/PhoneComingSoonModal';
+import { addPdfBrandingFooter } from '../utils/pdfBranding';
 
 interface Transaction {
   id: string;
@@ -1520,6 +1522,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [showDropZone, setShowDropZone] = useState(false);
   const [aiMode, setAiMode] = useState<'split' | 'merge'>('split');
   const [error, setError] = useState<string | null>(null);
+  const cancelScanRef = useRef<boolean>(false);
+  const [backgroundScanResult, setBackgroundScanResult] = useState<string | null>(null);
 
   // Intelligent TrackBook AI Upload states
   const [aiWorkflowStep, setAiWorkflowStep] = useState<'group' | 'upload' | 'scanning' | 'confirmation'>('group');
@@ -4315,8 +4319,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 const gap = 5;
                 const availableWidth = pageWidth - (margin * 2) - gap;
                 const imgWidth = availableWidth / 2;
-                const imgHeight = pageHeight * 0.6; // Take 60% of height for side-by-side
-                const y = (pageHeight - imgHeight) / 2;
+                const imgHeight = pageHeight * 0.55; // leaves perfect space for footer (Requirement 6)
+                const y = 18; // Start below header
 
                 // Add transaction header
                 doc.setFontSize(10);
@@ -4377,10 +4381,10 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   
                   const pageWidth = doc.internal.pageSize.getWidth();
                   const pageHeight = doc.internal.pageSize.getHeight();
-                  const imgWidth = pageWidth * 0.9;
-                  const imgHeight = pageHeight * 0.9;
+                  const imgWidth = pageWidth * 0.85;
+                  const imgHeight = pageHeight * 0.72; // leaves spacing below image for footer (Requirement 6)
                   const x = (pageWidth - imgWidth) / 2;
-                  const y = (pageHeight - imgHeight) / 2;
+                  const y = 18; // start below header
 
                   // Add transaction header
                   doc.setFontSize(10);
@@ -4406,7 +4410,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       
       const fileName = `${activeBook.name}.pdf`;
       
-      // Add page numbers and footer
+      // Add page numbers and footer with professional TrackBook branding on every page
       const totalPages = doc.getNumberOfPages();
       for (let i = 1; i <= totalPages; i++) {
         if (i % 4 === 0) {
@@ -4414,11 +4418,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         }
         
         doc.setPage(i);
-        doc.setFontSize(8);
-        doc.setTextColor(150);
-        doc.text(`Page ${i} of ${totalPages}`, doc.internal.pageSize.getWidth() / 2, doc.internal.pageSize.getHeight() - 5, { align: 'center' });
-        doc.text(`Report: ${activeBook.name}`, 10, doc.internal.pageSize.getHeight() - 5);
-        doc.text(new Date().toLocaleDateString('en-IN'), doc.internal.pageSize.getWidth() - 30, doc.internal.pageSize.getHeight() - 5);
+        addPdfBrandingFooter(doc, i, totalPages, activeBook.name);
       }
 
       await new Promise(r => setTimeout(r, 50));
@@ -4718,6 +4718,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
     if (files.length === 0) return;
 
+    cancelScanRef.current = false;
     setAiWorkflowStep('scanning');
     setError(null);
     setAiProgress(0); // Reset progress
@@ -4730,97 +4731,126 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     const cacheUpdates: Array<{ id: string; item: any }> = [];
     const tempHandwrittenQueue: Array<{ file: File; result: any; previewUrl: string }> = [];
 
-    // Progressive progress bar helper variables
-    let currentProgress = 0;
-    let progressCap = 0;
     const segmentShare = 100 / totalFiles;
 
-    const progressInterval = setInterval(() => {
-      if (currentProgress < progressCap) {
-        const diff = progressCap - currentProgress;
-        const increment = Math.max(0.1, Math.min(2.5, diff * 0.08));
-        currentProgress = parseFloat((currentProgress + increment).toFixed(2));
-        if (currentProgress > progressCap) {
-          currentProgress = progressCap;
-        }
-        setAiProgress(currentProgress);
-      }
-    }, 80);
-
     for (let i = 0; i < totalFiles; i++) {
+      if (cancelScanRef.current) {
+        console.log("[Client AI] Scanning cancelled by user.");
+        return;
+      }
+
       const file = files[i];
-      setAiScanStatus(`Analyzing bill ${i + 1} of ${totalFiles}...`);
-      progressCap = (i + 0.92) * segmentShare;
+      const startTotalTime = Date.now();
+      const baseProgress = i * segmentShare;
 
       try {
-        // Read file to base64
-        const base64String = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const resStr = reader.result as string;
-            resolve(resStr.split(',')[1]);
-          };
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
+        // Step 3 Progressive Flow:
+        // 10% Uploading
+        setAiProgress(baseProgress + (0.10 * segmentShare));
+        setAiScanStatus(`Uploading & reading receipt ${i + 1}/${totalFiles}...`);
+        await new Promise(resolve => setTimeout(resolve, 200));
+
+        if (cancelScanRef.current) return;
+
+        // 25% Optimizing Image
+        setAiProgress(baseProgress + (0.25 * segmentShare));
+        setAiScanStatus(`Optimizing image for fast extraction...`);
+
+        // Run OCR and image optimization
+        const ocrResult = await processAndOcrImage(file, (progress, stepName) => {
+          if (cancelScanRef.current) return;
+          if (stepName.includes('Optimizing')) {
+            setAiProgress(baseProgress + (0.25 * segmentShare));
+            setAiScanStatus(`Optimizing image...`);
+          } else if (stepName.includes('OCR')) {
+            // 50% OCR Processing
+            setAiProgress(baseProgress + (0.50 * segmentShare));
+            setAiScanStatus(`OCR Processing: reading receipt text...`);
+          }
         });
 
-        // OCR request with retry logic
-        const retryIntervals = [2000, 5000, 10000];
-        const maxAttempts = 4;
-        let response: Response | null = null;
-        let finalError: any = null;
+        if (cancelScanRef.current) return;
 
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-          try {
-            const customKey = localStorage.getItem('GEMINI_API_KEY') || '';
-            response = await fetch('/api/gemini/parse-receipt', {
-              method: 'POST',
-              headers: { 
-                'Content-Type': 'application/json',
-                ...(customKey ? { 'x-gemini-api-key': customKey } : {})
-              },
-              body: JSON.stringify({
-                base64Image: base64String,
-                mimeType: file.type || 'image/jpeg',
-                groupSize: aiGroupSize,
-                isHandwritten,
-                handwrittenTime,
-                handwrittenIsFood,
-                customApiKey: customKey
-              })
-            });
+        // Force 50% for OCR complete
+        setAiProgress(baseProgress + (0.50 * segmentShare));
+        setAiScanStatus(`OCR reading complete. Confidence: ${ocrResult.confidence}%`);
+        await new Promise(resolve => setTimeout(resolve, 200));
 
-            if (!response.ok) {
-              const errJson = await response.json().catch(() => ({}));
-              throw new Error(errJson.error || 'Receipt parsing returned an error status.');
-            }
-            finalError = null;
-            break;
-          } catch (err: any) {
-            finalError = err;
-            const errMsg = String(err.message || '').toUpperCase();
-            const isNonRetryable = errMsg.includes("CONFIGURATION") || errMsg.includes("ADMINISTRATOR") || errMsg.includes("QUOTA EXCEEDED") || errMsg.includes("TOO LARGE") || errMsg.includes("API_KEY") || errMsg.includes("API KEY") || errMsg.includes("EXPIRED") || errMsg.includes("INVALID");
-            if (isNonRetryable) {
-              console.log("[Client AI] Non-retryable Error detected. Exiting retry loop.");
-              break;
-            }
-            if (attempt < maxAttempts) {
-              const delay = retryIntervals[attempt - 1];
-              setAiScanStatus(`Analyzing bill ${i + 1} of ${totalFiles}...\nAI is busy. Retrying in ${delay / 1000}s...`);
-              await new Promise(resolve => setTimeout(resolve, delay));
-            }
-          }
+        if (cancelScanRef.current) return;
+
+        // 75% AI Extraction
+        setAiProgress(baseProgress + (0.75 * segmentShare));
+        setAiScanStatus(`AI Structured Extraction running...`);
+
+        const aiStartTime = Date.now();
+        const customKey = localStorage.getItem('GEMINI_API_KEY') || '';
+        const response = await fetch('/api/gemini/parse-receipt', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            ...(customKey ? { 'x-gemini-api-key': customKey } : {})
+          },
+          body: JSON.stringify({
+            base64Image: ocrResult.base64,
+            mimeType: 'image/jpeg',
+            groupSize: aiGroupSize,
+            isHandwritten,
+            handwrittenTime,
+            handwrittenIsFood,
+            customApiKey: customKey,
+            ocrText: ocrResult.text,
+            ocrConfidence: ocrResult.confidence
+          })
+        });
+
+        // STEP 6: Before JSON.parse(), check response.ok and content-type
+        const contentType = response.headers.get("content-type") || "";
+        if (!response.ok || contentType.includes("text/html")) {
+          const rawText = await response.text();
+          console.error("Receipt processing failed. Please try again.");
+          console.error("Status code:", response.status);
+          console.error("Endpoint:", '/api/gemini/parse-receipt');
+          console.error("Raw response:", rawText);
+          throw new Error("Receipt processing failed. Please try again.");
         }
 
-        if (finalError) throw finalError;
-        if (!response) throw new Error("No response from server.");
-
         const result = await response.json();
+        const aiDuration = Date.now() - aiStartTime;
 
-        // Fast-forward this file's chunk of progress to its completion boundary
-        currentProgress = (i + 1) * segmentShare;
-        setAiProgress(currentProgress);
-        progressCap = currentProgress;
+        if (cancelScanRef.current) return;
+
+        // 90% Saving Transaction
+        setAiProgress(baseProgress + (0.90 * segmentShare));
+        setAiScanStatus(`Saving transaction entry...`);
+
+        // Compute performance analytics
+        const totalProcessingMs = Date.now() - startTotalTime;
+        const analytics = {
+          ocr_duration_ms: ocrResult.ocr_duration_ms,
+          ai_duration_ms: aiDuration,
+          total_processing_ms: totalProcessingMs
+        };
+
+        // Track slow receipts automatically (Step 8)
+        if (totalProcessingMs > 10000) {
+          console.warn(`[Analytics] Slow receipt detected! total_processing_ms: ${totalProcessingMs}ms (Target <= 10000ms). ocr_duration_ms: ${ocrResult.ocr_duration_ms}ms, ai_duration_ms: ${aiDuration}ms`);
+        } else {
+          console.log(`[Analytics] Receipt processed successfully in ${totalProcessingMs}ms. ocr_duration_ms: ${ocrResult.ocr_duration_ms}ms, ai_duration_ms: ${aiDuration}ms`);
+        }
+
+        // Store analytics locally in localStorage
+        try {
+          const localAnalyticsStr = localStorage.getItem('trackbook_ai_analytics') || '[]';
+          const localAnalytics = JSON.parse(localAnalyticsStr);
+          localAnalytics.push({
+            file: file.name,
+            timestamp: new Date().toISOString(),
+            ...analytics
+          });
+          localStorage.setItem('trackbook_ai_analytics', JSON.stringify(localAnalytics));
+        } catch (analyticsErr) {
+          console.error('Failed to save analytics locally:', analyticsErr);
+        }
 
         // Extracted values
         const parsedAmount = parseFloat(result.amount) || 0;
@@ -4943,7 +4973,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       original_name: file.name,
                       ocr: ocrData,
                       classification: parsedBillType,
-                      groupSize: aiGroupSize
+                      groupSize: aiGroupSize,
+                      analytics
                     }),
                     file_type: 'image'
                   }];
@@ -4956,13 +4987,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           }
         }
       } catch (err: any) {
-        clearInterval(progressInterval);
         console.error(`[AI Unified Parse Error] file ${file.name}:`, err);
         setError(err.message || `Failed to process document: ${file.name}`);
       }
     }
 
-    clearInterval(progressInterval);
+    if (cancelScanRef.current) return;
 
     // If an error occurred and no files succeeded, terminate early without holding up
     if (error && newTransactionsToAppend.length === 0 && tempHandwrittenQueue.length === 0) {
@@ -4971,13 +5001,15 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       return;
     }
 
-    // Animate smoothly to exactly 100% before adding bills and finishing
-    setAiScanStatus("All bills processed! Compiling data...");
-    while (currentProgress < 100) {
-      currentProgress = Math.min(100, currentProgress + 4);
-      setAiProgress(currentProgress);
-      await new Promise(resolve => setTimeout(resolve, 40));
-    }
+    // 100% Complete
+    setAiProgress(100);
+    setAiScanStatus("Receipt processed successfully.");
+
+    // Show custom toast notification
+    setBackgroundScanResult("Receipt processed successfully.");
+    setTimeout(() => {
+      setBackgroundScanResult(null);
+    }, 6000);
 
     // Apply auto-saved transactions to local React state
     if (newTransactionsToAppend.length > 0) {
@@ -6742,6 +6774,44 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                         </div>
                       ))}
                     </div>
+
+                    {/* Background and Cancel Buttons */}
+                    <div className="flex items-center gap-3 max-w-xs mx-auto pt-4 border-t border-slate-100 dark:border-zinc-900/60">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          vibrate();
+                          // Keep processing but leave immediately
+                          setAiConstructionModal(null);
+                          const slug = getBookSlug(activeBook?.name || '', activeBook?.id || '');
+                          navigate(`/cashbooks/${slug}/entries`);
+                        }}
+                        className={cn(
+                          "flex-1 py-2 rounded-xl font-bold text-xs tracking-wide cursor-pointer transition-all border",
+                          theme === 'dark'
+                            ? "border-zinc-800 text-zinc-300 bg-zinc-900 hover:bg-zinc-850"
+                            : "border-slate-250 text-slate-700 bg-slate-50 hover:bg-slate-100"
+                        )}
+                      >
+                        Back to Dashboard
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          vibrate();
+                          cancelScanRef.current = true;
+                          setAiWorkflowStep('group');
+                          setIsUploading(false);
+                          setAiConstructionModal(null);
+                        }}
+                        className={cn(
+                          "flex-1 py-2 rounded-xl font-bold text-xs tracking-wide cursor-pointer transition-all border",
+                          "border-rose-250 text-rose-600 bg-rose-50 hover:bg-rose-100 dark:border-rose-950/40 dark:text-rose-400 dark:bg-rose-950/20 dark:hover:bg-rose-950/45"
+                        )}
+                      >
+                        Cancel Scan
+                      </button>
+                    </div>
                   </motion.div>
                 )}
 
@@ -8007,6 +8077,44 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
                     <div className="text-xs text-slate-400 dark:text-zinc-500 max-w-xs mx-auto leading-relaxed">
                       TrackBook AI is extracting receipt data, mapping categories, and parsing your splits. Please do not close this window.
+                    </div>
+
+                    {/* Background and Cancel Buttons */}
+                    <div className="flex items-center gap-3 max-w-xs mx-auto pt-4 border-t border-slate-100 dark:border-zinc-900/60">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          vibrate();
+                          // Keep processing but leave immediately
+                          setAiConstructionModal(null);
+                          const slug = getBookSlug(activeBook?.name || '', activeBook?.id || '');
+                          navigate(`/cashbooks/${slug}/entries`);
+                        }}
+                        className={cn(
+                          "flex-1 py-2 rounded-xl font-bold text-xs tracking-wide cursor-pointer transition-all border",
+                          theme === 'dark'
+                            ? "border-zinc-800 text-zinc-300 bg-zinc-900 hover:bg-zinc-850"
+                            : "border-slate-250 text-slate-700 bg-slate-50 hover:bg-slate-100"
+                        )}
+                      >
+                        Back to Dashboard
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          vibrate();
+                          cancelScanRef.current = true;
+                          setAiWorkflowStep('group');
+                          setIsUploading(false);
+                          setAiConstructionModal(null);
+                        }}
+                        className={cn(
+                          "flex-1 py-2 rounded-xl font-bold text-xs tracking-wide cursor-pointer transition-all border",
+                          "border-rose-250 text-rose-600 bg-rose-50 hover:bg-rose-100 dark:border-rose-950/40 dark:text-rose-400 dark:bg-rose-950/20 dark:hover:bg-rose-950/45"
+                        )}
+                      >
+                        Cancel Scan
+                      </button>
                     </div>
                   </div>
                 )}
@@ -10674,6 +10782,51 @@ Open TrackBook → Import Shared Entries`)}`}
                   </button>
                 </div>
               </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Background Scanning Success Toast */}
+      <AnimatePresence>
+        {backgroundScanResult && (
+          <motion.div
+            initial={{ opacity: 0, y: 50, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.95 }}
+            className="fixed bottom-6 right-6 z-[200] w-[calc(100%-2rem)] max-w-sm"
+          >
+            <div className={cn(
+              "rounded-2xl border p-4 shadow-2xl flex items-center justify-between gap-3 relative overflow-hidden transition-all duration-300",
+              theme === 'dark' 
+                ? "bg-zinc-950/95 border-zinc-800 text-white backdrop-blur-md" 
+                : "bg-white/95 border-slate-200 text-slate-800 backdrop-blur-md shadow-indigo-150"
+            )}>
+              <div className="flex items-center gap-3">
+                <div className={cn(
+                  "p-2.5 rounded-xl shrink-0 flex items-center justify-center",
+                  theme === 'dark' ? "bg-emerald-950/40 text-emerald-400" : "bg-emerald-50 text-emerald-600"
+                )}>
+                  <CheckCircle2 size={18} className="animate-pulse" />
+                </div>
+                <div className="space-y-0.5 text-left">
+                  <p className="text-xs font-black tracking-wider uppercase text-emerald-600 dark:text-emerald-400">
+                    TrackBook AI
+                  </p>
+                  <p className="text-sm font-bold">
+                    {backgroundScanResult}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setBackgroundScanResult(null)}
+                className={cn(
+                  "p-1.5 rounded-lg transition-colors duration-200 shrink-0 cursor-pointer",
+                  theme === 'dark' ? "hover:bg-slate-800 text-slate-400" : "hover:bg-slate-100 text-slate-500"
+                )}
+              >
+                <X size={15} />
+              </button>
             </div>
           </motion.div>
         )}

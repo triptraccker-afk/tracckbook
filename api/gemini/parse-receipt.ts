@@ -214,17 +214,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       groupSize = 1, 
       isHandwritten = false, 
       handwrittenTime = "", 
-      handwrittenIsFood = false
+      handwrittenIsFood = false,
+      ocrText = "",
+      ocrConfidence = 0
     } = req.body;
     
-    if (!base64Image && (!images || !Array.isArray(images) || images.length === 0)) {
-      return res.status(400).json({ error: "No receipt image provided." });
+    if (!ocrText && !base64Image && (!images || !Array.isArray(images) || images.length === 0)) {
+      return res.status(400).json({ error: "No receipt image or OCR text provided." });
     }
 
-    const apiKey = (process.env.GEMINI_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || "").trim();
+    const headerKey = req.headers["x-gemini-api-key"] || req.headers["X-Gemini-Api-Key"];
+    const customKey = typeof headerKey === 'string' ? headerKey.trim() : '';
+    const apiKey = (customKey || process.env.GEMINI_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || "").trim();
     
     if (apiKey === "") {
-      console.error("[Vercel Serverless AI] Missing GEMINI_API_KEY, GEMINI_KEY, or GOOGLE_API_KEY environment variable during extraction request.");
+      console.error("[Vercel Serverless AI] Missing GEMINI_API_KEY, GEMINI_KEY, or GOOGLE_API_KEY environment variable/header during extraction request.");
       return res.status(500).json({ 
         error: "AI is not configured. Please add GEMINI_API_KEY, GEMINI_KEY, or GOOGLE_API_KEY under Settings > Secrets on the platform." 
       });
@@ -239,31 +243,43 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     });
 
-    console.log(`[Vercel Serverless AI] Parsing receipt. Group Size: ${groupSize}, Hand-written: ${isHandwritten}, Time: ${handwrittenTime}, Is Food: ${handwrittenIsFood}, Multiple Images: ${!!images}`);
+    console.log(`[Vercel Serverless AI] Parsing receipt. Group Size: ${groupSize}, Hand-written: ${isHandwritten}, Time: ${handwrittenTime}, Is Food: ${handwrittenIsFood}, Multiple Images: ${!!images}, OCR Text: ${!!ocrText} (${ocrConfidence}%)`);
 
     const retryIntervals = [2000, 5000, 10000]; // Attempt 1, 2, 3 delays
     const maxAttempts = 4; // 1 initial + 3 retries
+    const modelsToTry = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.5-pro", "gemini-3.5-flash"];
     let response: any = null;
     let geminiError: any = null;
 
+    const useOcrOnly = ocrText && typeof ocrConfidence === 'number' && ocrConfidence >= 80;
+
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
+        const currentModel = modelsToTry[Math.min(attempt - 1, modelsToTry.length - 1)];
+        console.log(`[Vercel Serverless AI] Attempt ${attempt}/${maxAttempts} using model: ${currentModel}`);
+        
         const customInstructions = isHandwritten 
           ? `NOTE: This is a HAND-WRITTEN/informal bill or receipt (difficult to read). Focus primarily on locating the final GRAND TOTAL/amount. Note that the time is specified as '${handwrittenTime || "12:00 PM"}' and this is a ${handwrittenIsFood ? "FOOD expense (so please classify category as 'Food' and billType as 'Food' or 'Restaurant')" : "non-food expense"}.` 
           : "";
 
-        const inlineParts = (images && Array.isArray(images) && images.length > 0)
-          ? images.map(img => ({ inlineData: { data: img.base64 || img.base64Image, mimeType: img.mimeType || "image/jpeg" } }))
-          : [{ inlineData: { data: base64Image, mimeType: mimeType || "image/jpeg" } }];
+        const contentsParts: any[] = [];
+        
+        if (useOcrOnly) {
+          console.log(`[Vercel Serverless AI] Using OCR-only mode (confidence: ${ocrConfidence}%)`);
+          contentsParts.push({ text: `RAW RECEIPT OCR TEXT:\n${ocrText}` });
+        } else {
+          console.log(`[Vercel Serverless AI] Using fallback mode (OCR confidence: ${ocrConfidence || 0}%) - including images`);
+          if (ocrText) {
+            contentsParts.push({ text: `RAW RECEIPT OCR TEXT (Confidence: ${ocrConfidence}%):\n${ocrText}` });
+          }
+          const inlineParts = (images && Array.isArray(images) && images.length > 0)
+            ? images.map(img => ({ inlineData: { data: img.base64 || img.base64Image, mimeType: img.mimeType || "image/jpeg" } }))
+            : (base64Image ? [{ inlineData: { data: base64Image, mimeType: mimeType || "image/jpeg" } }] : []);
+          contentsParts.push(...inlineParts);
+        }
 
-        response = await ai.models.generateContent({
-          model: "gemini-3.5-flash",
-          contents: [
-            {
-              parts: [
-                ...inlineParts,
-                { 
-                  text: `Analyze this receipt. Return standard JSON.
+        contentsParts.push({ 
+          text: `Analyze this receipt. Return standard JSON.
 ${customInstructions}
 Extract and classify into the following keys carefully:
 1. amount: This must be a number representing the grand total of the receipt. If multiple receipts, return the SUM of their grand totals.
@@ -280,10 +296,11 @@ Extract and classify into the following keys carefully:
 5. date: Extract the main payment/invoice date in DD-MM-YYYY format.
 6. time: ${isHandwritten && handwrittenTime ? `Return exactly "${handwrittenTime}"` : `Extract the time of the receipt. Use HH:mm format if possible (e.g. 13:45 or 08:30) or standard 12-hour AM/PM. Do your best to extract it. If not found, return "12:00 PM".`}
 7. isHandwritten: Set to true if the receipt is handwritten (or has pen/pencil markings, filled by hand templates, or is a hand-written slip), other set to false.`
-                }
-              ]
-            }
-          ],
+        });
+
+        response = await ai.models.generateContent({
+          model: currentModel,
+          contents: contentsParts,
           config: {
             responseMimeType: "application/json",
             responseSchema: {

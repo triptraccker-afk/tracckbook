@@ -60,6 +60,7 @@ import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import html2canvas from 'html2canvas';
+import { addPdfBrandingFooter } from './src/utils/pdfBranding';
 
 interface Transaction {
   id: string;
@@ -552,15 +553,22 @@ export default function App() {
     setHelpResponse('');
     
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_KEY || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || '' });
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: helpQuery,
-        config: {
-          systemInstruction: "You are a helpful assistant for 'AI Cashbook', a financial management app. The app allows users to create multiple cashbooks, add transactions (Cash In/Out), upload receipt images for AI detection (using Gemini), and export reports in Excel/PDF. Users can also filter transactions by type, category, and duration. Answer the user's question about how to use the app or general financial advice within the context of this app. Keep it concise.",
+      const customKey = localStorage.getItem('GEMINI_API_KEY') || '';
+      const response = await fetch('/api/gemini/ask', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(customKey ? { 'x-gemini-api-key': customKey } : {})
         },
+        body: JSON.stringify({ query: helpQuery })
       });
-      setHelpResponse(response.text || "I'm sorry, I couldn't generate a response.");
+      
+      if (!response.ok) {
+        throw new Error('Server returned an error response.');
+      }
+      
+      const result = await response.json();
+      setHelpResponse(result.text || "I'm sorry, I couldn't generate a response.");
     } catch (err) {
       console.error('Error asking AI:', err);
       setHelpResponse("Sorry, I encountered an error while processing your request.");
@@ -963,13 +971,13 @@ export default function App() {
                 // Clean base64 string if needed
                 const base64Data = img.includes('base64,') ? img.split('base64,')[1] : img;
                 
-                // Add image to PDF - fit to page (90%)
+                // Add image to PDF - fit with spacing for branding (Requirement 6)
                 const pageWidth = doc.internal.pageSize.getWidth();
                 const pageHeight = doc.internal.pageSize.getHeight();
-                const imgWidth = pageWidth * 0.9;
-                const imgHeight = pageHeight * 0.9;
+                const imgWidth = pageWidth * 0.85;
+                const imgHeight = pageHeight * 0.72; // leaves spacing below image for footer
                 const x = (pageWidth - imgWidth) / 2;
-                const y = (pageHeight - imgHeight) / 2;
+                const y = 18; // start below header line
                 doc.addImage(base64Data, format as any, x, y, imgWidth, imgHeight, undefined, 'FAST');
               } catch (e) {
                 console.error("Could not add image to PDF:", e);
@@ -984,6 +992,13 @@ export default function App() {
       } else {
         doc.setFontSize(12);
         doc.text("No attachments found in this book.", 14, 20);
+      }
+
+      // Add page numbers and branding footer
+      const totalPages = doc.getNumberOfPages();
+      for (let i = 1; i <= totalPages; i++) {
+        doc.setPage(i);
+        addPdfBrandingFooter(doc, i, totalPages, activeBook.name);
       }
 
       setReportLoading({ type: 'pdf', progress: 95 });

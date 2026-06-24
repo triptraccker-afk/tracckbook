@@ -55,7 +55,10 @@ app.post("/api/gemini/ask", async (req, res) => {
     return res.status(400).json({ error: "Missing query parameter." });
   }
 
-  const apiKey = getActiveApiKey();
+  const headerKey = req.headers["x-gemini-api-key"] || req.headers["X-Gemini-Api-Key"];
+  const customKey = typeof headerKey === 'string' ? headerKey.trim() : '';
+  const apiKey = customKey || getActiveApiKey();
+
   if (apiKey === "") {
     return res.status(500).json({ error: "AI is not configured. Please add GEMINI_API_KEY, GEMINI_KEY, or GOOGLE_API_KEY under Settings > Secrets on the platform." });
   }
@@ -70,15 +73,38 @@ app.post("/api/gemini/ask", async (req, res) => {
       }
     });
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: query,
-      config: {
-        systemInstruction: "You are a helpful assistant for 'Track Book', a financial management app. The app allows users to create multiple books, add transactions (Cash In/Out), upload receipt images for AI detection (using TrackBook AI), and export reports in Excel/PDF. Users can also filter transactions by type, category, and duration. Answer the user's question about how to use the app or general financial advice within the context of this app. Keep it concise.",
-      },
-    });
+    let response: any = null;
+    let geminiError: any = null;
+    const modelsToTry = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.5-pro", "gemini-3.5-flash"];
+    const maxAttempts = 3;
 
-    res.json({ text: response.text || "I'm sorry, I couldn't generate a response." });
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const currentModel = modelsToTry[attempt - 1];
+        console.log(`[Server help query] Attempt ${attempt}/${maxAttempts} using model: ${currentModel}`);
+        response = await ai.models.generateContent({
+          model: currentModel,
+          contents: query,
+          config: {
+            systemInstruction: "You are a helpful assistant for 'Track Book', a financial management app. The app allows users to create multiple books, add transactions (Cash In/Out), upload receipt images for AI detection (using TrackBook AI), and export reports in Excel/PDF. Users can also filter transactions by type, category, and duration. Answer the user's question about how to use the app or general financial advice within the context of this app. Keep it concise.",
+          },
+        });
+        geminiError = null;
+        break;
+      } catch (err: any) {
+        geminiError = err;
+        console.warn(`[Server help query] Attempt ${attempt} failed with error: ${err.message || err}`);
+        if (attempt < maxAttempts) {
+          await new Promise(resolve => setTimeout(resolve, 1500));
+        }
+      }
+    }
+
+    if (geminiError) {
+      throw geminiError;
+    }
+
+    res.json({ text: response?.text || "I'm sorry, I couldn't generate a response." });
   } catch (err: any) {
     console.error("[Server help query] Error asking AI:", err);
     res.status(500).json({ error: err.message || "An unexpected error occurred" });
@@ -87,7 +113,7 @@ app.post("/api/gemini/ask", async (req, res) => {
 
 // Gemini Health Check & Diagnostics Endpoint
 app.get("/api/gemini/health", async (req, res) => {
-  const modelName = "gemini-3.5-flash";
+  const modelName = "gemini-2.5-flash";
   const apiKey = getActiveApiKey();
   const keyLoaded = apiKey !== "";
   

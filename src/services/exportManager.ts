@@ -1,4 +1,5 @@
 import { jsPDF } from 'jspdf';
+import { addPdfBrandingFooter } from '../utils/pdfBranding';
 
 export interface ExportTask {
   id: string;
@@ -521,8 +522,8 @@ export class BackgroundExportManager {
               const gap = 5;
               const availableWidth = pageWidth - (margin * 2) - gap;
               const imgWidth = availableWidth / 2;
-              const imgHeight = pageHeight * 0.6;
-              const y = (pageHeight - imgHeight) / 2;
+              const imgHeight = pageHeight * 0.55; // leaves perfect space for footer (Requirement 6)
+              const y = 18; // Start below header
 
               // Add header text
               doc.setFontSize(10);
@@ -572,10 +573,10 @@ export class BackgroundExportManager {
 
                 const pageWidth = doc.internal.pageSize.getWidth();
                 const pageHeight = doc.internal.pageSize.getHeight();
-                const imgWidth = pageWidth * 0.9;
-                const imgHeight = pageHeight * 0.9;
+                const imgWidth = pageWidth * 0.85;
+                const imgHeight = pageHeight * 0.72; // leaves spacing below image for footer (Requirement 6)
                 const x = (pageWidth - imgWidth) / 2;
-                const y = (pageHeight - imgHeight) / 2;
+                const y = 18; // start below header
 
                 doc.setFontSize(10);
                 doc.setTextColor(80);
@@ -602,15 +603,11 @@ export class BackgroundExportManager {
       await new Promise(r => setTimeout(r, 100));
     }
 
-    // Add page numbers
+    // Add page numbers and branding footer
     const totalPages = doc.getNumberOfPages();
     for (let i = 1; i <= totalPages; i++) {
       doc.setPage(i);
-      doc.setFontSize(8);
-      doc.setTextColor(150);
-      doc.text(`Page ${i} of ${totalPages}`, doc.internal.pageSize.getWidth() / 2, doc.internal.pageSize.getHeight() - 5, { align: 'center' });
-      doc.text(`Report: ${task.cashbookName}`, 10, doc.internal.pageSize.getHeight() - 5);
-      doc.text(new Date().toLocaleDateString('en-IN'), doc.internal.pageSize.getWidth() - 30, doc.internal.pageSize.getHeight() - 5);
+      addPdfBrandingFooter(doc, i, totalPages, task.cashbookName);
     }
 
     task.progress = 98;
