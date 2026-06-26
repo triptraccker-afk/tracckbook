@@ -37,7 +37,7 @@ export default function Auth({
 
   const [mode, setMode] = useState<AuthMode>(() => {
     const path = window.location.pathname;
-    if (path === '/register') return 'signup';
+    if (path === '/register' || path === '/signup') return 'signup';
     if (path === '/forgot') return 'forgot';
     return 'signin';
   });
@@ -45,19 +45,19 @@ export default function Auth({
   // Bidirectional routing sync
   useEffect(() => {
     const path = location.pathname;
-    if (path === '/register' && mode !== 'signup') {
+    if ((path === '/register' || path === '/signup') && mode !== 'signup') {
       setMode('signup');
     } else if (path === '/forgot' && mode !== 'forgot') {
       setMode('forgot');
     } else if (path === '/login' && mode !== 'signin') {
       setMode('signin');
     }
-  }, [location.pathname]);
+  }, [location.pathname, mode]);
 
   useEffect(() => {
     const path = window.location.pathname;
-    if (mode === 'signup' && path !== '/register') {
-      navigate('/register');
+    if (mode === 'signup' && path !== '/register' && path !== '/signup') {
+      navigate('/signup');
     } else if (mode === 'signin' && path !== '/login') {
       navigate('/login');
     } else if (mode === 'forgot' && path !== '/forgot') {

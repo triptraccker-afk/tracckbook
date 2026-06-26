@@ -68,7 +68,7 @@ import { cn, formatCurrency, vibrate } from '../lib/utils';
 import { parseReceipt, parseMultipleReceipts } from '../services/gemini';
 import { processAndOcrImage } from '../services/ocrService';
 import { supabase } from '../lib/supabase';
-import { uploadToCloudinary, getOptimizedCloudinaryUrl, getExportOptimizedCloudinaryUrl } from '../services/cloudinary';
+import { uploadToCloudinary, getOptimizedCloudinaryUrl, getExportOptimizedCloudinaryUrl, getUserCloudinaryFolder } from '../services/cloudinary';
 import imageCompression from 'browser-image-compression';
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
@@ -181,11 +181,11 @@ function getCloudinaryThumbnail(url: string): string {
 }
 
 // Ensure base64 string never lands in custom Supabase columns/attachments tables
-async function validateAndResolveCloudinaryUrl(url: string, userId: string = 'anonymous'): Promise<string> {
+async function validateAndResolveCloudinaryUrl(url: string, user: any = null): Promise<string> {
   if (!url) return '';
   if (url.startsWith('data:')) {
     console.warn('[Validation] Base64 string detected! Uploading to Cloudinary first...');
-    const folder = `trackbook/${userId}`;
+    const folder = await getUserCloudinaryFolder(user);
     const uploadedUrl = await uploadToCloudinary(url, folder);
     return uploadedUrl;
   }
@@ -1477,7 +1477,48 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       lastBookOpenStart.current = null;
     }
   }, [activeBookId]);
-  
+
+  // Register backgroundExportManager onReviewAiScan handler
+  useEffect(() => {
+    backgroundExportManager.onReviewAiScan = (results: any[]) => {
+      if (results && results.length > 0) {
+        // Map the results to handwrittenQueue structure
+        const mappedQueue = results.map(item => ({
+          file: item.file,
+          result: item.result,
+          previewUrl: item.result.cloudinaryUrl || (item.file && item.file.type.startsWith('image/') ? URL.createObjectURL(item.file) : '')
+        }));
+        
+        setHandwrittenQueue(mappedQueue);
+        setCurrentQueueIndex(0);
+        
+        const firstItem = mappedQueue[0];
+        setAiAmount(String(firstItem.result.amount));
+        setAiMerchant(firstItem.result.merchant || 'Unknown Vendor');
+        setAiBillType(firstItem.result.billType || 'Food');
+        setAiCategory(firstItem.result.category || 'Food');
+        setAiDate(firstItem.result.date || '27-05-2026');
+        setAiTime(firstItem.result.time || '12:00 PM');
+        setAiMealType(firstItem.result.mealType || '');
+        setAiDescription(firstItem.result.description || 'Food Expense');
+        setAiOcrConfidence(firstItem.result.ocr_confidence ?? 100);
+        setAiOcrDuration(firstItem.result.ocr_duration_ms ?? 0);
+        setAiAnalytics(firstItem.result.analytics || null);
+        setAiCloudinaryUrl(firstItem.result.cloudinaryUrl || '');
+        setAiFile(firstItem.file);
+        setAiFilePreviewUrl(firstItem.previewUrl);
+        
+        setAiWorkflowStep('confirmation');
+        setAiConstructionModal('upload');
+      }
+    };
+    
+    return () => {
+      backgroundExportManager.onReviewAiScan = undefined;
+    };
+  }, []);
+
+
   // Quick Add State and Refs
   const [submitAndAddNew, setSubmitAndAddNew] = useState(false);
   const [quickAddSuccess, setQuickAddSuccess] = useState(false);
@@ -1518,6 +1559,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [isUploading, setIsUploading] = useState(false);
   const [uploadingMessage, setUploadingMessage] = useState('Detecting bill...');
   const [showAiWarning, setShowAiWarning] = useState(false);
+  const [aiWarningChecked, setAiWarningChecked] = useState(false);
   const [aiConstructionModal, setAiConstructionModal] = useState<'upload' | 'ask' | null>(null);
   const [showDropZone, setShowDropZone] = useState(false);
   const [aiMode, setAiMode] = useState<'split' | 'merge'>('split');
@@ -1527,11 +1569,14 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
   // Intelligent TrackBook AI Upload states
   const [aiWorkflowStep, setAiWorkflowStep] = useState<'group' | 'upload' | 'scanning' | 'confirmation'>('group');
+  const [activeAiTaskId, setActiveAiTaskId] = useState<string | null>(null);
+  const lastProcessedRef = useRef<number>(0);
   const [aiGroupSize, setAiGroupSize] = useState<number>(1);
   const [showGroupSizeModal, setShowGroupSizeModal] = useState(false);
   const [aiScanStatus, setAiScanStatus] = useState<string>('Analyzing bill...');
   const [aiProgress, setAiProgress] = useState<number>(0);
   const [aiFile, setAiFile] = useState<File | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [aiFilePreviewUrl, setAiFilePreviewUrl] = useState<string>('');
   const [isHandwritten, setIsHandwritten] = useState<boolean>(false);
   const [handwrittenTime, setHandwrittenTime] = useState<string>('12:00 PM');
@@ -1551,6 +1596,102 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [aiTime, setAiTime] = useState<string>('');
   const [aiMealType, setAiMealType] = useState<string>('');
   const [aiDescription, setAiDescription] = useState<string>('');
+  const [aiOcrConfidence, setAiOcrConfidence] = useState<number>(100);
+  const [aiOcrDuration, setAiOcrDuration] = useState<number>(0);
+  const [aiCloudinaryUrl, setAiCloudinaryUrl] = useState<string>('');
+
+  const [aiAnalytics, setAiAnalytics] = useState<{
+    upload_duration_ms?: number;
+    ocr_duration_ms?: number;
+    ai_duration_ms?: number;
+    total_duration_ms?: number;
+  } | null>(null);
+
+  const [uploadedCount, setUploadedCount] = useState<number>(() => {
+    try {
+      const todayKey = `uploaded_count_${new Date().toISOString().split('T')[0]}`;
+      return parseInt(localStorage.getItem(todayKey) || '0', 10);
+    } catch {
+      return 0;
+    }
+  });
+
+  const [processedCount, setProcessedCount] = useState<number>(() => {
+    try {
+      const todayKey = `processed_count_${new Date().toISOString().split('T')[0]}`;
+      return parseInt(localStorage.getItem(todayKey) || '0', 10);
+    } catch {
+      return 0;
+    }
+  });
+
+  const incrementUploadedCount = () => {
+    setUploadedCount(prev => {
+      const newVal = prev + 1;
+      try {
+        const todayKey = `uploaded_count_${new Date().toISOString().split('T')[0]}`;
+        localStorage.setItem(todayKey, String(newVal));
+      } catch (e) {}
+      return newVal;
+    });
+  };
+
+  const incrementProcessedCount = (by: number = 1) => {
+    setProcessedCount(prev => {
+      const newVal = prev + by;
+      try {
+        const todayKey = `processed_count_${new Date().toISOString().split('T')[0]}`;
+        localStorage.setItem(todayKey, String(newVal));
+      } catch (e) {}
+      return newVal;
+    });
+  };
+
+  // Listen to background progress of active AI task
+  useEffect(() => {
+    if (!activeAiTaskId) return;
+    
+    lastProcessedRef.current = 0;
+    
+    const unsubscribe = backgroundExportManager.subscribe(() => {
+      const task = backgroundExportManager.getTaskList().find(t => t.id === activeAiTaskId);
+      if (task) {
+        setAiProgress(task.progress);
+        setAiScanStatus(task.message || 'Scanning bill...');
+        
+        if (task.aiProcessedCount !== undefined) {
+          const diff = task.aiProcessedCount - lastProcessedRef.current;
+          if (diff > 0) {
+            incrementProcessedCount(diff);
+            lastProcessedRef.current = task.aiProcessedCount;
+          }
+        }
+        
+        if (task.status === 'completed') {
+          backgroundExportManager.getAiScanResults(activeAiTaskId).then(results => {
+            if (results && results.length > 0) {
+              if (backgroundExportManager.onReviewAiScan) {
+                backgroundExportManager.onReviewAiScan(results);
+              }
+            } else {
+              setAiConstructionModal(null);
+            }
+            setActiveAiTaskId(null);
+          });
+        } else if (task.status === 'failed') {
+          setAiScanStatus('Scanning failed: ' + (task.error || 'Please try again.'));
+          setActiveAiTaskId(null);
+          setTimeout(() => {
+            setAiConstructionModal(null);
+          }, 3500);
+        }
+      }
+    });
+    
+    return () => {
+      unsubscribe();
+    };
+  }, [activeAiTaskId]);
 
   // Share Entries states
   const [showShareModal, setShowShareModal] = useState(false);
@@ -1973,11 +2114,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       } else if (lastKey === 'A') {
         if (key === 'U' && activeBookId) {
           e.preventDefault();
-          setAiWorkflowStep('group');
-          setAiGroupSize(1);
-          setAiFile(null);
-          setAiFilePreviewUrl('');
-          setAiConstructionModal('upload');
+          setShowAiWarning(true);
           lastKey = '';
         }
       } else if (lastKey === 'I') {
@@ -2034,18 +2171,10 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [activeUploadTarget, setActiveUploadTarget] = useState<'ai' | 'transaction' | null>(null);
 
   const handleAiOcrFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setAiFile(file);
-      if (file.type.startsWith('image/')) {
-        setAiFilePreviewUrl(URL.createObjectURL(file));
-      } else {
-        setAiFilePreviewUrl('');
-      }
-      setAiWorkflowStep('group');
-      setAiGroupSize(1);
-      setError(null);
-      setAiConstructionModal('upload');
+    if (e.target.files && e.target.files.length > 0) {
+      const files = Array.from(e.target.files).slice(0, 5);
+      setSelectedFiles(files);
+      startAiUploadReceiptParsing(files);
     }
     if (e.target) e.target.value = '';
   };
@@ -2581,15 +2710,14 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           .like('file_url', 'data:%');
 
         if (error1) {
-          console.error('[Migration] Error checking legacy attachments:', error1);
+          console.warn('[Migration] Warning checking legacy attachments:', error1);
         } else if (legacyAttachments && legacyAttachments.length > 0) {
           console.log(`[Migration] Found ${legacyAttachments.length} base64 attachment rows to migrate.`);
           for (const row of legacyAttachments) {
             if (!isSubscribed) return;
             try {
               console.log(`[Migration] Migrating attachment item ${row.id}...`);
-              const userIdentifier = session?.user?.email || session?.user?.id || 'anonymous';
-              const cloudinaryFolder = `trackbook/${userIdentifier}`;
+              const cloudinaryFolder = await getUserCloudinaryFolder(session?.user);
               const cloudinaryUrl = await uploadToCloudinary(row.file_url, cloudinaryFolder);
               
               if (cloudinaryUrl) {
@@ -2604,7 +2732,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 console.log(`[Migration] successfully migrated attachment row ${row.id} to Cloudinary.`);
               }
             } catch (err) {
-              console.error(`[Migration] Failed to migrate attachment row ${row.id}:`, err);
+              console.warn(`[Migration] Warning: Failed to migrate attachment row ${row.id}:`, err);
             }
           }
         }
@@ -2616,15 +2744,14 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           .like('file_url', 'data:%');
 
         if (error2) {
-          console.error('[Migration] Error checking legacy ai_attachments:', error2);
+          console.warn('[Migration] Warning checking legacy ai_attachments:', error2);
         } else if (legacyAiAttachments && legacyAiAttachments.length > 0) {
           console.log(`[Migration] Found ${legacyAiAttachments.length} base64 AI attachment rows to migrate.`);
           for (const row of legacyAiAttachments) {
             if (!isSubscribed) return;
             try {
               console.log(`[Migration] Migrating AI attachment item ${row.id}...`);
-              const userIdentifier = session?.user?.email || session?.user?.id || 'anonymous';
-              const cloudinaryFolder = `trackbook/${userIdentifier}`;
+              const cloudinaryFolder = await getUserCloudinaryFolder(session?.user);
               const cloudinaryUrl = await uploadToCloudinary(row.file_url, cloudinaryFolder);
               
               if (cloudinaryUrl) {
@@ -2657,8 +2784,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               if (!isSubscribed) return;
               try {
                 console.log(`[Migration] Migrating image item ${row.id}...`);
-                const userIdentifier = session?.user?.email || session?.user?.id || 'anonymous';
-                const cloudinaryFolder = `trackbook/${userIdentifier}`;
+                const cloudinaryFolder = await getUserCloudinaryFolder(session?.user);
                 const cloudinaryUrl = await uploadToCloudinary(row.image_url, cloudinaryFolder);
                 
                 if (cloudinaryUrl) {
@@ -3120,7 +3246,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
       // 3. Save into Supabase 'attachments' table permanently
       if (supabase && session) {
-        const validatedUrl = await validateAndResolveCloudinaryUrl(cloudUrl, session.user.id);
+        const validatedUrl = await validateAndResolveCloudinaryUrl(cloudUrl, session.user);
         console.log('[BackgroundUpload] Saving attachment metadata to database...', { transactionId, file_url: validatedUrl });
         const { error: insertError } = await supabase
           .from('attachments')
@@ -3179,9 +3305,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     }
   };
 
-  const handleRetryUpload = (blobUrl: string, transactionId: string) => {
-    const userIdentifier = session?.user?.email || session?.user?.id || 'anonymous';
-    const cloudinaryFolder = `trackbook/${userIdentifier}`;
+  const handleRetryUpload = async (blobUrl: string, transactionId: string) => {
+    const cloudinaryFolder = await getUserCloudinaryFolder(session?.user);
     uploadSingleImageInBackground(blobUrl, transactionId, cloudinaryFolder);
   };
 
@@ -3197,8 +3322,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     setIsSubmitting(true);
     setError(null);
 
-    const userIdentifier = session?.user?.email || session?.user?.id || 'anonymous';
-    const cloudinaryFolder = `trackbook/${userIdentifier}`;
+    const cloudinaryFolder = await getUserCloudinaryFolder(session?.user);
 
     try {
       if (editingTransaction) {
@@ -3310,7 +3434,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 uploadSingleImageInBackground(blobUrl, editingTransaction.id, cloudinaryFolder);
               });
             } catch (err: any) {
-              console.error('[BackgroundSave] Supabase sync failure on edit:', err);
+              console.warn('[BackgroundSave] Supabase sync warning on edit:', err);
             }
           })();
         }
@@ -3439,7 +3563,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 uploadSingleImageInBackground(blobUrl, tempId, cloudinaryFolder);
               });
             } catch (err: any) {
-              console.error('[BackgroundSave] Supabase insert transaction background sync failure:', err);
+              console.warn('[BackgroundSave] Supabase insert transaction background sync warning:', err);
             }
           })();
         } else {
@@ -4480,8 +4604,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const processFiles = async (files: FileList | File[]) => {
     if (!files || files.length === 0 || !activeBookId) return;
 
-    const userIdentifier = session?.user?.email || session?.user?.id || 'anonymous';
-    const cloudinaryFolder = `trackbook/${userIdentifier}`;
+    const cloudinaryFolder = await getUserCloudinaryFolder(session?.user);
 
     // Limit to 5 images as per user request
     const filesToProcess = Array.from(files).slice(0, 5) as File[];
@@ -4569,7 +4692,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 console.log('[processFiles] Saving AI attachments rows...');
                 const aiAttachmentInserts = await Promise.all(
                   cloudinaryUrls.map(async (url) => {
-                    const validated = await validateAndResolveCloudinaryUrl(url, session.user.id);
+                    const validated = await validateAndResolveCloudinaryUrl(url, session.user);
                     return {
                       entry_id: newTransactionId,
                       user_id: session.user.id,
@@ -4677,7 +4800,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       }
 
                       console.log('[processFiles] Saving single AI image attachment row...');
-                      const validatedSingleUrl = await validateAndResolveCloudinaryUrl(cloudinaryUrl, session.user.id);
+                      const validatedSingleUrl = await validateAndResolveCloudinaryUrl(cloudinaryUrl, session.user);
                       const aiAttachmentInserts = [{
                         entry_id: newTransactionId,
                         user_id: session.user.id,
@@ -4743,7 +4866,6 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     // Reset input
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
-
   const startAiUploadReceiptParsing = async (filesInput: File | File[] | FileList) => {
     if (!activeBookId) return;
 
@@ -4758,344 +4880,43 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
     if (files.length === 0) return;
 
-    cancelScanRef.current = false;
+    // Limit to 5 receipts as per BUG 2
+    const filesToScan = files.slice(0, 5);
+    setSelectedFiles(filesToScan);
+
+    // Auto-detect task name (BUG 3: Food vs Travel Receipts)
+    const isFood = filesToScan.some(f => 
+      f.name.toLowerCase().includes('food') || 
+      f.name.toLowerCase().includes('restaurant') || 
+      f.name.toLowerCase().includes('meal') || 
+      f.name.toLowerCase().includes('cafe') || 
+      f.name.toLowerCase().includes('swiggy') || 
+      f.name.toLowerCase().includes('zomato')
+    ) || (isHandwritten && handwrittenIsFood);
+
+    const taskName = isFood ? "Food Receipts" : "Travel Receipts";
+
+    // Transition the wizard modal to the scanning/loading step
+    setAiConstructionModal('upload');
     setAiWorkflowStep('scanning');
-    setError(null);
-    setAiProgress(0); // Reset progress
 
-    const totalFiles = files.length;
-    const userIdentifier = session?.user?.email || session?.user?.id || 'anonymous';
-    const cloudinaryFolder = `trackbook/${userIdentifier}`;
-
-    const newTransactionsToAppend: Transaction[] = [];
-    const cacheUpdates: Array<{ id: string; item: any }> = [];
-    const tempHandwrittenQueue: Array<{ file: File; result: any; previewUrl: string }> = [];
-
-    const segmentShare = 100 / totalFiles;
-
-    for (let i = 0; i < totalFiles; i++) {
-      if (cancelScanRef.current) {
-        console.log("[Client AI] Scanning cancelled by user.");
-        return;
-      }
-
-      const file = files[i];
-      const startTotalTime = Date.now();
-      const baseProgress = i * segmentShare;
-
-      try {
-        // Step 3 Progressive Flow:
-        // 10% Uploading
-        setAiProgress(baseProgress + (0.10 * segmentShare));
-        setAiScanStatus(`Uploading & reading receipt ${i + 1}/${totalFiles}...`);
-        await new Promise(resolve => setTimeout(resolve, 200));
-
-        if (cancelScanRef.current) return;
-
-        // 25% Optimizing Image
-        setAiProgress(baseProgress + (0.25 * segmentShare));
-        setAiScanStatus(`Optimizing image for fast extraction...`);
-
-        // Run OCR and image optimization
-        const ocrResult = await processAndOcrImage(file, (progress, stepName) => {
-          if (cancelScanRef.current) return;
-          if (stepName.includes('Optimizing')) {
-            setAiProgress(baseProgress + (0.25 * segmentShare));
-            setAiScanStatus(`Optimizing image...`);
-          } else if (stepName.includes('OCR')) {
-            // 50% OCR Processing
-            setAiProgress(baseProgress + (0.50 * segmentShare));
-            setAiScanStatus(`OCR Processing: reading receipt text...`);
-          }
-        });
-
-        if (cancelScanRef.current) return;
-
-        // Force 50% for OCR complete
-        setAiProgress(baseProgress + (0.50 * segmentShare));
-        setAiScanStatus(`OCR reading complete. Confidence: ${ocrResult.confidence}%`);
-        await new Promise(resolve => setTimeout(resolve, 200));
-
-        if (cancelScanRef.current) return;
-
-        // 75% AI Extraction
-        setAiProgress(baseProgress + (0.75 * segmentShare));
-        setAiScanStatus(`AI Structured Extraction running...`);
-
-        const aiStartTime = Date.now();
-        const customKey = localStorage.getItem('GEMINI_API_KEY') || '';
-        const response = await fetch('/api/gemini/parse-receipt', {
-          method: 'POST',
-          headers: { 
-            'Content-Type': 'application/json',
-            ...(customKey ? { 'x-gemini-api-key': customKey } : {})
-          },
-          body: JSON.stringify({
-            base64Image: ocrResult.base64,
-            mimeType: 'image/jpeg',
-            groupSize: aiGroupSize,
-            isHandwritten,
-            handwrittenTime,
-            handwrittenIsFood,
-            customApiKey: customKey,
-            ocrText: ocrResult.text,
-            ocrConfidence: ocrResult.confidence
-          })
-        });
-
-        // STEP 6: Before JSON.parse(), check response.ok and content-type
-        const contentType = response.headers.get("content-type") || "";
-        if (!response.ok || contentType.includes("text/html")) {
-          const rawText = await response.text();
-          console.error("Receipt processing failed. Please try again.");
-          console.error("Status code:", response.status);
-          console.error("Endpoint:", '/api/gemini/parse-receipt');
-          console.error("Raw response:", rawText);
-          throw new Error("Receipt processing failed. Please try again.");
-        }
-
-        const result = await response.json();
-        const aiDuration = Date.now() - aiStartTime;
-
-        if (cancelScanRef.current) return;
-
-        // 90% Saving Transaction
-        setAiProgress(baseProgress + (0.90 * segmentShare));
-        setAiScanStatus(`Saving transaction entry...`);
-
-        // Compute performance analytics
-        const totalProcessingMs = Date.now() - startTotalTime;
-        const analytics = {
-          ocr_duration_ms: ocrResult.ocr_duration_ms,
-          ai_duration_ms: aiDuration,
-          total_processing_ms: totalProcessingMs
-        };
-
-        // Track slow receipts automatically (Step 8)
-        if (totalProcessingMs > 10000) {
-          console.warn(`[Analytics] Slow receipt detected! total_processing_ms: ${totalProcessingMs}ms (Target <= 10000ms). ocr_duration_ms: ${ocrResult.ocr_duration_ms}ms, ai_duration_ms: ${aiDuration}ms`);
-        } else {
-          console.log(`[Analytics] Receipt processed successfully in ${totalProcessingMs}ms. ocr_duration_ms: ${ocrResult.ocr_duration_ms}ms, ai_duration_ms: ${aiDuration}ms`);
-        }
-
-        // Store analytics locally in localStorage
-        try {
-          const localAnalyticsStr = localStorage.getItem('trackbook_ai_analytics') || '[]';
-          const localAnalytics = JSON.parse(localAnalyticsStr);
-          localAnalytics.push({
-            file: file.name,
-            timestamp: new Date().toISOString(),
-            ...analytics
-          });
-          localStorage.setItem('trackbook_ai_analytics', JSON.stringify(localAnalytics));
-        } catch (analyticsErr) {
-          console.error('Failed to save analytics locally:', analyticsErr);
-        }
-
-        // Extracted values
-        const parsedAmount = parseFloat(result.amount) || 0;
-        const parsedMerchant = result.merchant || 'Unknown Vendor';
-        const parsedBillType = result.billType || 'Food';
-        const parsedCategory = result.category || 'Food';
-        const parsedDate = result.date || '27-05-2026';
-        const parsedDescription = result.description || 'Food Expense';
-        const parsedTime = result.time || '12:00 PM';
-        const parsedMealType = result.mealType || '';
-        const detectedHandwritten = result.isHandwritten ?? isHandwritten;
-
-        // Create preview URL
-        const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : '';
-
-        if (detectedHandwritten) {
-          // Push to handwritten preview verification queue
-          tempHandwrittenQueue.push({
-            file,
-            result: {
-              ...result,
-              amount: parsedAmount,
-              merchant: parsedMerchant,
-              billType: parsedBillType,
-              category: parsedCategory,
-              date: parsedDate,
-              time: parsedTime,
-              mealType: parsedMealType,
-              description: parsedDescription
-            },
-            previewUrl
-          });
-        } else {
-          // Computer-printed printed bill - SAVE INSTANTLY / DIRECT AUTO-SAVE!
-          const parts = parsedDate.split('-');
-          let dateObj = new Date();
-          if (parts.length === 3) {
-            dateObj = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
-          }
-
-          const tempId = safeUUID();
-          const imagesToStore = previewUrl ? [previewUrl] : [];
-
-          const ocrData = {
-            merchant: parsedMerchant,
-            billType: parsedBillType,
-            extractedTime: parsedTime,
-            mealType: parsedMealType,
-            groupSize: aiGroupSize
-          };
-
-          const newTransaction: Transaction = {
-            id: tempId,
-            amount: parsedAmount,
-            type: 'out',
-            description: parsedDescription,
-            category: parsedCategory || 'General',
-            mode: 'Online',
-            date: dateObj,
-            images: imagesToStore,
-            imageLayout: 'split',
-            isAi: true
-          };
-
-          attachmentCache.set(tempId, { images: imagesToStore, isAi: true });
-          newTransactionsToAppend.push(newTransaction);
-
-          cacheUpdates.push({
-            id: tempId,
-            item: {
-              id: tempId,
-              amount: parsedAmount,
-              type: 'out',
-              description: parsedDescription,
-              category: parsedCategory || 'General',
-              mode: 'Online',
-              date: dateObj,
-              image_layout: 'split',
-              user_id: session?.user?.id,
-              cashbook_id: activeBookId
-            }
-          });
-
-          // Run background database upload
-          if (supabase && session) {
-            (async () => {
-              try {
-                let imageUrl = await uploadToCloudinary(file, cloudinaryFolder);
-                const payload: any = {
-                  id: tempId,
-                  cashbook_id: activeBookId,
-                  user_id: session.user.id,
-                  amount: parsedAmount,
-                  type: 'out',
-                  description: parsedDescription,
-                  category: parsedCategory || 'General',
-                  mode: 'Online',
-                  date: safeToISOString(dateObj),
-                  image_layout: 'split'
-                };
-
-                const { error: entryError } = await supabase.from('entries').insert([payload]);
-                if (entryError) {
-                  if (entryError.code === '42703' || entryError.message?.includes('image_layout')) {
-                    delete payload.image_layout;
-                    const { error: retryError } = await supabase.from('entries').insert([payload]);
-                    if (retryError) throw retryError;
-                  } else {
-                    throw entryError;
-                  }
-                }
-
-                if (imageUrl) {
-                  const validatedUrl = await validateAndResolveCloudinaryUrl(imageUrl, session.user.id);
-                  const aiAttachmentInserts = [{
-                    entry_id: tempId,
-                    user_id: session.user.id,
-                    file_url: validatedUrl,
-                    file_name: JSON.stringify({
-                      original_name: file.name,
-                      ocr: ocrData,
-                      classification: parsedBillType,
-                      groupSize: aiGroupSize,
-                      analytics
-                    }),
-                    file_type: 'image'
-                  }];
-                  await supabase.from('ai_attachments').insert(aiAttachmentInserts);
-                }
-              } catch (dbErr) {
-                console.error('[AI Direct Save BG] Database sync error:', dbErr);
-              }
-            })();
-          }
-        }
-      } catch (err: any) {
-        console.error(`[AI Unified Parse Error] file ${file.name}:`, err);
-        setError(err.message || `Failed to process document: ${file.name}`);
-      }
+    // Increment uploaded counts today
+    for (let i = 0; i < filesToScan.length; i++) {
+      incrementUploadedCount();
     }
 
-    if (cancelScanRef.current) return;
-
-    // If an error occurred and no files succeeded, terminate early without holding up
-    if (error && newTransactionsToAppend.length === 0 && tempHandwrittenQueue.length === 0) {
-      setAiWorkflowStep('group');
-      setIsUploading(false);
-      return;
-    }
-
-    // 100% Complete
-    setAiProgress(100);
-    setAiScanStatus("Receipt processed successfully.");
-
-    // Show custom toast notification
-    setBackgroundScanResult("Receipt processed successfully.");
-    setTimeout(() => {
-      setBackgroundScanResult(null);
-    }, 6000);
-
-    // Apply auto-saved transactions to local React state
-    if (newTransactionsToAppend.length > 0) {
-      setBooks(prevBooks => prevBooks.map(b => 
-        b.id === activeBookId 
-          ? { ...b, transactions: [...newTransactionsToAppend, ...b.transactions] }
-          : b
-      ));
-
-      const currCached = entriesCache.get(activeBookId) || [];
-      entriesCache.set(activeBookId, [...cacheUpdates.map(cu => cu.item), ...currCached]);
-    }
-
-    // Handle flow termination
-    if (tempHandwrittenQueue.length > 0) {
-      setHandwrittenQueue(tempHandwrittenQueue);
-      setCurrentQueueIndex(0);
-
-      const firstItem = tempHandwrittenQueue[0];
-      setAiAmount(String(firstItem.result.amount));
-      setAiMerchant(firstItem.result.merchant || 'Unknown Vendor');
-      setAiBillType(firstItem.result.billType || 'Food');
-      setAiCategory(firstItem.result.category || 'Food');
-      setAiDate(firstItem.result.date || '27-05-2026');
-      setAiTime(firstItem.result.time || '12:00 PM');
-      setAiMealType(firstItem.result.mealType || '');
-      setAiDescription(firstItem.result.description || 'Food Expense');
-      setAiFile(firstItem.file);
-      setAiFilePreviewUrl(firstItem.previewUrl);
-
-      setAiWorkflowStep('confirmation');
-    } else {
-      // Direct success redirect if all were printed bills
-      if (supabase && session && newTransactionsToAppend.length > 0) {
-        setAiScanStatus('Synchronizing entries...');
-        await fetchData();
-      }
-
-      setAiWorkflowStep('group');
-      setAiGroupSize(1);
-      setIsUploading(false);
-      setAiConstructionModal(null);
-
-      const slug = getBookSlug(activeBook?.name || '', activeBook?.id || '');
-      navigate(`/cashbooks/${slug}/entries`);
-    }
+    // Enqueue the AI Scan Task in the background queue
+    const taskId = await backgroundExportManager.enqueueAiScanTask(
+      activeBookId,
+      activeBook?.name || 'Cashbook',
+      filesToScan,
+      taskName,
+      aiGroupSize,
+      isHandwritten,
+      handwrittenTime,
+      handwrittenIsFood
+    );
+    setActiveAiTaskId(taskId);
   };
 
   const handleSaveAiEntry = async () => {
@@ -5113,8 +4934,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     }
 
     const tempId = safeUUID();
-    const userIdentifier = session?.user?.email || session?.user?.id || 'anonymous';
-    const cloudinaryFolder = `trackbook/${userIdentifier}`;
+    const cloudinaryFolder = await getUserCloudinaryFolder(session?.user);
 
     const localBlobUrl = aiFilePreviewUrl;
     const imagesToStore = localBlobUrl ? [localBlobUrl] : [];
@@ -5124,7 +4944,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       billType: aiBillType,
       extractedTime: aiTime,
       mealType: aiMealType,
-      groupSize: aiGroupSize
+      groupSize: aiGroupSize,
+      ocr_confidence: aiOcrConfidence,
+      ocr_duration_ms: aiOcrDuration
     };
 
     const newTransaction: Transaction = {
@@ -5166,6 +4988,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     ));
 
     // Run direct database updates in background!
+    incrementProcessedCount(1);
     if (supabase && session) {
       const savedAmount = amountNum;
       const savedDescription = aiDescription;
@@ -5173,11 +4996,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       const savedBillType = aiBillType;
       const savedDateObj = dateObj;
       const savedFile = aiFile;
+      const savedCloudinaryUrl = aiCloudinaryUrl;
 
       (async () => {
         try {
-          let imageUrl = '';
-          if (savedFile) {
+          let imageUrl = savedCloudinaryUrl;
+          if (!imageUrl && savedFile) {
             imageUrl = await uploadToCloudinary(savedFile, cloudinaryFolder);
           }
 
@@ -5206,7 +5030,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           }
 
           if (imageUrl) {
-            const validatedUrl = await validateAndResolveCloudinaryUrl(imageUrl, session.user.id);
+            const validatedUrl = await validateAndResolveCloudinaryUrl(imageUrl, session.user);
             const aiAttachmentInserts = [{
               entry_id: tempId,
               user_id: session.user.id,
@@ -5241,11 +5065,21 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       setAiTime(nextItem.result.time || '12:00 PM');
       setAiMealType(nextItem.result.mealType || '');
       setAiDescription(nextItem.result.description || 'Food Expense');
+      setAiOcrConfidence(nextItem.result.ocr_confidence ?? 100);
+      setAiOcrDuration(nextItem.result.ocr_duration_ms ?? 0);
+      setAiAnalytics(nextItem.result.analytics || null);
+      setAiCloudinaryUrl(nextItem.result.cloudinaryUrl || '');
       setAiFile(nextItem.file);
       setAiFilePreviewUrl(nextItem.previewUrl);
       setIsUploading(false); // Let user edit next
     } else {
-      // Completed last handwritten entry, close modal and redirect
+      // Completed last entry, close modal, set success toast, and redirect
+      const processedTotal = handwrittenQueue.length;
+      setBackgroundScanResult(`${processedTotal} of ${processedTotal} receipts processed successfully`);
+      setTimeout(() => {
+        setBackgroundScanResult(null);
+      }, 6000);
+
       setAiWorkflowStep('group');
       setAiGroupSize(1);
       setIsUploading(false);
@@ -5729,7 +5563,15 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 <div className="flex items-center gap-2 sm:gap-4">
                 <div className="flex items-center gap-1.5 sm:gap-2.5">
                   <button 
-                    onClick={() => handleSelectBook(null)}
+                    onClick={() => {
+                      vibrate();
+                      if (currentTabName !== 'entries') {
+                        const slug = getBookSlug(activeBook?.name || '', activeBook?.id || '');
+                        navigate(`/cashbooks/${slug}/entries`);
+                      } else {
+                        handleSelectBook(null);
+                      }
+                    }}
                     className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-full text-slate-450 transition-colors shrink-0"
                   >
                     <ArrowLeft size={22} className="sm:w-[24px] sm:h-[24px]" />
@@ -5920,11 +5762,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 <button
                   onClick={() => { 
                     vibrate(); 
-                    setAiWorkflowStep('group'); 
-                    setAiGroupSize(1);
-                    setAiFile(null);
-                    setAiFilePreviewUrl('');
-                    setAiConstructionModal('upload'); 
+                    setShowAiWarning(true);
                   }}
                   className={cn(
                     "group/shortcut relative flex-1 sm:flex-none flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-bold transition-all active:scale-95 cursor-pointer",
@@ -6433,11 +6271,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     <button
                       onClick={() => { 
                         vibrate(); 
-                        setAiWorkflowStep('group'); 
-                        setAiGroupSize(1);
-                        setAiFile(null);
-                        setAiFilePreviewUrl('');
-                        setAiConstructionModal('upload'); 
+                        setShowAiWarning(true);
                       }}
                       className={cn(
                         "w-full flex items-center justify-center gap-2 py-3.5 rounded-2xl font-black shadow-sm transition-all active:scale-95 cursor-pointer text-xs sm:text-sm border",
@@ -6815,14 +6649,34 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       ))}
                     </div>
 
+                    {/* Today's Batch Tracker Component */}
+                    <div className="max-w-xs mx-auto p-4 rounded-2xl bg-slate-50 dark:bg-zinc-900/40 border border-slate-100 dark:border-zinc-900/20 text-left font-sans space-y-2">
+                      <p className="text-[10px] font-bold text-slate-400 dark:text-zinc-500 uppercase tracking-wider">Today's Batch Tracker</p>
+                      <div className="grid grid-cols-2 gap-3 text-xs">
+                        <div className="space-y-0.5">
+                          <p className="text-slate-500 dark:text-slate-400">Uploaded Today</p>
+                          <p className="text-sm font-black text-slate-800 dark:text-slate-200">{uploadedCount}</p>
+                        </div>
+                        <div className="space-y-0.5 border-l border-slate-200/60 dark:border-zinc-800/60 pl-3">
+                          <p className="text-slate-500 dark:text-slate-400">Processed Today</p>
+                          <p className="text-sm font-black text-indigo-600 dark:text-indigo-400">{processedCount}</p>
+                        </div>
+                      </div>
+                    </div>
+
                     {/* Background and Cancel Buttons */}
                     <div className="flex items-center gap-3 max-w-xs mx-auto pt-4 border-t border-slate-100 dark:border-zinc-900/60">
                       <button
                         type="button"
                         onClick={() => {
                           vibrate();
+                          setBackgroundScanResult("Your receipts are scanning in the background! Track status in the Download Center.");
+                          setTimeout(() => {
+                            setBackgroundScanResult(null);
+                          }, 8000);
                           // Keep processing but leave immediately
                           setAiConstructionModal(null);
+                          setShowDownloadCenter(true);
                           const slug = getBookSlug(activeBook?.name || '', activeBook?.id || '');
                           navigate(`/cashbooks/${slug}/entries`);
                         }}
@@ -6900,6 +6754,58 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                             Group Size: {aiGroupSize} {aiGroupSize === 1 ? 'Member' : 'Members'}
                           </p>
                         </div>
+
+                        {/* OCR Confidence Score and Status */}
+                        <div className="pt-2 text-left space-y-1 bg-slate-50 dark:bg-zinc-900/40 p-3 rounded-2xl border border-slate-100 dark:border-zinc-900/20 font-sans">
+                          <p className="text-[10px] font-bold text-slate-400 dark:text-zinc-500 uppercase tracking-wider">OCR Confidence Score</p>
+                          <div className="flex items-center gap-2">
+                            <span className={cn(
+                              "text-sm font-black",
+                              aiOcrConfidence >= 90 ? "text-emerald-600 dark:text-emerald-400" :
+                              aiOcrConfidence >= 70 ? "text-amber-600 dark:text-amber-400" :
+                              "text-rose-600 dark:text-rose-400"
+                            )}>
+                              {aiOcrConfidence.toFixed(0)}%
+                            </span>
+                            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-100 dark:bg-zinc-800 text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                              {aiOcrConfidence >= 90 ? "High" : aiOcrConfidence >= 70 ? "Moderate" : "Low"}
+                            </span>
+                          </div>
+                          <p className="text-[10px] font-medium text-slate-500 dark:text-slate-400 pt-0.5">
+                            {aiOcrConfidence >= 90 && "High (No manual check needed)"}
+                            {aiOcrConfidence >= 70 && aiOcrConfidence < 90 && "Moderate (Check values carefully)"}
+                            {aiOcrConfidence < 70 && "Low (Verify all fields manually)"}
+                          </p>
+                          {aiOcrConfidence < 70 && (
+                            <div className="mt-1 px-2 py-0.5 rounded bg-rose-50 dark:bg-rose-950/20 text-rose-600 dark:text-rose-400 border border-rose-100 dark:border-rose-950 text-[9px] font-bold uppercase tracking-wider">
+                              Below 70%: Gemini Fallback Allowed
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Performance Analytics details */}
+                        {aiAnalytics && (
+                          <div className="pt-2 text-left space-y-1 bg-slate-50 dark:bg-zinc-900/40 p-3 rounded-2xl border border-slate-100 dark:border-zinc-900/20 font-sans">
+                            <p className="text-[10px] font-bold text-slate-400 dark:text-zinc-500 uppercase tracking-wider">Performance Analytics</p>
+                            <div className="grid grid-cols-2 gap-1 text-[11px] text-slate-500 dark:text-slate-400 font-mono">
+                              <span>Upload:</span>
+                              <span className="text-right font-medium">{aiAnalytics.upload_duration_ms ? `${(aiAnalytics.upload_duration_ms / 1000).toFixed(2)}s` : '0.00s'}</span>
+                              <span>OCR:</span>
+                              <span className="text-right font-medium">{aiAnalytics.ocr_duration_ms ? `${(aiAnalytics.ocr_duration_ms / 1000).toFixed(2)}s` : '0.00s'}</span>
+                              <span>AI/Rules:</span>
+                              <span className="text-right font-medium">{aiAnalytics.ai_duration_ms ? `${(aiAnalytics.ai_duration_ms / 1000).toFixed(2)}s` : '0.00s'}</span>
+                              <span className="font-bold text-indigo-600 dark:text-indigo-400 pt-0.5 border-t border-slate-200/40 dark:border-zinc-800/40 mt-0.5 font-sans">Total:</span>
+                              <span className="text-right font-bold text-indigo-600 dark:text-indigo-400 pt-0.5 border-t border-slate-200/40 dark:border-zinc-800/40 mt-0.5">
+                                {aiAnalytics.total_duration_ms ? `${(aiAnalytics.total_duration_ms / 1000).toFixed(2)}s` : '0.00s'}
+                              </span>
+                            </div>
+                            {aiAnalytics.total_duration_ms && aiAnalytics.total_duration_ms > 10000 && (
+                              <p className="text-[9px] text-rose-500 font-bold pt-1 uppercase tracking-wider flex items-center gap-1 animate-pulse">
+                                ⚠️ Slow Receipt (&gt;10s)
+                              </p>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -6915,7 +6821,10 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                             theme === 'dark' ? "text-white" : "text-zinc-900"
                           )}>Verify Ledger Entry</h3>
                           <span className="rounded bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 font-black text-[10px] px-2.5 py-1 uppercase tracking-widest">
-                            Ready to save
+                            {handwrittenQueue.length > 1 
+                              ? `Receipt ${currentQueueIndex + 1} of ${handwrittenQueue.length}` 
+                              : 'Ready to save'
+                            }
                           </span>
                         </div>
 
@@ -7142,7 +7051,12 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 {/* Quick Export Cards */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div 
-                    onClick={exportToExcel}
+                    onClick={() => {
+                      if (activeBook) {
+                        backgroundExportManager.enqueueExcelTask(activeBook.id, activeBook.name, filteredTransactions);
+                        setShowDownloadCenter(true);
+                      }
+                    }}
                     className={cn(
                       "p-6 rounded-3xl border transition-all cursor-pointer shadow-sm hover:scale-[1.01] active:scale-[0.99] duration-150 flex items-center gap-4 group",
                       theme === 'dark' ? "bg-zinc-950 hover:bg-emerald-950/10 border-zinc-900" : "bg-white hover:bg-emerald-50/20 border-slate-100"
@@ -7161,6 +7075,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     onClick={() => {
                       if (activeBook) {
                         backgroundExportManager.enqueueTask(activeBook.id, activeBook.name, filteredTransactions, true);
+                        setShowDownloadCenter(true);
                       }
                     }}
                     className={cn(
@@ -7486,44 +7401,85 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.9 }}
               className={cn(
-                "w-full max-w-sm rounded-3xl p-6 shadow-2xl text-center space-y-4 transition-colors duration-300",
-                theme === 'dark' ? "bg-zinc-950" : "bg-white"
+                "w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4 text-left transition-colors duration-300",
+                theme === 'dark' ? "bg-zinc-950 border border-zinc-900 text-white" : "bg-white border border-slate-100 text-slate-800"
               )}
             >
-              <div className={cn(
-                "w-16 h-16 rounded-full flex items-center justify-center mx-auto",
-                theme === 'dark' ? "bg-indigo-900/20 text-indigo-400" : "bg-indigo-50 text-indigo-600"
-              )}>
-                <Upload size={32} />
+              <div className="flex items-center gap-3 border-b border-slate-100 dark:border-zinc-900 pb-3">
+                <span className="text-xl">⚠️</span>
+                <h3 className="text-sm font-black tracking-tight font-sans uppercase">
+                  TrackBook AI (Testing Phase)
+                </h3>
               </div>
-              <div className="space-y-2">
-                <h3 className={cn(
-                  "text-xl font-bold transition-colors duration-300",
-                  theme === 'dark' ? "text-white" : "text-black"
-                )}>AI Upload Information</h3>
-                <p className={cn(
-                  "text-sm transition-colors duration-300",
-                  theme === 'dark' ? "text-slate-400" : "text-black"
-                )}>
-                  You can upload up to <span className="font-bold text-indigo-600">5 images</span> at a time. 
-                  Please note that AI can make mistakes, so verify the entries after processing.
+
+              <div className="space-y-3 font-sans text-xs">
+                <p className="font-semibold text-slate-500 dark:text-zinc-400 leading-relaxed">
+                  TrackBook AI is currently under active testing.
+                </p>
+                <p className="font-semibold text-slate-500 dark:text-zinc-400 leading-relaxed">
+                  While most receipts are processed correctly, some receipts may occasionally produce incorrect:
+                </p>
+                <ul className="list-disc list-inside space-y-1 pl-1 font-bold text-slate-700 dark:text-zinc-300">
+                  <li>Amounts</li>
+                  <li>Dates</li>
+                  <li>Merchant Names</li>
+                  <li>Categories</li>
+                  <li>Food / Travel Classification</li>
+                </ul>
+                <p className="font-bold text-slate-600 dark:text-zinc-300 leading-relaxed">
+                  Please verify extracted information before saving.
                 </p>
               </div>
-              <div className="flex gap-3">
+
+              {/* Checkbox block */}
+              <div 
+                className="p-3 rounded-xl bg-slate-50 dark:bg-zinc-900/40 border border-slate-100 dark:border-zinc-900 flex items-start gap-2.5 cursor-pointer select-none"
+                onClick={() => setAiWarningChecked(!aiWarningChecked)}
+              >
+                <input
+                  type="checkbox"
+                  id="chk-ai-agreement"
+                  checked={aiWarningChecked}
+                  onChange={(e) => setAiWarningChecked(e.target.checked)}
+                  onClick={(e) => e.stopPropagation()}
+                  className="mt-0.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 h-4.5 w-4.5 cursor-pointer"
+                />
+                <label 
+                  htmlFor="chk-ai-agreement" 
+                  className="text-[11px] font-black text-slate-500 dark:text-zinc-400 leading-normal cursor-pointer"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  I understand that AI extraction may occasionally be inaccurate and I will review detected information before saving.
+                </label>
+              </div>
+
+              {/* Cancel / Continue Buttons */}
+              <div className="flex gap-3 pt-2">
                 <button 
-                  onClick={() => setShowAiWarning(false)}
-                  className="flex-1 py-3 border border-slate-200 dark:border-slate-800 rounded-xl font-bold text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all"
+                  onClick={() => { setShowAiWarning(false); setAiWarningChecked(false); }}
+                  className="flex-1 py-3 border border-slate-200 dark:border-slate-800 rounded-xl font-black text-xs uppercase tracking-widest text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button 
-                  onClick={() => { setShowAiWarning(false); setShowDropZone(true); }}
+                  disabled={!aiWarningChecked}
+                  onClick={() => { 
+                    setShowAiWarning(false); 
+                    setAiWarningChecked(false); // Reset for next time
+                    // Start the real AI upload setup
+                    vibrate(); 
+                    setAiWorkflowStep('group'); 
+                    setAiGroupSize(1);
+                    setAiFile(null);
+                    setAiFilePreviewUrl('');
+                    setAiConstructionModal('upload'); 
+                  }}
                   className={cn(
-                    "flex-1 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold transition-all",
+                    "flex-1 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-black text-xs uppercase tracking-widest transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer",
                     theme === 'dark' ? "shadow-none" : "shadow-lg shadow-indigo-100"
                   )}
                 >
-                  Proceed
+                  Continue
                 </button>
               </div>
             </motion.div>
@@ -8094,7 +8050,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       <h3 className={cn(
                         "text-xl font-black tracking-tight",
                         theme === 'dark' ? "text-white" : "text-zinc-900"
-                      )}>Smart OCR Scanning</h3>
+                      )}>TrackBook AI is scanning your bills...</h3>
                       <p className="text-indigo-600 dark:text-indigo-400 font-bold text-xs uppercase tracking-widest animate-pulse max-w-xs mx-auto">
                         {aiScanStatus}
                       </p>
@@ -8170,9 +8126,21 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                           theme === 'dark' ? "text-white" : "text-zinc-900"
                         )}>Verify Split Entry</h3>
                       </div>
-                      <span className="rounded bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 font-black text-[10px] px-2.5 py-1 uppercase tracking-widest">
-                        OCR Completed
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={cn(
+                          "rounded font-black text-[10px] px-2.5 py-1 uppercase tracking-widest",
+                          aiOcrConfidence < 80 
+                            ? "bg-amber-50 text-amber-600 dark:bg-amber-950/40 dark:text-amber-400"
+                            : "bg-emerald-50 text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400"
+                        )}>
+                          Confidence: {aiOcrConfidence}% {aiOcrConfidence < 80 ? '(Review Required)' : ''}
+                        </span>
+                        {aiOcrDuration > 0 && (
+                          <span className="rounded bg-slate-50 dark:bg-zinc-900 text-slate-400 dark:text-zinc-500 font-mono text-[9px] px-2 py-1 border border-slate-100 dark:border-zinc-850">
+                            {(aiOcrDuration / 1000).toFixed(2)}s
+                          </span>
+                        )}
+                      </div>
                     </div>
 
                     <div className="flex flex-col md:grid md:grid-cols-5 gap-4 overflow-hidden flex-1 min-h-0 w-full">
@@ -8360,7 +8328,6 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                             onClick={async () => {
                               vibrate();
                               await handleSaveAiEntry();
-                              setAiConstructionModal(null);
                             }}
                             className={cn(
                               "flex-[2] py-3 rounded-xl font-black text-xs tracking-wide shadow-md active:scale-95 text-center flex items-center justify-center gap-1.5 cursor-pointer text-white",
@@ -10254,7 +10221,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     )}>
                       <div className="text-[10px] uppercase font-black tracking-wider text-emerald-500">Cash In</div>
                       <div className="text-lg font-black text-emerald-600 dark:text-emerald-400 mt-1">
-                        ₹{selectedTotals.in.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                        {formatCurrency(selectedTotals.in)}
                       </div>
                     </div>
                     <div className={cn(
@@ -10263,7 +10230,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     )}>
                       <div className="text-[10px] uppercase font-black tracking-wider text-rose-500">Cash Out</div>
                       <div className="text-lg font-black text-rose-600 dark:text-rose-450 mt-1 break-all">
-                        ₹{selectedTotals.out.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                        {formatCurrency(selectedTotals.out)}
                       </div>
                     </div>
                   </div>
@@ -10419,11 +10386,11 @@ Open TrackBook → Import Shared Entries`)}`}
               </span>
               <div className="flex items-center gap-1.5 font-bold font-mono text-[11px]">
                 <span className="text-emerald-600 dark:text-emerald-400 font-extrabold">
-                  +₹{selectedTotals.in.toLocaleString('en-IN')}
+                  +{formatCurrency(selectedTotals.in)}
                 </span>
                 <span className="text-slate-300 dark:text-zinc-800">/</span>
                 <span className="text-rose-600 dark:text-rose-450 font-extrabold">
-                  -₹{selectedTotals.out.toLocaleString('en-IN')}
+                  -{formatCurrency(selectedTotals.out)}
                 </span>
               </div>
             </div>

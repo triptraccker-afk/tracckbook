@@ -239,32 +239,39 @@ export default function SaaSLandingPage({
       </header>
 
       {/* HERO SECTION DECORATED WITH FLOATING ELEMENTS */}
-      <section className="relative pt-16 pb-20 md:pt-24 md:pb-28 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 z-10 flex flex-col items-center">
+      <section className="relative pt-24 pb-32 md:pt-32 md:pb-40 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 z-10 flex flex-col items-center">
         {/* Subtle Wave SVG background behind text */}
         <div className="absolute inset-x-0 top-1/4 h-24 opacity-25 pointer-events-none overflow-hidden">
           <svg className="w-full h-full fill-none stroke-blue-500/20" viewBox="0 0 1440 100" preserveAspectRatio="none">
-            <path d="M0,45 C150,65 350,25 600,55 C850,85 1050,45 1200,35 C1350,25 1400,65 1440,55 L1440,100 L0,100 Z" strokeWidth="2" strokeDasharray="5,5" />
+            <motion.path 
+              d="M0,45 C150,65 350,25 600,55 C850,85 1050,45 1200,35 C1350,25 1400,65 1440,55" 
+              strokeWidth="2" 
+              strokeDasharray="5,5"
+              initial={{ pathLength: 0, opacity: 0 }}
+              animate={{ pathLength: 1, opacity: 1 }}
+              transition={{ duration: 1.8, ease: "easeInOut", delay: 0.2 }}
+            />
           </svg>
         </div>
 
-        <div className="text-center space-y-6 max-w-4xl mx-auto scale-95 lg:scale-100 transition-transform">
+        <div className="text-center space-y-10 max-w-5xl mx-auto scale-95 lg:scale-100 transition-transform">
           <motion.div
             initial={{ opacity: 0, y: 15 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5 }}
-            className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-widest bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/25"
+            className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-[10px] font-extrabold uppercase tracking-widest bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/25"
           >
             <Sparkles size={12} className="animate-pulse" />
             <span>Introducing TrackBook AI</span>
           </motion.div>
 
-          {/* Headline */}
+          {/* Headline with font-extrabold (weight 800) */}
           <motion.h1
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6, delay: 0.1 }}
             className={cn(
-              "text-3xl sm:text-5xl md:text-[64px] font-bold tracking-tight md:tracking-tight leading-[1.15] font-lora",
+              "text-4xl sm:text-6xl md:text-[76px] font-extrabold tracking-tight md:tracking-tight leading-[1.08] font-lora",
               theme === 'dark' ? "text-white" : "text-[#111111]"
             )}
           >
@@ -273,37 +280,37 @@ export default function SaaSLandingPage({
             Let TrackBook AI Do The Work.
           </motion.h1>
 
-          {/* Subheadline */}
+          {/* Subheadline with clear, beautiful font size and spacing */}
           <motion.p
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6, delay: 0.2 }}
             className={cn(
-              "text-xs sm:text-sm md:text-[15px] max-w-3xl mx-auto font-semibold leading-relaxed",
-              theme === 'dark' ? "text-zinc-400" : "text-[#374151]"
+              "text-sm sm:text-lg md:text-[19px] max-w-3xl mx-auto font-normal leading-relaxed text-slate-500 dark:text-zinc-450",
+              theme === 'dark' ? "text-zinc-400" : "text-[#4B5563]"
             )}
           >
             Automatically extract bill details with TrackBook AI, securely transfer entries between users, and generate PDF & Excel reports in seconds.
           </motion.p>
 
-          {/* Action buttons */}
+          {/* Action buttons with font-semibold (weight 600) */}
           <motion.div
             initial={{ opacity: 0, y: 15 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6, delay: 0.3 }}
-            className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-3"
+            className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-4"
           >
             <button
               onClick={() => onActionClick('signup')}
-              className="cursor-pointer w-full sm:w-auto font-bold font-lora text-[12px] uppercase tracking-wider text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 px-8 py-3.5 rounded-2xl transition-all shadow-md shadow-blue-500/20 flex items-center justify-center gap-1.5 group select-none outline-none"
+              className="cursor-pointer w-full sm:w-auto font-semibold font-lora text-[13px] uppercase tracking-wider text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 px-10 py-4 rounded-2xl transition-all shadow-lg shadow-blue-500/25 flex items-center justify-center gap-2 group select-none outline-none"
             >
               Create Account
-              <ArrowRight size={13} className="transition-transform group-hover:translate-x-0.5" />
+              <ArrowRight size={14} className="transition-transform group-hover:translate-x-0.5" />
             </button>
             <button
               onClick={() => onActionClick('signin')}
               className={cn(
-                "w-full sm:w-auto text-center font-bold font-lora text-[12px] uppercase tracking-wider px-8 py-3.5 rounded-2xl transition-all border shadow-sm cursor-pointer hover:shadow-md outline-none",
+                "w-full sm:w-auto text-center font-semibold font-lora text-[13px] uppercase tracking-wider px-10 py-4 rounded-2xl transition-all border shadow-sm cursor-pointer hover:shadow-md outline-none",
                 theme === 'dark'
                   ? "bg-zinc-950 border-zinc-800 text-zinc-350 hover:bg-zinc-900"
                   : "bg-white border-[#E5E7EB] text-[#374151] hover:bg-slate-50 shadow-slate-100/10"
@@ -315,7 +322,7 @@ export default function SaaSLandingPage({
         </div>
 
         {/* Floating cards showcasing quick feature status */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 max-w-5xl w-full mt-16 relative">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 max-w-5xl w-full mt-24 relative">
           <motion.div 
             animate={{ y: [0, -6, 0] }}
             transition={{ repeat: Infinity, duration: 4.8, ease: "easeInOut" }}
@@ -380,13 +387,27 @@ export default function SaaSLandingPage({
 
       {/* BACKGROUND WAVE SECTION SEPARATOR */}
       <div className="relative w-full h-10 pointer-events-none overflow-hidden bg-transparent">
-        <svg className="absolute bottom-0 w-full h-full fill-transparent stroke-blue-500/10" viewBox="0 0 1440 40" preserveAspectRatio="none">
-          <path d="M0,20 C320,40 420,0 720,20 C1020,40 1120,0 1440,20 L1440,40 L0,40 Z" strokeWidth="1" />
+        <svg className="absolute bottom-0 w-full h-full fill-none stroke-blue-500/10" viewBox="0 0 1440 40" preserveAspectRatio="none">
+          <motion.path 
+            d="M0,20 C320,40 420,0 720,20 C1020,40 1120,0 1440,20" 
+            strokeWidth="1" 
+            initial={{ pathLength: 0, opacity: 0 }}
+            whileInView={{ pathLength: 1, opacity: 1 }}
+            viewport={{ once: false, amount: 0.1 }}
+            transition={{ duration: 1.5, ease: "easeInOut" }}
+          />
         </svg>
       </div>
 
       {/* FEATURE 1: TRACKBOOK AI SECTION */}
-      <section id="trackbook-ai" className="py-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-[#E5E7EB]/50">
+      <motion.section 
+        id="trackbook-ai" 
+        className="py-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-[#E5E7EB]/50"
+        initial={{ opacity: 0, y: 30 }}
+        whileInView={{ opacity: 1, y: 0 }}
+        viewport={{ once: true, amount: 0.1 }}
+        transition={{ duration: 0.8, ease: "easeOut" }}
+      >
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
           <div className="lg:col-span-5 space-y-6 text-left">
             <span className="inline-block mb-2 text-[10px] font-black uppercase tracking-widest text-blue-600 bg-blue-500/10 px-3.5 py-1.5 rounded-full border border-blue-500/20">
@@ -586,17 +607,31 @@ export default function SaaSLandingPage({
             </div>
           </div>
         </div>
-      </section>
+      </motion.section>
 
       {/* WAVE BREAK */}
       <div className="relative w-full h-8 pointer-events-none overflow-hidden bg-transparent">
-        <svg className="absolute bottom-0 w-full h-full fill-transparent stroke-indigo-500/10" viewBox="0 0 1440 40" preserveAspectRatio="none">
-          <path d="M0,30 C300,10 400,30 700,10 C1000,30 1100,10 1440,30" strokeWidth="1" />
+        <svg className="absolute bottom-0 w-full h-full fill-none stroke-indigo-500/10" viewBox="0 0 1440 40" preserveAspectRatio="none">
+          <motion.path 
+            d="M0,30 C300,10 400,30 700,10 C1000,30 1100,10 1440,30" 
+            strokeWidth="1" 
+            initial={{ pathLength: 0, opacity: 0 }}
+            whileInView={{ pathLength: 1, opacity: 1 }}
+            viewport={{ once: false, amount: 0.1 }}
+            transition={{ duration: 1.5, ease: "easeInOut" }}
+          />
         </svg>
       </div>
 
       {/* FEATURE 2: IMPORT & EXPORT ENTRIES */}
-      <section id="import-export" className="py-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-[#E5E7EB]/50">
+      <motion.section 
+        id="import-export" 
+        className="py-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-[#E5E7EB]/50"
+        initial={{ opacity: 0, y: 30 }}
+        whileInView={{ opacity: 1, y: 0 }}
+        viewport={{ once: true, amount: 0.1 }}
+        transition={{ duration: 0.8, ease: "easeOut" }}
+      >
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
           
           <div className="lg:col-span-7 order-2 lg:order-1">
@@ -753,17 +788,31 @@ export default function SaaSLandingPage({
           </div>
 
         </div>
-      </section>
+      </motion.section>
 
       {/* WAVE BREAK */}
       <div className="relative w-full h-8 pointer-events-none overflow-hidden bg-transparent">
-        <svg className="absolute bottom-0 w-full h-full fill-transparent stroke-emerald-500/10" viewBox="0 0 1440 40" preserveAspectRatio="none">
-          <path d="M0,20 C320,0 420,40 720,20 C1020,0 1120,40 1440,20" strokeWidth="1" />
+        <svg className="absolute bottom-0 w-full h-full fill-none stroke-emerald-500/10" viewBox="0 0 1440 40" preserveAspectRatio="none">
+          <motion.path 
+            d="M0,20 C320,0 420,40 720,20 C1020,0 1120,40 1440,20" 
+            strokeWidth="1" 
+            initial={{ pathLength: 0, opacity: 0 }}
+            whileInView={{ pathLength: 1, opacity: 1 }}
+            viewport={{ once: false, amount: 0.1 }}
+            transition={{ duration: 1.5, ease: "easeInOut" }}
+          />
         </svg>
       </div>
 
       {/* FEATURE 3: PDF & EXCEL REPORTS */}
-      <section id="reports" className="py-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-[#E5E7EB]/50">
+      <motion.section 
+        id="reports" 
+        className="py-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-[#E5E7EB]/50"
+        initial={{ opacity: 0, y: 30 }}
+        whileInView={{ opacity: 1, y: 0 }}
+        viewport={{ once: true, amount: 0.1 }}
+        transition={{ duration: 0.8, ease: "easeOut" }}
+      >
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
           
           <div className="lg:col-span-5 space-y-6 text-left">
@@ -990,17 +1039,32 @@ export default function SaaSLandingPage({
           </div>
 
         </div>
-      </section>
+      </motion.section>
 
       {/* WAVE BREAK */}
       <div className="relative w-full h-8 pointer-events-none overflow-hidden bg-transparent">
-        <svg className="absolute bottom-0 w-full h-full fill-transparent stroke-emerald-500/10" viewBox="0 0 1440 40" preserveAspectRatio="none">
-          <path d="M0,20 C320,40 420,0 720,20 C1020,40 1120,0 1440,20" strokeWidth="1" strokeDasharray="4,4" />
+        <svg className="absolute bottom-0 w-full h-full fill-none stroke-emerald-500/10" viewBox="0 0 1440 40" preserveAspectRatio="none">
+          <motion.path 
+            d="M0,20 C320,40 420,0 720,20 C1020,40 1120,0 1440,20" 
+            strokeWidth="1" 
+            strokeDasharray="4,4"
+            initial={{ pathLength: 0, opacity: 0 }}
+            whileInView={{ pathLength: 1, opacity: 1 }}
+            viewport={{ once: false, amount: 0.1 }}
+            transition={{ duration: 1.5, ease: "easeInOut" }}
+          />
         </svg>
       </div>
 
       {/* FEATURE 4: ANALYTICS */}
-      <section id="analytics" className="py-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-blue-100/30">
+      <motion.section 
+        id="analytics" 
+        className="py-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-blue-100/30"
+        initial={{ opacity: 0, y: 30 }}
+        whileInView={{ opacity: 1, y: 0 }}
+        viewport={{ once: true, amount: 0.1 }}
+        transition={{ duration: 0.8, ease: "easeOut" }}
+      >
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
           
           <div className="lg:col-span-7">
@@ -1122,17 +1186,31 @@ export default function SaaSLandingPage({
           </div>
 
         </div>
-      </section>
+      </motion.section>
 
       {/* WAVE BREAK */}
       <div className="relative w-full h-8 pointer-events-none overflow-hidden bg-transparent">
-        <svg className="absolute bottom-0 w-full h-full fill-transparent stroke-blue-500/10" viewBox="0 0 1440 40" preserveAspectRatio="none">
-          <path d="M0,10 C320,30 420,0 720,10 C1020,30 1120,0 1440,10" strokeWidth="1" />
+        <svg className="absolute bottom-0 w-full h-full fill-none stroke-blue-500/10" viewBox="0 0 1440 40" preserveAspectRatio="none">
+          <motion.path 
+            d="M0,10 C320,30 420,0 720,10 C1020,30 1120,0 1440,10" 
+            strokeWidth="1" 
+            initial={{ pathLength: 0, opacity: 0 }}
+            whileInView={{ pathLength: 1, opacity: 1 }}
+            viewport={{ once: false, amount: 0.1 }}
+            transition={{ duration: 1.5, ease: "easeInOut" }}
+          />
         </svg>
       </div>
 
       {/* SECURITY PROTECTION SECTION */}
-      <section id="security" className="py-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-[#E5E7EB]/50">
+      <motion.section 
+        id="security" 
+        className="py-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 border-t border-[#E5E7EB]/50"
+        initial={{ opacity: 0, y: 30 }}
+        whileInView={{ opacity: 1, y: 0 }}
+        viewport={{ once: true, amount: 0.1 }}
+        transition={{ duration: 0.8, ease: "easeOut" }}
+      >
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
           <div className="lg:col-span-5 space-y-6 text-left">
             <span className="text-[10px] font-black uppercase tracking-widest text-[#3b82f6] bg-blue-500/10 px-3.5 py-1.5 rounded-full border border-blue-500/20">
@@ -1189,7 +1267,7 @@ export default function SaaSLandingPage({
             </div>
           </div>
         </div>
-      </section>
+      </motion.section>
 
       {/* FINAL CALL TO ACTION */}
       <section className={cn(

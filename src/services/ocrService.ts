@@ -11,8 +11,125 @@ export interface OcrResult {
 }
 
 /**
- * Compresses an image, resizes it if > 2000px, converts to JPEG/WebP,
- * and runs OCR immediately.
+ * Advanced preprocessing for receipt images to optimize OCR accuracy:
+ * 1. Convert to grayscale (luminosity formula)
+ * 2. Increase contrast (contrast factor)
+ * 3. Remove noise (binarization / thresholding noise cleanup)
+ * 4. Auto rotate (rotate landscape 90 degrees to portrait)
+ * 5. Crop receipt edges (3% margin crop to eliminate background noise)
+ */
+async function preprocessReceiptImage(file: File): Promise<{ blob: Blob; width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+    img.src = objectUrl;
+
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      
+      // Create temporary canvas to draw and auto-rotate the original image
+      const tempCanvas = document.createElement('canvas');
+      const tempCtx = tempCanvas.getContext('2d');
+      if (!tempCtx) {
+        resolve({ blob: file, width: img.width, height: img.height });
+        return;
+      }
+
+      // 4. Auto rotate: If landscape (width > height), assume it is sideways and rotate 90 degrees clockwise
+      const shouldRotate = img.width > img.height;
+      if (shouldRotate) {
+        tempCanvas.width = img.height;
+        tempCanvas.height = img.width;
+        tempCtx.translate(tempCanvas.width / 2, tempCanvas.height / 2);
+        tempCtx.rotate(90 * Math.PI / 180);
+        tempCtx.drawImage(img, -img.width / 2, -img.height / 2);
+      } else {
+        tempCanvas.width = img.width;
+        tempCanvas.height = img.height;
+        tempCtx.drawImage(img, 0, 0);
+      }
+
+      // 5. Crop receipt edges: crop out 3% outer margin on all 4 edges to remove background/frame shadows and noise
+      const cropMarginPercent = 0.03;
+      const cropX = Math.round(tempCanvas.width * cropMarginPercent);
+      const cropY = Math.round(tempCanvas.height * cropMarginPercent);
+      const croppedWidth = tempCanvas.width - (cropX * 2);
+      const croppedHeight = tempCanvas.height - (cropY * 2);
+
+      const canvas = document.createElement('canvas');
+      canvas.width = croppedWidth;
+      canvas.height = croppedHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve({ blob: file, width: tempCanvas.width, height: tempCanvas.height });
+        return;
+      }
+
+      // Draw the cropped portion
+      ctx.drawImage(tempCanvas, cropX, cropY, croppedWidth, croppedHeight, 0, 0, croppedWidth, croppedHeight);
+
+      // Pixel processing
+      try {
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+
+        // Contrast adjustment factor (contrast level = 65)
+        const contrast = 65;
+        const factor = (259 * (contrast + 255)) / (255 * (259 - contrast));
+
+        for (let i = 0; i < data.length; i += 4) {
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+
+          // 1. Convert to grayscale (luminosity formula)
+          let gray = 0.299 * r + 0.587 * g + 0.114 * b;
+
+          // 2. Increase contrast
+          gray = factor * (gray - 128) + 128;
+
+          // 3. Remove noise: smooth/thresholding binarization
+          // If very bright, clamp to pure white (clears background paper noise and shadows)
+          // If very dark, clamp to pure black (makes ink text very crisp and legible)
+          if (gray > 190) {
+            gray = 255;
+          } else if (gray < 75) {
+            gray = 0;
+          }
+
+          // Clamp
+          if (gray < 0) gray = 0;
+          if (gray > 255) gray = 255;
+
+          data[i] = gray;     // R
+          data[i + 1] = gray; // G
+          data[i + 2] = gray; // B
+        }
+
+        ctx.putImageData(imageData, 0, 0);
+      } catch (err) {
+        console.warn('[OCR Preprocessing] Pixel processing error, proceeding with standard rendering:', err);
+      }
+
+      canvas.toBlob((blob) => {
+        if (blob) {
+          resolve({ blob, width: croppedWidth, height: croppedHeight });
+        } else {
+          resolve({ blob: file, width: croppedWidth, height: croppedHeight });
+        }
+      }, 'image/jpeg', 0.85);
+    };
+
+    img.onerror = (err) => {
+      console.error('[OCR Preprocessing] Image loading error:', err);
+      reject(err);
+    };
+  });
+}
+
+/**
+ * Compresses an image, preprocesses it (grayscale, contrast, rotate, crop, noise reduction),
+ * and runs Tesseract OCR immediately.
  */
 export async function processAndOcrImage(
   file: File,
@@ -21,40 +138,53 @@ export async function processAndOcrImage(
   const startTime = Date.now();
   const originalSizeKB = file.size / 1024;
   
-  // 1. Optimize / Compress image before OCR (Requirement 1 & 2 & 3)
+  // 1. Optimize / Compress image before OCR
   onProgress?.(15, 'Optimizing image...');
   
   const options = {
     maxSizeMB: 1.0, 
-    maxWidthOrHeight: 2000, // Resize images larger than 2000px (Requirement 2)
+    maxWidthOrHeight: 2000, // Resize images larger than 2000px
     useWebWorker: true,
-    fileType: 'image/jpeg', // Optimized JPEG conversion (Requirement 3)
+    fileType: 'image/jpeg',
     maxIteration: 2
   };
 
-  let processedFile: File;
+  let compressedFile: File;
   try {
-    console.log(`[OCR Service] Starting image optimization for ${file.name}...`);
+    console.log(`[OCR Service] Starting image compression for ${file.name}...`);
     const compressedBlob = await imageCompression(file, options);
-    processedFile = new File([compressedBlob], file.name || 'receipt.jpg', { type: 'image/jpeg' });
+    compressedFile = new File([compressedBlob], file.name || 'receipt.jpg', { type: 'image/jpeg' });
   } catch (err) {
     console.error('[OCR Service] browser-image-compression failed, using original:', err);
-    processedFile = file;
+    compressedFile = file;
   }
   
-  const compressedSizeKB = processedFile.size / 1024;
-  console.log(`[OCR Service] Optimized image: ${originalSizeKB.toFixed(1)} KB -> ${compressedSizeKB.toFixed(1)} KB`);
+  // 2. Preprocess receipt image on Canvas (Grayscale, Contrast, Rotate, Crop, Noise Reduction)
+  onProgress?.(20, 'Preprocessing receipt image...');
+  let processedBlob: Blob = compressedFile;
+  try {
+    console.log(`[OCR Service] Preprocessing receipt on Canvas...`);
+    const prepped = await preprocessReceiptImage(compressedFile);
+    processedBlob = prepped.blob;
+  } catch (err) {
+    console.error('[OCR Service] Preprocessing failed, using compressed image:', err);
+  }
+
+  const finalFile = new File([processedBlob], file.name || 'processed.jpg', { type: 'image/jpeg' });
+  const compressedSizeKB = finalFile.size / 1024;
+  console.log(`[OCR Service] Preprocessed size: ${compressedSizeKB.toFixed(1)} KB (Original: ${originalSizeKB.toFixed(1)} KB)`);
+
   onProgress?.(25, 'OCR Processing...');
 
-  // Convert to base64
+  // Convert final preprocessed file to base64
   const base64 = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result as string);
     reader.onerror = reject;
-    reader.readAsDataURL(processedFile);
+    reader.readAsDataURL(finalFile);
   });
 
-  // 2. Run OCR immediately (Requirement 4)
+  // 3. Run OCR after preprocessing
   let text = '';
   let confidence = 0;
   const ocrStartTime = Date.now();
@@ -63,16 +193,14 @@ export async function processAndOcrImage(
     onProgress?.(35, 'OCR Processing...');
     const worker = await createWorker('eng');
     
-    // Check progress of OCR
     onProgress?.(45, 'Extracting raw receipt text...');
-    const ret = await worker.recognize(processedFile);
+    const ret = await worker.recognize(finalFile);
     text = ret.data.text || '';
     confidence = ret.data.confidence || 0;
     
     await worker.terminate();
   } catch (ocrErr) {
     console.error('[OCR Service] Tesseract OCR failed:', ocrErr);
-    // Graceful fallback to empty OCR results
     text = '';
     confidence = 0;
   }

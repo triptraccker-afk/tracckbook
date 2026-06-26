@@ -10,6 +10,23 @@ const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Login = lazy(() => import('./pages/Login'));
 const ResetPassword = lazy(() => import('./pages/ResetPassword'));
 const AdminPortal = lazy(() => import('./pages/AdminPortal'));
+const SaaSLandingPage = lazy(() => import('./components/SaaSLandingPage'));
+
+function PublicLandingPage({ theme }: { theme: 'light' | 'dark' }) {
+  const navigate = useNavigate();
+  return (
+    <SaaSLandingPage 
+      theme={theme} 
+      onActionClick={(mode) => {
+        if (mode === 'signup') {
+          navigate('/signup');
+        } else {
+          navigate('/login');
+        }
+      }} 
+    />
+  );
+}
 
 function NavigationHandler({ 
   session, 
@@ -63,7 +80,7 @@ function NavigationHandler({
         if (location.pathname !== '/resetpassword') {
           navigate('/resetpassword', { replace: true });
         }
-      } else if (event === 'SIGNED_IN' && location.pathname === '/login') {
+      } else if (event === 'SIGNED_IN' && (location.pathname === '/login' || location.pathname === '/register' || location.pathname === '/signup')) {
         navigate('/', { replace: true });
       } else if (event === 'SIGNED_OUT') {
         navigate('/login', { replace: true });
@@ -155,7 +172,7 @@ export default function App() {
           <Route path="/login" element={<Login theme={theme} initialMode="signin" />} />
           <Route path="/register" element={<Login theme={theme} initialMode="signup" />} />
           <Route path="/forgot" element={<Login theme={theme} initialMode="forgot" />} />
-          <Route path="/signup" element={<Navigate to="/register" replace />} />
+          <Route path="/signup" element={<Login theme={theme} initialMode="signup" />} />
           <Route path="/resetpassword" element={<ResetPassword />} />
           <Route path="/admin" element={<AdminPortal />} />
 
@@ -174,7 +191,9 @@ export default function App() {
                       <p className="text-sm font-medium text-slate-500 animate-pulse">Initializing app...</p>
                     </div>
                   </div>
-                ) : <Navigate to="/login" replace />
+                ) : (
+                  <PublicLandingPage theme={theme} />
+                )
               )
             } 
           />

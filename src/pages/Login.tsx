@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import Auth from '../components/Auth';
-import SaaSLandingPage from '../components/SaaSLandingPage';
 import { supabase } from '../lib/supabase';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -29,11 +28,6 @@ export default function Login({
   const navigate = useNavigate();
   const location = useLocation();
   const [isDesktop, setIsDesktop] = useState(false);
-  
-  // Decide whether to show Auth straight away or Land Page.
-  // Direct access to /register or /forgot, or if showAuth requested:
-  const isDirectAuthRoute = location.pathname === '/register' || location.pathname === '/forgot';
-  const [showAuth, setShowAuth] = useState(isDirectAuthRoute);
   const [activeSlide, setActiveSlide] = useState(0);
 
   useEffect(() => {
@@ -48,13 +42,6 @@ export default function Login({
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
-
-  // Update showAuth state when route transitions
-  useEffect(() => {
-    if (location.pathname === '/register' || location.pathname === '/forgot') {
-      setShowAuth(true);
-    }
-  }, [location.pathname]);
 
   useEffect(() => {
     const checkUser = async () => {
@@ -78,30 +65,14 @@ export default function Login({
 
   // Slideshow interval for desktop left-side showcase
   useEffect(() => {
-    if (!isDesktop || !showAuth) return;
+    if (!isDesktop) return;
     const interval = setInterval(() => {
       setActiveSlide((prev) => (prev + 1) % 3);
     }, 6000);
     return () => clearInterval(interval);
-  }, [isDesktop, showAuth]);
+  }, [isDesktop]);
 
   const hasLogoutReason = sessionStorage.getItem('logout_reason') !== null;
-
-  // Render Mobile or Centered layout for small/touch monitors OR landing screen
-  if (isDesktop && !showAuth && !hasLogoutReason) {
-    return (
-      <SaaSLandingPage 
-        theme={theme} 
-        onActionClick={(mode) => {
-          if (mode === 'signup') {
-            navigate('/register');
-          } else {
-            setShowAuth(true);
-          }
-        }} 
-      />
-    );
-  }
 
   // Showcase slide assets & state representations
   const slides = [
@@ -228,7 +199,7 @@ export default function Login({
 
   return (
     <div className={cn(
-      "min-h-screen font-lora transition-colors duration-300 relative",
+      "min-h-screen font-sans transition-colors duration-300 relative",
       theme === 'dark' ? "bg-black" : "bg-[#f8fafc]"
     )}>
       {/* Show Auth on Desktop has the full split-layout screen */}
@@ -244,23 +215,23 @@ export default function Login({
           )}>
             {/* Header decoration */}
             <div className="flex items-center justify-between relative z-10">
-              <div className="flex items-center gap-1.5 selection:bg-blue-300">
-                <span className="text-[20px] font-black text-blue-600 tracking-tight">Track</span>
+              <div className="flex items-center gap-1.5 selection:bg-blue-300 cursor-pointer" onClick={() => navigate('/')}>
+                <span className="text-[20px] font-extrabold text-blue-600 tracking-tight">Track</span>
                 <span className={cn(
-                  "text-[20px] font-black tracking-tight",
+                  "text-[20px] font-extrabold tracking-tight",
                   theme === 'dark' ? "text-slate-100" : "text-slate-900"
                 )}>Book</span>
               </div>
               
               <button
                 type="button"
-                onClick={() => setShowAuth(false)}
+                onClick={() => navigate('/')}
                 className={cn(
-                  "flex items-center gap-1 bg-white dark:bg-zinc-900 px-3.5 py-1.5 rounded-full border text-[10px] font-black uppercase tracking-wider text-slate-500 hover:text-blue-600 dark:hover:text-amber-400 transition-all active:scale-95 cursor-pointer shadow-sm",
+                  "flex items-center gap-1.5 bg-white dark:bg-zinc-900 px-3.5 py-1.5 rounded-full border text-[10px] font-bold uppercase tracking-wider text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 transition-all active:scale-95 cursor-pointer shadow-sm",
                   theme === 'dark' ? "border-zinc-800" : "border-slate-150"
                 )}
               >
-                ← Product Overview
+                ← Back to Home
               </button>
             </div>
 
@@ -283,7 +254,7 @@ export default function Login({
                       {slides[activeSlide].tagline}
                     </span>
                     <h2 className={cn(
-                      "text-3xl font-black tracking-tight leading-tight",
+                      "text-3xl font-extrabold tracking-tight leading-tight",
                       theme === 'dark' ? "text-white" : "text-slate-900"
                     )}>
                       {slides[activeSlide].title}
@@ -374,8 +345,36 @@ export default function Login({
         </div>
       ) : (
         /* Mobile Layout remains simple, lightweight and super fast (Rule 11) */
-        <div className="relative min-h-screen">
-          <Auth theme={theme} isDesktop={false} />
+        <div className={cn(
+          "relative min-h-screen flex flex-col pb-12",
+          theme === 'dark' ? "bg-zinc-950" : "bg-slate-50"
+        )}>
+          {/* Mobile Simplified Navbar */}
+          <div className="w-full flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-zinc-900/50 bg-white/50 dark:bg-black/50 backdrop-blur-md">
+            <div className="flex items-center gap-1 cursor-pointer" onClick={() => navigate('/')}>
+              <span className="text-[18px] font-extrabold text-blue-600 tracking-tight">Track</span>
+              <span className={cn(
+                "text-[18px] font-extrabold tracking-tight",
+                theme === 'dark' ? "text-slate-100" : "text-slate-900"
+              )}>Book</span>
+            </div>
+            
+            <button
+              type="button"
+              onClick={() => navigate('/')}
+              className={cn(
+                "flex items-center gap-1 bg-white dark:bg-zinc-900 px-3.5 py-1.5 rounded-full border text-[10px] font-bold uppercase tracking-wider text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 transition-all cursor-pointer shadow-sm",
+                theme === 'dark' ? "border-zinc-800" : "border-slate-200"
+              )}
+            >
+              Back to Home
+            </button>
+          </div>
+          <div className="flex-1 flex items-center justify-center p-4">
+            <div className="w-full max-w-md">
+              <Auth theme={theme} isDesktop={false} />
+            </div>
+          </div>
         </div>
       )}
     </div>

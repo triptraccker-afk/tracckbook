@@ -1,6 +1,25 @@
+import { supabase } from '../lib/supabase';
+
 /**
  * Cloudinary Upload Service for Expense/Cashbook Images
  */
+
+export async function getUserCloudinaryFolder(user?: { email?: string | null; id: string } | null): Promise<string> {
+  let resolvedUser = user;
+  if (!resolvedUser && supabase) {
+    const { data } = await supabase.auth.getSession();
+    if (data?.session?.user) {
+      resolvedUser = data.session.user;
+    }
+  }
+
+  if (resolvedUser) {
+    const identifier = resolvedUser.email || resolvedUser.id;
+    return `trackbook/${identifier}`;
+  }
+
+  throw new Error("No authenticated user found for Cloudinary folder generation.");
+}
 
 export async function uploadToCloudinary(fileDataUriOrFile: string | File, folder?: string): Promise<string> {
   const cloudName = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || 'dd2kcpetc';
