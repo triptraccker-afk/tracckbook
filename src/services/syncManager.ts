@@ -5,7 +5,7 @@ export type NetworkState = 'good' | 'slow' | 'offline';
 
 export interface SyncQueueItem {
   id: string;
-  type: 'CREATE_ENTRY' | 'UPDATE_ENTRY' | 'DELETE_ENTRY' | 'UPLOAD_IMAGE' | 'AI_SCAN' | 'PDF_EXPORT' | 'EXCEL_EXPORT';
+  type: 'CREATE_ENTRY' | 'UPDATE_ENTRY' | 'DELETE_ENTRY' | 'UPLOAD_IMAGE' | 'AI_SCAN' | 'PDF_EXPORT' | 'EXCEL_EXPORT' | 'CREATE_CASHBOOK' | 'UPDATE_CASHBOOK' | 'DELETE_CASHBOOK';
   status: 'pending' | 'uploading' | 'scanning' | 'syncing' | 'completed' | 'failed' | 'paused' | 'waiting_for_internet';
   priority: 'high' | 'normal' | 'low';
   retryCount: number;
@@ -118,7 +118,11 @@ export class TrackBookOfflineDB {
       const tx = db.transaction(['cashbooks'], 'readonly');
       const store = tx.objectStore('cashbooks');
       const request = store.getAll();
-      request.onsuccess = () => resolve(request.result || []);
+      request.onsuccess = () => {
+        const list = request.result || [];
+        console.log(`[OfflineDB] IndexedDB Read: Read ${list.length} cashbooks`);
+        resolve(list);
+      };
       request.onerror = () => reject(tx.error);
     });
   }
@@ -180,8 +184,11 @@ export class TrackBookOfflineDB {
       request.onsuccess = () => {
         const list = request.result || [];
         if (cashbookId) {
-          resolve(list.filter((e: CachedEntry) => e.cashbook_id === cashbookId));
+          const filtered = list.filter((e: CachedEntry) => e.cashbook_id === cashbookId);
+          console.log(`[OfflineDB] IndexedDB Read: Read ${filtered.length} entries for cashbook ${cashbookId}`);
+          resolve(filtered);
         } else {
+          console.log(`[OfflineDB] IndexedDB Read: Read ${list.length} total entries`);
           resolve(list);
         }
       };
@@ -328,7 +335,10 @@ export class NetworkMonitor {
 
   constructor() {
     if (typeof window !== 'undefined') {
-      window.addEventListener('online', () => this.evaluate());
+      window.addEventListener('online', () => {
+        console.log('[NetworkMonitor] Online Event: Browser went online. Re-evaluating network and triggering sync...');
+        this.evaluate();
+      });
       window.addEventListener('offline', () => this.evaluate());
       
       // Periodically evaluate network quality
@@ -467,6 +477,7 @@ export class BackgroundSyncManager {
 
   async loadQueueFromDb() {
     this.queue = await this.db.getQueueItems();
+    console.log(`[SyncEngine] Queue Restored: Loaded ${this.queue.length} items from DB`);
     this.notify();
   }
 
@@ -486,6 +497,7 @@ export class BackgroundSyncManager {
       payload
     };
 
+    console.log(`[SyncEngine] Queue Created: Enqueued item ${item.type} (${item.id})`);
     this.queue.push(item);
     await this.db.saveQueueItem(item);
     this.notify();
@@ -541,7 +553,7 @@ export class BackgroundSyncManager {
 
   // Sync a single queue item
   private async syncItem(item: SyncQueueItem) {
-    console.log(`[SyncEngine] Processing item: ${item.type} (${item.id})`);
+    console.log(`[SyncEngine] Supabase Sync Started for item: ${item.type} (${item.id})`);
     
     // Update status to syncing
     item.status = 'syncing';
@@ -561,6 +573,18 @@ export class BackgroundSyncManager {
         case 'DELETE_ENTRY':
           await this.executeDeleteEntry(item.payload);
           break;
+        case 'CREATE_CASHBOOK':
+          await this.executeCreateCashbook(item.payload);
+          break;
+        case 'UPDATE_CASHBOOK':
+          await this.executeUpdateCashbook(item.payload);
+          break;
+        case 'DELETE_CASHBOOK':
+          await this.executeDeleteCashbook(item.payload);
+          break;
+        case 'UPLOAD_IMAGE':
+          await this.executeUploadImage(item.payload);
+          break;
         default:
           console.warn('[SyncEngine] Unknown queue item type:', item.type);
       }
@@ -571,6 +595,8 @@ export class BackgroundSyncManager {
       
       const latency = performance.now() - startOp;
       this.network.updateMetrics(0, latency);
+
+      console.log(`[SyncEngine] Supabase Sync Completed for item: ${item.type} (${item.id})`);
 
       // Trigger a light user-friendly online toast
       const pendingCount = this.getPendingCount();
@@ -777,6 +803,163 @@ export class BackgroundSyncManager {
       .eq('user_id', user_id);
 
     if (error) throw error;
+  }
+
+  private async executeCreateCashbook(payload: any) {
+    if (!supabase) throw new Error('Supabase client is not configured');
+    const { id, name, created_at, user_id } = payload;
+    const { error } = await supabase
+      .from('cashbooks')
+      .insert([{ id, name, created_at, user_id }]);
+    if (error && error.code !== '23505') throw error;
+  }
+
+  private async executeUpdateCashbook(payload: any) {
+    if (!supabase) throw new Error('Supabase client is not configured');
+    const { id, name, user_id } = payload;
+    const { error } = await supabase
+      .from('cashbooks')
+      .update({ name })
+      .eq('id', id)
+      .eq('user_id', user_id);
+    if (error) throw error;
+  }
+
+  private async executeDeleteCashbook(payload: any) {
+    if (!supabase) throw new Error('Supabase client is not configured');
+    const { id, user_id } = payload;
+    const { error } = await supabase
+      .from('cashbooks')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', user_id);
+    if (error) throw error;
+  }
+
+  private async executeUploadImage(payload: any) {
+    if (!supabase) throw new Error('Supabase client is not configured');
+
+    const { localImageId, transactionId, user_id, isAi } = payload;
+    console.log(`[SyncEngine] Image Upload Started: Processing local image ID: ${localImageId} for transaction: ${transactionId}`);
+
+    const localImage = await this.db.getLocalImage(localImageId);
+    if (!localImage) {
+      console.warn(`[SyncEngine] Local image not found: ${localImageId}, skipping.`);
+      return;
+    }
+
+    // 1. Upload to Cloudinary
+    const folder = await getUserCloudinaryFolder({ id: user_id } as any);
+    const startUpload = performance.now();
+    const cloudUrl = await uploadToCloudinary(localImage.data as string, `${folder}/bills`);
+    const uploadLatency = performance.now() - startUpload;
+    this.network.updateMetrics(uploadLatency, 0);
+
+    console.log(`[SyncEngine] Image Upload Completed: Uploaded to URL ${cloudUrl}`);
+
+    // 2. Delete local image from IndexedDB
+    await this.db.deleteLocalImage(localImageId);
+
+    // 3. Save into Supabase table (attachments or ai_attachments)
+    const table = isAi ? 'ai_attachments' : 'attachments';
+    const attachmentPayload = {
+      entry_id: transactionId,
+      file_url: cloudUrl,
+      user_id: user_id,
+      file_name: 'offline_upload',
+      file_type: 'image'
+    };
+
+    const { error: attachError } = await supabase
+      .from(table)
+      .insert([attachmentPayload]);
+
+    if (attachError && attachError.code !== '23505') {
+      throw attachError;
+    }
+
+    // 4. Update local entry images list
+    const localEntry = await this.db.getEntry(transactionId);
+    if (localEntry) {
+      const existingImages = localEntry.images || [];
+      const updatedImages = existingImages.map(img => (img === localImageId || img.startsWith('blob:') || img.startsWith('data:')) ? cloudUrl : img);
+      if (!updatedImages.includes(cloudUrl)) {
+        updatedImages.push(cloudUrl);
+      }
+      localEntry.images = updatedImages;
+      localEntry.sync_status = 'synced';
+      await this.db.saveEntry(localEntry);
+    }
+  }
+
+  async revalidate(userId: string) {
+    if (this.network.state === 'offline') return;
+    if (!supabase) return;
+
+    try {
+      console.log('[SyncEngine] Supabase Sync Started: Fetching latest cashbooks from cloud...');
+      const { data: cashbooks, error: cbErr } = await supabase
+        .from('cashbooks')
+        .select('id, name, created_at, user_id')
+        .eq('user_id', userId);
+
+      if (cbErr) throw cbErr;
+
+      if (cashbooks && cashbooks.length > 0) {
+        const cachedCbs: CachedCashbook[] = cashbooks.map(cb => ({
+          id: cb.id,
+          name: cb.name,
+          created_at: cb.created_at,
+          user_id: cb.user_id,
+          sync_status: 'synced'
+        }));
+        await this.db.saveCashbooks(cachedCbs);
+
+        for (const cb of cashbooks) {
+          const { data: entries, error: entErr } = await supabase
+            .from('entries')
+            .select('id, amount, type, description, category, mode, date, image_layout, cashbook_id, user_id, imported_from_share_code, is_imported, import_batch_id')
+            .eq('cashbook_id', cb.id)
+            .eq('user_id', userId)
+            .order('date', { ascending: false });
+
+          if (!entErr && entries) {
+            const cachedEntries: CachedEntry[] = entries.map(e => ({
+              id: e.id,
+              amount: e.amount,
+              type: e.type,
+              description: e.description,
+              category: e.category,
+              mode: e.mode,
+              date: e.date,
+              image_layout: e.image_layout,
+              cashbook_id: e.cashbook_id,
+              user_id: e.user_id,
+              imported_from_share_code: e.imported_from_share_code,
+              is_imported: e.is_imported,
+              import_batch_id: e.import_batch_id,
+              sync_status: 'synced'
+            }));
+
+            const existingEntries = await this.db.getEntries(cb.id);
+            const existingMap = new Map(existingEntries.map(e => [e.id, e]));
+
+            for (const ce of cachedEntries) {
+              const prev = existingMap.get(ce.id);
+              if (prev && prev.images) {
+                ce.images = prev.images;
+              }
+            }
+
+            await this.db.saveEntries(cachedEntries);
+          }
+        }
+      }
+      console.log('[SyncEngine] Supabase Sync Completed: Cloud data synced to IndexedDB.');
+      this.notify();
+    } catch (err) {
+      console.error('[SyncEngine] Background revalidation failed:', err);
+    }
   }
 }
 

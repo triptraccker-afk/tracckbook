@@ -47,6 +47,7 @@ import {
   DownloadCloud,
   FileSpreadsheet,
   AlertCircle,
+  CloudOff,
   HelpCircle,
   MessageSquare,
   Sun,
@@ -75,6 +76,7 @@ import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import html2canvas from 'html2canvas';
 import { backgroundExportManager } from '../services/exportManager';
+import { syncManager, offlineDb } from '../services/syncManager';
 import DownloadCenter, { DownloadCenterTrigger } from '../components/DownloadCenter';
 import MediaPickerSheet from '../components/MediaPickerSheet';
 import { CountryCodePicker, COUNTRIES, Country } from '../components/CountryCodePicker';
@@ -399,7 +401,24 @@ const OptimizedImage = React.memo(({
   const [isInView, setIsInView] = React.useState(false);
   const [retryCount, setRetryCount] = React.useState(0);
   const [hasError, setHasError] = React.useState(false);
+  const [localBase64, setLocalBase64] = React.useState<string>('');
   const imgRef = React.useRef<HTMLImageElement | null>(null);
+
+  React.useEffect(() => {
+    if (src && src.startsWith('local-img-')) {
+      let active = true;
+      offlineDb.getLocalImage(src).then(img => {
+        if (active && img && img.data) {
+          setLocalBase64(img.data as string);
+        }
+      });
+      return () => {
+        active = false;
+      };
+    } else {
+      setLocalBase64('');
+    }
+  }, [src]);
 
   React.useEffect(() => {
     if (!src) return;
@@ -431,6 +450,9 @@ const OptimizedImage = React.memo(({
 
   const optimizedUrl = React.useMemo(() => {
     if (!isInView || hasError) return ''; 
+    if (src && src.startsWith('local-img-')) {
+      return localBase64;
+    }
     const baseUrl = getOptimizedCloudinaryUrl(src, type);
     if (!baseUrl) return '';
     if (retryCount > 0) {
@@ -1509,6 +1531,21 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [isLoading, setIsLoading] = useState(true);
   const [activeBookId, setActiveBookIdState] = useState<string | null>(null);
   const [isEntriesLoading, setIsEntriesLoading] = useState(false);
+  const [showOfflineDialog, setShowOfflineDialog] = useState(false);
+  const [isOffline, setIsOffline] = useState(false);
+
+  // Network state observer
+  useEffect(() => {
+    const handleNetworkChange = (state: any) => {
+      const offline = state === 'offline';
+      setIsOffline(offline);
+      if (offline && books.length === 0) {
+        setShowOfflineDialog(true);
+      }
+    };
+    const unsubscribe = syncManager.network.subscribe(handleNetworkChange);
+    return () => unsubscribe();
+  }, [books.length]);
 
   const setActiveBookId = (id: string | null) => {
     setActiveBookIdState(id);
@@ -2464,50 +2501,65 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     }
   }, [session]);
 
-  // Pre-load from localStorage cache on mount/session ready to render UI instantly!
+  // Pre-load from IndexedDB first on mount/session ready to render UI instantly!
   useEffect(() => {
+    let active = true;
     if (session) {
-      const savedBooks = localStorage.getItem(`cashbooks_${session.user.id}`);
-      if (savedBooks) {
+      const loadFromIndexedDB = async () => {
         try {
-          const parsed = JSON.parse(savedBooks);
-          // Set cachedCashbooks immediately to synchronize cache checks
-          cachedCashbooks = parsed;
-          // Pre-populate entriesCache so we don't flash empty states on hard-refresh
-          parsed.forEach((b: any) => {
-            if (b.id && Array.isArray(b.transactions)) {
-              entriesCache.set(b.id, b.transactions);
-            }
-          });
-          const mappedBooks = parsed.map((b: any) => ({
-            ...b,
-            transactions: (b.transactions || []).map((t: any) => ({
-              ...t,
-              date: new Date(t.date),
-              images: t.images || [],
-              source: t.source || (t.isAi ? 'AI' : ((t.is_imported || t.imported_from_share_code) ? 'Imported' : 'Manual'))
-            })),
-            createdAt: new Date(b.created_at || b.createdAt)
-          }));
-          setBooks(mappedBooks);
+          console.log('[Dashboard] Pre-loading cashbooks and entries from IndexedDB first...');
+          const localCashbooks = await offlineDb.getCashbooks();
+          
+          if (!active) return;
 
-          // EAGER ROOT SYNC: Solve loading delay entirely by resolving activeBookId immediately!
-          if (bookSlug) {
-            const foundBook = mappedBooks.find(b => getBookSlug(b.name, b.id) === bookSlug);
-            if (foundBook) {
-              setActiveBookIdState(foundBook.id);
-              const cached = entriesCache.get(foundBook.id);
-              if (!cached || cached.length === 0) {
-                setIsEntriesLoading(true);
+          if (localCashbooks && localCashbooks.length > 0) {
+            const mappedBooks = [];
+            for (const cb of localCashbooks) {
+              const entries = await offlineDb.getEntries(cb.id);
+              if (cb.id) {
+                entriesCache.set(cb.id, entries);
+              }
+              
+              mappedBooks.push({
+                ...cb,
+                transactions: entries.map((t: any) => ({
+                  ...t,
+                  date: t.date ? new Date(t.date) : new Date(),
+                  images: t.images || [],
+                  source: t.source || (t.isAi ? 'AI' : ((t.is_imported || t.imported_from_share_code) ? 'Imported' : 'Manual'))
+                })),
+                createdAt: cb.created_at ? new Date(cb.created_at) : new Date()
+              });
+            }
+
+            setBooks(mappedBooks);
+
+            // EAGER ROOT SYNC: Solve loading delay entirely by resolving activeBookId immediately!
+            if (bookSlug) {
+              const foundBook = mappedBooks.find(b => getBookSlug(b.name, b.id) === bookSlug);
+              if (foundBook) {
+                setActiveBookIdState(foundBook.id);
+                const cached = entriesCache.get(foundBook.id);
+                if (!cached || cached.length === 0) {
+                  setIsEntriesLoading(true);
+                }
               }
             }
           }
         } catch (e) {
-          console.error('Error pre-loading from cache:', e);
+          console.error('[Dashboard] Error pre-loading from IndexedDB:', e);
+        } finally {
+          if (active) {
+            setIsLoading(false); // Enable immediate frame rendering!
+          }
         }
-      }
-      setIsLoading(false); // Enable immediate frame rendering!
+      };
+
+      loadFromIndexedDB();
     }
+    return () => {
+      active = false;
+    };
   }, [session, bookSlug]);
 
   // Stable component-level data fetch and sync function
@@ -2518,305 +2570,83 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       return;
     }
 
-    if (!supabase) {
-      return;
-    }
-
-    const now = Date.now();
-
-    // 1. STALE-WHILE-REVALIDATE: Instantly render from cache if available
-    if (cachedCashbooks && !force) {
-      setBooks(prevBooks => {
-        return cachedCashbooks!.map((cb: any) => {
-          const isCurrentActive = cb.id === activeBookId;
-          const entriesToUse = isCurrentActive ? (entriesCache.get(activeBookId) || []) : [];
-          return {
-            ...cb,
-            transactions: entriesToUse.map((t: any) => {
-              const cachedImg = attachmentCache.get(t.id);
-              return {
-                ...t,
-                date: t.date ? new Date(t.date) : new Date(),
-                images: cachedImg ? cachedImg.images : (t.images || []),
-                imageLayout: t.image_layout || t.imageLayout || 'split',
-                isAi: cachedImg ? cachedImg.isAi : (t.isAi || false),
-                source: t.source || (cachedImg?.isAi ? 'AI' : (t.isAi ? 'AI' : ((t.is_imported || t.imported_from_share_code) ? 'Imported' : 'Manual')))
-              };
-            }),
-            createdAt: cb.created_at ? new Date(cb.created_at) : (cb.createdAt ? new Date(cb.createdAt) : new Date())
-          };
-        });
-      });
-      if (activeBookId && entriesCache.has(activeBookId) && lastFetchTimeCache.has(activeBookId)) {
-        setIsEntriesLoading(false);
-        setIsLoading(false);
-      }
-    }
-
-    // 2. CACHE FRESHNESS CHECK: Skip remote call completely if book was loaded < 15 seconds ago
-    if (activeBookId && !force) {
-      const lastFetch = lastFetchTimeCache.get(activeBookId) || 0;
-      const isCacheFresh = (now - lastFetch) < 15000; // 15 seconds threshold
-      if (isCacheFresh && entriesCache.has(activeBookId)) {
-        console.log('[fetchData] Skipping remote fetch because cache is fresh for active book:', activeBookId);
-        setIsEntriesLoading(false);
-        setIsLoading(false);
-        return;
-      }
-    }
-
     try {
-      if (activeBookId && (!entriesCache.has(activeBookId) || entriesCache.get(activeBookId)?.length === 0 || !lastFetchTimeCache.has(activeBookId))) {
-        setIsEntriesLoading(true);
-      }
-      console.log('[fetchData] Refreshing cashbooks and entries from Supabase in parallel...');
-
-      // Run queries in parallel to completely eliminate waterfalls and optimize speed!
-      const cashbooksPromise = supabase
-        .from('cashbooks')
-        .select('id, name, created_at, user_id')
-        .eq('user_id', session.user.id);
-
-      let entriesPromise = Promise.resolve({ data: null as any[] | null, error: null as any });
-
-      if (activeBookId) {
-        entriesPromise = (async () => {
-          let entries: any[] | null = null;
-          let entError: any = null;
-          try {
-            // Select Attempt 1: Fetch with is_imported and import_batch_id
-            const { data, error } = await supabase
-              .from('entries')
-              .select('id, amount, type, description, category, mode, date, image_layout, cashbook_id, user_id, imported_from_share_code, is_imported, import_batch_id')
-              .eq('cashbook_id', activeBookId)
-              .eq('user_id', session.user.id)
-              .order('date', { ascending: false });
-            if (error) throw error;
-            entries = data;
-          } catch (e1: any) {
-            console.warn('[fetchData] Parallel Select Attempt 1 warning or missing columns:', e1?.message);
-            try {
-              // Select Attempt 2: Fetch with imported_from_share_code only
-              const { data, error } = await supabase
-                .from('entries')
-                .select('id, amount, type, description, category, mode, date, image_layout, cashbook_id, user_id, imported_from_share_code')
-                .eq('cashbook_id', activeBookId)
-                .eq('user_id', session.user.id)
-                .order('date', { ascending: false });
-              if (error) throw error;
-              entries = data;
-            } catch (e2: any) {
-              console.warn('[fetchData] Parallel Select Attempt 2 warning:', e2?.message);
-              // Select Attempt 3: Strict minimal fallback
-              const { data, error } = await supabase
-                .from('entries')
-                .select('id, amount, type, description, category, mode, date, image_layout, cashbook_id, user_id')
-                .eq('cashbook_id', activeBookId)
-                .eq('user_id', session.user.id)
-                .order('date', { ascending: false });
-              if (error) entError = error;
-              entries = data;
-            }
+      // 1. STALE-WHILE-REVALIDATE: Instantly load and render from IndexedDB
+      console.log('[fetchData] Loading from IndexedDB first...');
+      const localCashbooks = await offlineDb.getCashbooks();
+      
+      if (localCashbooks && localCashbooks.length > 0) {
+        const mappedBooks = [];
+        for (const cb of localCashbooks) {
+          const entries = await offlineDb.getEntries(cb.id);
+          if (cb.id) {
+            entriesCache.set(cb.id, entries);
           }
-          return { data: entries, error: entError };
-        })();
-      }
-
-      const [cashbooksResult, entriesResult] = await Promise.all([cashbooksPromise, entriesPromise]);
-
-      if (cashbooksResult.error) throw cashbooksResult.error;
-      const cashbooks = cashbooksResult.data;
-
-      if (cashbooks) {
-        cachedCashbooks = cashbooks;
-        let activeBookEntries: any[] = [];
-        
-        if (activeBookId) {
-          if (entriesResult.error) throw entriesResult.error;
-          if (entriesResult.data) {
-            activeBookEntries = entriesResult.data;
-            entriesCache.set(activeBookId, entriesResult.data);
-            lastFetchTimeCache.set(activeBookId, Date.now());
-          }
-        }
-
-        setBooks(prevBooks => {
-          // Keep loaded images/attachments mapping to prevent flashing and re-loading
-          const existingBook = prevBooks.find(b => b.id === activeBookId);
-          const existingImagesMap = new Map<string, { images: string[], isAi: boolean }>();
-          if (existingBook?.transactions) {
-            existingBook.transactions.forEach((t: any) => {
-              if (t.images && t.images.length > 0) {
-                existingImagesMap.set(t.id, { images: t.images, isAi: !!t.isAi });
-              }
-            });
-          }
-
-          return cashbooks.map((cb: any) => {
-            const isCurrentActive = cb.id === activeBookId;
-            let entriesToUse: any[] = [];
-            if (isCurrentActive) {
-              entriesToUse = activeBookEntries;
-            } else if (entriesCache.has(cb.id)) {
-              entriesToUse = entriesCache.get(cb.id) || [];
-            } else {
-              const prev = prevBooks.find(pb => pb.id === cb.id);
-              entriesToUse = prev ? (prev.transactions || []) : [];
-            }
-            
-            return {
-              ...cb,
-              transactions: entriesToUse.map((t: any) => {
-                const cached = attachmentCache.get(t.id);
-                const existing = existingImagesMap.get(t.id) || cached;
-                if (existing) {
-                  // Keep it in cache
-                  attachmentCache.set(t.id, existing);
-                }
-                const importedCode = t.imported_from_share_code || t.importedFromShareCode;
-                return {
-                  ...t,
-                  date: t.date ? new Date(t.date) : new Date(),
-                  images: existing ? existing.images : [],
-                  imageLayout: t.image_layout || 'split',
-                  isAi: existing ? existing.isAi : false,
-                  imported_from_share_code: importedCode,
-                  is_imported: t.is_imported || !!importedCode,
-                  import_batch_id: t.import_batch_id || importedCode,
-                  source: t.source || (existing?.isAi ? 'AI' : (t.isAi ? 'AI' : ((t.is_imported || !!importedCode) ? 'Imported' : 'Manual')))
-                };
-              }),
-              createdAt: cb.created_at ? new Date(cb.created_at) : (cb.createdAt ? new Date(cb.createdAt) : new Date())
-            };
+          mappedBooks.push({
+            ...cb,
+            transactions: entries.map((t: any) => ({
+              ...t,
+              date: t.date ? new Date(t.date) : new Date(),
+              images: t.images || [],
+              source: t.source || (t.isAi ? 'AI' : ((t.is_imported || t.imported_from_share_code) ? 'Imported' : 'Manual'))
+            })),
+            createdAt: cb.created_at ? new Date(cb.created_at) : new Date()
           });
-        });
-
-        // Progressive, asynchronous lazy-loading of attachments to keep page responsive
-        if (activeBookId && activeBookEntries && activeBookEntries.length > 0) {
-          const entryIds = activeBookEntries.map(e => e.id);
-          const dbQueryEntryIds = force
-            ? entryIds
-            : entryIds.filter(id => !attachmentCache.has(id) && !revalidatedEntries.has(id));
-
-          if (dbQueryEntryIds.length === 0) {
-            console.log('[fetchData] Skipping progressive DB attachment queries: all rows already cached or revalidated.');
-          } else {
-            // Mark as revalidated to prevent repeating request during active app session
-            dbQueryEntryIds.forEach(id => revalidatedEntries.add(id));
-
-            (async () => {
-              try {
-                console.log(`[fetchData] Retrieving attachments metadata from DB for ${dbQueryEntryIds.length} entries via SWR...`);
-                const loadStart = performance.now();
-                const { attachments, aiAttachments } = await fetchAttachmentsDeduplicated(dbQueryEntryIds);
-                const loadDuration = performance.now() - loadStart;
-                console.log(`[Performance] Attachments loaded in ${loadDuration.toFixed(2)}ms for ${dbQueryEntryIds.length} entries`);
-
-                const manualMap = new Map<string, string[]>();
-                attachments.forEach((a: any) => {
-                  const list = manualMap.get(a.entry_id) || [];
-                  list.push(a.file_url);
-                  manualMap.set(a.entry_id, list);
-                });
-
-                const aiMap = new Map<string, string[]>();
-                aiAttachments.forEach((a: any) => {
-                  const list = aiMap.get(a.entry_id) || [];
-                  list.push(a.file_url);
-                  aiMap.set(a.entry_id, list);
-                });
-
-                let cacheChanged = false;
-                dbQueryEntryIds.forEach(id => {
-                  const manualImgs = (manualMap.get(id) || []).slice(0, 20);
-                  const aiImgs = (aiMap.get(id) || []).slice(0, 20);
-                  const combinedImgs = [...manualImgs, ...aiImgs];
-                  const isAi = aiImgs.length > 0;
-                  
-                  const cached = attachmentCache.get(id);
-                  if (!cached || JSON.stringify(cached.images) !== JSON.stringify(combinedImgs) || cached.isAi !== isAi) {
-                    attachmentCache.set(id, { images: combinedImgs, isAi });
-                    cacheChanged = true;
-                  }
-                });
-
-                if (cacheChanged) {
-                  persistAttachmentCacheToStorage();
-                  setBooks(prevBooks => prevBooks.map(b => b.id === activeBookId ? {
-                    ...b,
-                    transactions: b.transactions.map((t: any) => {
-                      const cached = attachmentCache.get(t.id);
-                      if (cached) {
-                        return {
-                          ...t,
-                          images: cached.images,
-                          isAi: cached.isAi
-                        };
-                      }
-                      return t;
-                    })
-                  } : b));
-                }
-              } catch (err) {
-                console.error('[fetchData] Background SWR images lazy-fetch error:', err);
-              }
-            })();
-          }
         }
-
-        if (lastBookOpenStart.current !== null) {
-          const openDuration = performance.now() - lastBookOpenStart.current;
-          console.log(`[Performance] Cashbook ID: ${activeBookId} opened and rendered in ${openDuration.toFixed(2)}ms`);
-          lastBookOpenStart.current = null;
-        }
-
-        console.log('[fetchData] Refresh completed loaded. Books count:', cashbooks.length);
+        setBooks(mappedBooks);
       }
     } catch (error: any) {
-      console.error('Error fetching data from Supabase:', error);
-      const errorMsg = error?.message || '';
-      const isFailedToFetch = errorMsg.includes('Failed to fetch') || 
-                              errorMsg.includes('NetworkError') || 
-                              errorMsg.includes('network error') ||
-                              errorMsg === 'Failed to fetch';
-      
-      if (isFailedToFetch) {
-        console.warn('[fetchData] Failed to fetch live data from Supabase, attempting local cache fallback...');
-        const savedBooks = localStorage.getItem(`cashbooks_${session.user.id}`);
-        if (savedBooks) {
-          try {
-            const parsed = JSON.parse(savedBooks);
-            cachedCashbooks = parsed;
-            parsed.forEach((b: any) => {
-              if (b.id && Array.isArray(b.transactions)) {
-                entriesCache.set(b.id, b.transactions);
-              }
-            });
-            setBooks(parsed.map((b: any) => ({
-              ...b,
-              transactions: (b.transactions || []).map((t: any) => ({
+      console.error('Error fetching data from IndexedDB:', error);
+    } finally {
+      setIsLoading(false);
+      setIsEntriesLoading(false);
+
+      // 2. SILENT REVALIDATION: Run sync/revalidate in the background if online
+      if (syncManager.network.state !== 'offline') {
+        console.log('[fetchData] Triggering background sync and silent revalidation with Supabase...');
+        syncManager.revalidate(session.user.id);
+      } else {
+        console.log('[fetchData] Device is offline. Skipping remote revalidation.');
+      }
+    }
+  }, [session, activeBookId]);
+
+  // Subscribe to syncManager changes to automatically refresh the dashboard
+  useEffect(() => {
+    if (!session) return;
+
+    const handleSyncChange = async () => {
+      console.log('[Dashboard] Sync completed or queue updated. Reloading from IndexedDB silently...');
+      try {
+        const localCashbooks = await offlineDb.getCashbooks();
+        if (localCashbooks && localCashbooks.length > 0) {
+          const mappedBooks = [];
+          for (const cb of localCashbooks) {
+            const entries = await offlineDb.getEntries(cb.id);
+            if (cb.id) {
+              entriesCache.set(cb.id, entries);
+            }
+            mappedBooks.push({
+              ...cb,
+              transactions: entries.map((t: any) => ({
                 ...t,
                 date: t.date ? new Date(t.date) : new Date(),
                 images: t.images || [],
                 source: t.source || (t.isAi ? 'AI' : ((t.is_imported || t.imported_from_share_code) ? 'Imported' : 'Manual'))
               })),
-              createdAt: b.created_at ? new Date(b.created_at) : (b.createdAt ? new Date(b.createdAt) : new Date())
-            })));
-          } catch (e) {
-            console.error('[fetchData] Failed to parse cache in catch fallback:', e);
+              createdAt: cb.created_at ? new Date(cb.created_at) : new Date()
+            });
           }
-        } else {
-          // No cached local data yet to show
-          setError('Unable to connect to the database. TrackBook is operating in offline mode.');
+          setBooks(mappedBooks);
         }
-      } else {
-        setError(error.message || 'Failed to fetch data');
+      } catch (err) {
+        console.error('[Dashboard] Error reloading from IndexedDB on sync change:', err);
       }
-    } finally {
-      setIsLoading(false);
-      setIsEntriesLoading(false);
-    }
-  }, [session, activeBookId]);
+    };
+
+    const unsubscribe = syncManager.subscribe(handleSyncChange);
+    return () => unsubscribe();
+  }, [session]);
 
   // Fetch data from Supabase init
   useEffect(() => {
@@ -3367,52 +3197,39 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       // 1. Compress image in background
       console.log('[BackgroundUpload] Compressing image...', file.name);
       const isImage = file.type && file.type.startsWith('image/');
-      let processedFile: File;
+      let processedFile: Blob;
 
       if (isImage) {
-        const compressedBlob = await compressImage(file);
-        processedFile = new File([compressedBlob], file.name || 'compressed.jpg', { type: file.type || 'image/jpeg' });
+        processedFile = await compressImage(file);
       } else {
         processedFile = file;
       }
 
-      // 2. Upload to Cloudinary
-      console.log('[BackgroundUpload] Uploading compressed file to Cloudinary...', file.name);
-      const cloudUrl = await uploadToCloudinary(processedFile, folderName);
-      console.log('[BackgroundUpload] Upload completed successfully:', cloudUrl);
+      // 2. Convert to base64 data URL for IndexedDB storage
+      const reader = new FileReader();
+      const base64Promise = new Promise<string>((resolve, reject) => {
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.onerror = reject;
+      });
+      reader.readAsDataURL(processedFile);
+      const base64Data = await base64Promise;
 
-      // 3. Save into Supabase 'attachments' table permanently
-      if (supabase && session) {
-        const validatedUrl = await validateAndResolveCloudinaryUrl(cloudUrl, session.user);
-        console.log('[BackgroundUpload] Saving attachment metadata to database...', { transactionId, file_url: validatedUrl });
-        const { error: insertError } = await supabase
-          .from('attachments')
-          .insert([{
-            entry_id: transactionId,
-            user_id: session.user.id,
-            file_url: validatedUrl,
-            file_name: file.name || 'manual_upload',
-            file_type: 'image'
-          }]);
-        if (insertError) throw insertError;
-      }
+      // 3. Save to local IndexedDB (local_images) with a unique local image ID
+      const localImageId = `local-img-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      await offlineDb.saveLocalImage(localImageId, base64Data, file.type || 'image/jpeg');
+      console.log('[BackgroundUpload] Saved compressed image to IndexedDB:', localImageId);
 
-      // 4. Update local transaction images list: replace local blob URL with permanent Cloudinary URL
+      // 4. Update local transaction images list in state/IndexedDB immediately so the user can see it
       setBooks(prevBooks => prevBooks.map(b => {
         if (b.id !== activeBookId) return b;
         return {
           ...b,
           transactions: b.transactions.map(t => {
             if (t.id !== transactionId) return t;
-            const updatedImages = (t.images || []).map(img => img === blobUrl ? cloudUrl : img);
-            
-            // Also update attachmentCache permanently so that subsequent fetch revalidation gets correct Cloudinary URL
-            const cacheAtt = attachmentCache.get(transactionId);
-            attachmentCache.set(transactionId, {
-              images: cacheAtt ? cacheAtt.images.map(img => img === blobUrl ? cloudUrl : img) : updatedImages,
-              isAi: cacheAtt ? cacheAtt.isAi : false
-            });
-
+            const updatedImages = (t.images || []).map(img => img === blobUrl ? localImageId : img);
+            if (!updatedImages.includes(localImageId)) {
+              updatedImages.push(localImageId);
+            }
             return {
               ...t,
               images: updatedImages
@@ -3421,20 +3238,32 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         };
       }));
 
-      // Update status to success
+      // Also save this update to IndexedDB (entries store)
+      const localEntry = await offlineDb.getEntry(transactionId);
+      if (localEntry) {
+        const updatedImages = (localEntry.images || []).map(img => img === blobUrl ? localImageId : img);
+        if (!updatedImages.includes(localImageId)) {
+          updatedImages.push(localImageId);
+        }
+        localEntry.images = updatedImages;
+        await offlineDb.saveEntry(localEntry);
+      }
+
+      // 5. Enqueue UPLOAD_IMAGE operation in syncManager
+      await syncManager.enqueue('UPLOAD_IMAGE', {
+        localImageId,
+        transactionId,
+        user_id: session!.user.id,
+        isAi: false
+      });
+
       setUploadStatuses(prev => ({
         ...prev,
         [blobUrl]: { status: 'success' }
       }));
 
-      // Clean up the URL object reference
-      try {
-        URL.revokeObjectURL(blobUrl);
-      } catch (err) {}
-      delete imageFilesRef.current[blobUrl];
-
     } catch (err: any) {
-      console.error('[BackgroundUpload] Failed to process background upload:', err);
+      console.error('[BackgroundUpload] Offline-first image upload preparation failed:', err);
       setUploadStatuses(prev => ({
         ...prev,
         [blobUrl]: { status: 'failed', error: err.message || 'Upload failed' }
@@ -5251,6 +5080,31 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       "min-h-screen transition-colors duration-300",
       theme === 'dark' ? "bg-black text-slate-100" : "bg-slate-50 text-black"
     )}>
+      {showOfflineDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
+          <div className={cn(
+            "w-full max-w-md p-6 rounded-3xl shadow-xl space-y-4 text-center border transition-all duration-300 transform scale-100",
+            theme === 'dark' ? "bg-zinc-900 border-zinc-800 text-white" : "bg-white border-slate-150 text-slate-900"
+          )}>
+            <div className="mx-auto w-12 h-12 rounded-full bg-amber-100 dark:bg-amber-950 flex items-center justify-center text-amber-500">
+              <CloudOff size={24} />
+            </div>
+            <h3 className="text-lg font-black tracking-tight">You're Offline</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 font-medium leading-relaxed">
+              We couldn't sync your latest data because your device is offline.
+              You can continue creating entries normally.
+              Everything will automatically sync once your internet connection is restored.
+            </p>
+            <button
+              onClick={() => setShowOfflineDialog(false)}
+              className="w-full py-2.5 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold transition-all shadow-md shadow-indigo-600/10 active:scale-98"
+            >
+              Continue Offline
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Error Alert */}
       <AnimatePresence>
         {error && (
@@ -6171,17 +6025,29 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     </div>
                   ) : filteredTransactions.length === 0 ? (
                     <div className={cn(
-                      "py-12 text-center rounded-3xl border transition-colors duration-300",
+                      "py-12 px-6 text-center rounded-3xl border transition-colors duration-300 space-y-3",
                       theme === 'dark' ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
                     )}>
-                      <History size={40} className={cn(
-                        "mx-auto mb-2 transition-colors duration-300",
-                        theme === 'dark' ? "text-slate-700" : "text-slate-200"
-                      )} />
-                      <p className={cn(
-                        "text-sm font-medium transition-colors duration-300",
-                        theme === 'dark' ? "text-slate-500" : "text-black"
-                      )}>No entries found</p>
+                      {isOffline ? (
+                        <>
+                          <CloudOff size={40} className="mx-auto text-amber-500 animate-pulse" />
+                          <h4 className="text-sm font-bold">Device is Offline</h4>
+                          <p className="text-xs text-slate-500 dark:text-slate-400 font-medium leading-relaxed max-w-xs mx-auto">
+                            We couldn't sync your latest data because your device is offline. You can continue creating entries normally. Everything will automatically sync once your internet connection is restored.
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <History size={40} className={cn(
+                            "mx-auto mb-2 transition-colors duration-300",
+                            theme === 'dark' ? "text-slate-700" : "text-slate-200"
+                          )} />
+                          <p className={cn(
+                            "text-sm font-medium transition-colors duration-300",
+                            theme === 'dark' ? "text-slate-500" : "text-black"
+                          )}>No entries found</p>
+                        </>
+                      )}
                     </div>
                   ) : (
                     (() => {
@@ -6325,17 +6191,31 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                           ) : filteredTransactions.length === 0 ? (
                             <tr>
                               <td colSpan={9} className="px-6 py-20 text-center">
-                                <div className="flex flex-col items-center justify-center space-y-3">
-                                  <div className={cn(
-                                    "w-12 h-12 rounded-full flex items-center justify-center transition-colors duration-300",
-                                    theme === 'dark' ? "bg-slate-800 text-slate-700" : "bg-slate-50 text-slate-300"
-                                  )}>
-                                    <History size={24} />
-                                  </div>
-                                  <p className={cn(
-                                    "text-sm font-medium transition-colors duration-300",
-                                    theme === 'dark' ? "text-slate-500" : "text-black"
-                                  )}>No entries found for this book.</p>
+                                <div className="flex flex-col items-center justify-center space-y-3 max-w-md mx-auto">
+                                  {isOffline ? (
+                                    <>
+                                      <div className="w-12 h-12 rounded-full bg-amber-100 dark:bg-amber-950/40 text-amber-500 flex items-center justify-center">
+                                        <CloudOff size={24} className="animate-pulse" />
+                                      </div>
+                                      <h4 className="text-sm font-bold">Device is Offline</h4>
+                                      <p className="text-xs text-slate-500 dark:text-slate-400 font-medium leading-relaxed">
+                                        We couldn't sync your latest data because your device is offline. You can continue creating entries normally. Everything will automatically sync once your internet connection is restored.
+                                      </p>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <div className={cn(
+                                        "w-12 h-12 rounded-full flex items-center justify-center transition-colors duration-300",
+                                        theme === 'dark' ? "bg-slate-800 text-slate-700" : "bg-slate-50 text-slate-300"
+                                      )}>
+                                        <History size={24} />
+                                      </div>
+                                      <p className={cn(
+                                        "text-sm font-medium transition-colors duration-300",
+                                        theme === 'dark' ? "text-slate-500" : "text-black"
+                                      )}>No entries found for this book.</p>
+                                    </>
+                                  )}
                                 </div>
                               </td>
                             </tr>
