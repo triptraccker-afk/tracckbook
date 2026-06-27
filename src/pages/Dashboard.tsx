@@ -1551,8 +1551,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     setActiveBookIdState(id);
     if (id) {
       const cached = entriesCache.get(id);
-      const hasFetched = lastFetchTimeCache.has(id);
-      if (!cached || cached.length === 0 || !hasFetched) {
+      if (!cached || cached.length === 0) {
         setIsEntriesLoading(true);
       }
     } else {
@@ -2501,152 +2500,116 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     }
   }, [session]);
 
-  // Pre-load from IndexedDB first on mount/session ready to render UI instantly!
-  useEffect(() => {
-    let active = true;
-    if (session) {
-      const loadFromIndexedDB = async () => {
-        try {
-          console.log('[Dashboard] Pre-loading cashbooks and entries from IndexedDB first...');
-          const localCashbooks = await offlineDb.getCashbooks();
-          
-          if (!active) return;
-
-          if (localCashbooks && localCashbooks.length > 0) {
-            const mappedBooks = [];
-            for (const cb of localCashbooks) {
-              const entries = await offlineDb.getEntries(cb.id);
-              if (cb.id) {
-                entriesCache.set(cb.id, entries);
-              }
-              
-              mappedBooks.push({
-                ...cb,
-                transactions: entries.map((t: any) => ({
-                  ...t,
-                  date: t.date ? new Date(t.date) : new Date(),
-                  images: t.images || [],
-                  source: t.source || (t.isAi ? 'AI' : ((t.is_imported || t.imported_from_share_code) ? 'Imported' : 'Manual'))
-                })),
-                createdAt: cb.created_at ? new Date(cb.created_at) : new Date()
-              });
-            }
-
-            setBooks(mappedBooks);
-
-            // EAGER ROOT SYNC: Solve loading delay entirely by resolving activeBookId immediately!
-            if (bookSlug) {
-              const foundBook = mappedBooks.find(b => getBookSlug(b.name, b.id) === bookSlug);
-              if (foundBook) {
-                setActiveBookIdState(foundBook.id);
-                const cached = entriesCache.get(foundBook.id);
-                if (!cached || cached.length === 0) {
-                  setIsEntriesLoading(true);
-                }
-              }
-            }
-          }
-        } catch (e) {
-          console.error('[Dashboard] Error pre-loading from IndexedDB:', e);
-        } finally {
-          if (active) {
-            setIsLoading(false); // Enable immediate frame rendering!
-          }
-        }
-      };
-
-      loadFromIndexedDB();
-    }
-    return () => {
-      active = false;
-    };
-  }, [session, bookSlug]);
-
   // Stable component-level data fetch and sync function
   const fetchData = useCallback(async (force: boolean = false) => {
-    if (!session) {
+    if (!session || !supabase) {
       setBooks([]);
       setIsLoading(false);
       return;
     }
 
+    setIsLoading(true);
     try {
-      // 1. STALE-WHILE-REVALIDATE: Instantly load and render from IndexedDB
-      console.log('[fetchData] Loading from IndexedDB first...');
-      const localCashbooks = await offlineDb.getCashbooks();
-      
-      if (localCashbooks && localCashbooks.length > 0) {
-        const mappedBooks = [];
-        for (const cb of localCashbooks) {
-          const entries = await offlineDb.getEntries(cb.id);
-          if (cb.id) {
-            entriesCache.set(cb.id, entries);
+      console.log('[fetchData] Loading cashbooks and entries directly from Supabase...');
+      // 1. Fetch cashbooks
+      const { data: cashbooks, error: cbErr } = await supabase
+        .from('cashbooks')
+        .select('*')
+        .eq('user_id', session.user.id);
+
+      if (cbErr) throw cbErr;
+
+      if (cashbooks && cashbooks.length > 0) {
+        // Fetch all entries for these cashbooks in a single query
+        const cashbookIds = cashbooks.map(cb => cb.id);
+        const { data: entries, error: entErr } = await supabase
+          .from('entries')
+          .select('*')
+          .in('cashbook_id', cashbookIds)
+          .order('date', { ascending: false });
+
+        if (entErr) throw entErr;
+
+        const entriesMapByCashbook = new Map<string, any[]>();
+        const allEntryIds: string[] = [];
+        if (entries) {
+          for (const e of entries) {
+            allEntryIds.push(e.id);
+            if (!entriesMapByCashbook.has(e.cashbook_id)) {
+              entriesMapByCashbook.set(e.cashbook_id, []);
+            }
+            entriesMapByCashbook.get(e.cashbook_id)!.push(e);
           }
-          mappedBooks.push({
-            ...cb,
-            transactions: entries.map((t: any) => ({
+        }
+
+        // Fetch attachments for all entries in a single step
+        let attachmentsMap = new Map<string, string[]>();
+        if (allEntryIds.length > 0) {
+          const { attachments, aiAttachments } = await fetchAttachmentsDeduplicated(allEntryIds);
+          if (attachments) {
+            for (const att of attachments) {
+              if (att && att.entry_id && att.file_url) {
+                if (!attachmentsMap.has(att.entry_id)) {
+                  attachmentsMap.set(att.entry_id, []);
+                }
+                attachmentsMap.get(att.entry_id)!.push(att.file_url);
+              }
+            }
+          }
+          if (aiAttachments) {
+            for (const att of aiAttachments) {
+              if (att && att.entry_id && att.file_url) {
+                if (!attachmentsMap.has(att.entry_id)) {
+                  attachmentsMap.set(att.entry_id, []);
+                }
+                attachmentsMap.get(att.entry_id)!.push(att.file_url);
+              }
+            }
+          }
+        }
+
+        const mappedBooks = cashbooks.map(cb => {
+          const rawEntries = entriesMapByCashbook.get(cb.id) || [];
+          const entryList = rawEntries.map(t => {
+            const images = attachmentsMap.get(t.id) || [];
+            return {
               ...t,
               date: t.date ? new Date(t.date) : new Date(),
-              images: t.images || [],
+              images,
               source: t.source || (t.isAi ? 'AI' : ((t.is_imported || t.imported_from_share_code) ? 'Imported' : 'Manual'))
-            })),
-            createdAt: cb.created_at ? new Date(cb.created_at) : new Date()
+            };
           });
-        }
+
+          // Update memory cache
+          entriesCache.set(cb.id, entryList);
+          lastFetchTimeCache.set(cb.id, Date.now());
+
+          return {
+            ...cb,
+            transactions: entryList,
+            createdAt: cb.created_at ? new Date(cb.created_at) : new Date()
+          };
+        });
+
         setBooks(mappedBooks);
+
+        // Solve loading delay by resolving activeBookId immediately if not set
+        if (bookSlug) {
+          const foundBook = mappedBooks.find(b => getBookSlug(b.name, b.id) === bookSlug);
+          if (foundBook) {
+            setActiveBookIdState(foundBook.id);
+          }
+        }
+      } else {
+        setBooks([]);
       }
     } catch (error: any) {
-      console.error('Error fetching data from IndexedDB:', error);
+      console.error('Error fetching data from Supabase:', error);
     } finally {
       setIsLoading(false);
       setIsEntriesLoading(false);
-
-      // 2. SILENT REVALIDATION: Run sync/revalidate in the background if online
-      if (syncManager.network.state !== 'offline') {
-        console.log('[fetchData] Triggering background sync and silent revalidation with Supabase...');
-        syncManager.revalidate(session.user.id);
-      } else {
-        console.log('[fetchData] Device is offline. Skipping remote revalidation.');
-      }
     }
-  }, [session, activeBookId]);
-
-  // Subscribe to syncManager changes to automatically refresh the dashboard
-  useEffect(() => {
-    if (!session) return;
-
-    const handleSyncChange = async () => {
-      console.log('[Dashboard] Sync completed or queue updated. Reloading from IndexedDB silently...');
-      try {
-        const localCashbooks = await offlineDb.getCashbooks();
-        if (localCashbooks && localCashbooks.length > 0) {
-          const mappedBooks = [];
-          for (const cb of localCashbooks) {
-            const entries = await offlineDb.getEntries(cb.id);
-            if (cb.id) {
-              entriesCache.set(cb.id, entries);
-            }
-            mappedBooks.push({
-              ...cb,
-              transactions: entries.map((t: any) => ({
-                ...t,
-                date: t.date ? new Date(t.date) : new Date(),
-                images: t.images || [],
-                source: t.source || (t.isAi ? 'AI' : ((t.is_imported || t.imported_from_share_code) ? 'Imported' : 'Manual'))
-              })),
-              createdAt: cb.created_at ? new Date(cb.created_at) : new Date()
-            });
-          }
-          setBooks(mappedBooks);
-        }
-      } catch (err) {
-        console.error('[Dashboard] Error reloading from IndexedDB on sync change:', err);
-      }
-    };
-
-    const unsubscribe = syncManager.subscribe(handleSyncChange);
-    return () => unsubscribe();
-  }, [session]);
+  }, [session, bookSlug]);
 
   // Fetch data from Supabase init
   useEffect(() => {
@@ -3181,104 +3144,13 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     setShowBulkDeleteConfirm(false);
   };
 
-  const uploadSingleImageInBackground = async (blobUrl: string, transactionId: string, folderName: string) => {
-    const file = imageFilesRef.current[blobUrl];
-    if (!file) {
-      console.warn('[BackgroundUpload] No file found in registry for blobUrl:', blobUrl);
-      return;
-    }
-
-    setUploadStatuses(prev => ({
-      ...prev,
-      [blobUrl]: { status: 'uploading' }
-    }));
-
-    try {
-      // 1. Compress image in background
-      console.log('[BackgroundUpload] Compressing image...', file.name);
-      const isImage = file.type && file.type.startsWith('image/');
-      let processedFile: Blob;
-
-      if (isImage) {
-        processedFile = await compressImage(file);
-      } else {
-        processedFile = file;
-      }
-
-      // 2. Convert to base64 data URL for IndexedDB storage
-      const reader = new FileReader();
-      const base64Promise = new Promise<string>((resolve, reject) => {
-        reader.onloadend = () => resolve(reader.result as string);
-        reader.onerror = reject;
-      });
-      reader.readAsDataURL(processedFile);
-      const base64Data = await base64Promise;
-
-      // 3. Save to local IndexedDB (local_images) with a unique local image ID
-      const localImageId = `local-img-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      await offlineDb.saveLocalImage(localImageId, base64Data, file.type || 'image/jpeg');
-      console.log('[BackgroundUpload] Saved compressed image to IndexedDB:', localImageId);
-
-      // 4. Update local transaction images list in state/IndexedDB immediately so the user can see it
-      setBooks(prevBooks => prevBooks.map(b => {
-        if (b.id !== activeBookId) return b;
-        return {
-          ...b,
-          transactions: b.transactions.map(t => {
-            if (t.id !== transactionId) return t;
-            const updatedImages = (t.images || []).map(img => img === blobUrl ? localImageId : img);
-            if (!updatedImages.includes(localImageId)) {
-              updatedImages.push(localImageId);
-            }
-            return {
-              ...t,
-              images: updatedImages
-            };
-          })
-        };
-      }));
-
-      // Also save this update to IndexedDB (entries store)
-      const localEntry = await offlineDb.getEntry(transactionId);
-      if (localEntry) {
-        const updatedImages = (localEntry.images || []).map(img => img === blobUrl ? localImageId : img);
-        if (!updatedImages.includes(localImageId)) {
-          updatedImages.push(localImageId);
-        }
-        localEntry.images = updatedImages;
-        await offlineDb.saveEntry(localEntry);
-      }
-
-      // 5. Enqueue UPLOAD_IMAGE operation in syncManager
-      await syncManager.enqueue('UPLOAD_IMAGE', {
-        localImageId,
-        transactionId,
-        user_id: session!.user.id,
-        isAi: false
-      });
-
-      setUploadStatuses(prev => ({
-        ...prev,
-        [blobUrl]: { status: 'success' }
-      }));
-
-    } catch (err: any) {
-      console.error('[BackgroundUpload] Offline-first image upload preparation failed:', err);
-      setUploadStatuses(prev => ({
-        ...prev,
-        [blobUrl]: { status: 'failed', error: err.message || 'Upload failed' }
-      }));
-    }
-  };
-
-  const handleRetryUpload = async (blobUrl: string, transactionId: string) => {
-    const cloudinaryFolder = await getUserCloudinaryFolder(session?.user);
-    uploadSingleImageInBackground(blobUrl, transactionId, cloudinaryFolder);
+  const handleRetryUpload = (blobUrl: string, transactionId: string) => {
+    console.log('[handleRetryUpload] Image upload retry is now handled synchronously during save.');
   };
 
   const handleAddTransaction = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeBookId || !showForm || !amount || !session) return;
+    if (!activeBookId || !showForm || !amount || !session || !supabase) return;
 
     const finalCategory = category === 'Custom' ? customCategory : category;
     const finalMode = mode === 'Custom' ? customMode : mode;
@@ -3292,54 +3164,79 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
     try {
       if (editingTransaction) {
-        console.log('[handleAddTransaction] Optimistic Edit Mode for existing ID:', editingTransaction.id);
+        console.log('[handleAddTransaction] Direct Edit Mode for existing ID:', editingTransaction.id);
 
-        // Keep local state up-to-date instantly with current selectedImages which includes blob URLs for instant rendering.
-        const updatedTransaction: Transaction = {
-          ...editingTransaction,
+        // Upload any new local blob images to Cloudinary first
+        const finalImages: string[] = [];
+        for (const img of selectedImages) {
+          if (img.startsWith('blob:')) {
+            const file = imageFilesRef.current[img];
+            if (file) {
+              console.log('[handleAddTransaction] Compressing and uploading edited image...');
+              const isImage = file.type && file.type.startsWith('image/');
+              const processedFile = isImage ? await compressImage(file) : file;
+              const fileToUpload = processedFile instanceof File 
+                ? processedFile 
+                : new File([processedFile], file.name || 'image.jpg', { type: file.type });
+              const cloudUrl = await uploadToCloudinary(fileToUpload, cloudinaryFolder);
+              if (cloudUrl) {
+                finalImages.push(cloudUrl);
+              }
+            }
+          } else {
+            finalImages.push(img);
+          }
+        }
+
+        const payload: any = {
           amount: amountNum,
           type: showForm,
           description: description,
           category: finalCategory || 'General',
           mode: finalMode,
-          date: dateObj,
-          images: selectedImages,
-          imageLayout: imageLayout
+          date: safeToISOString(dateObj)
         };
 
-        // Update entriesCache
-        const currCached = entriesCache.get(activeBookId);
-        if (currCached) {
-          entriesCache.set(activeBookId, currCached.map(t => t.id === editingTransaction.id ? { 
-            ...t, 
-            amount: amountNum, 
-            type: showForm, 
-            description: description, 
-            category: finalCategory || 'General', 
-            mode: finalMode, 
-            date: dateObj, 
-            image_layout: imageLayout 
-          } : t));
+        // Update database metadata
+        const { error: entryError } = await supabase
+          .from('entries')
+          .update({ ...payload, image_layout: imageLayout })
+          .eq('id', editingTransaction.id)
+          .eq('user_id', session.user.id);
+        
+        if (entryError) {
+          if (entryError.code === '42703' || entryError.message?.includes('image_layout')) {
+            const { error: retryError } = await supabase
+              .from('entries')
+              .update(payload)
+              .eq('id', editingTransaction.id)
+              .eq('user_id', session.user.id);
+            if (retryError) throw retryError;
+          } else {
+            throw entryError;
+          }
         }
 
-        // Update the books local cache state instantly
-        setBooks(prevBooks => prevBooks.map(b => 
-          b.id === activeBookId 
-            ? { 
-                ...b, 
-                transactions: b.transactions.map(t => t.id === editingTransaction.id ? updatedTransaction : t)
-              }
-            : b
-        ));
+        // Synchronize attachment links
+        await supabase.from('attachments').delete().eq('entry_id', editingTransaction.id);
+        if (finalImages.length > 0) {
+          const attachmentInserts = finalImages.map(url => ({
+            entry_id: editingTransaction.id,
+            user_id: session.user.id,
+            file_url: url
+          }));
+          await supabase.from('attachments').insert(attachmentInserts);
+        }
 
-        const savedId = editingTransaction.id;
-        // Let form shut down instantly!
+        // Close form and refresh dashboard immediately
         setShowForm(null);
         setEditingTransaction(null);
         resetForm();
         setIsSubmitting(false);
 
-        // Scroll to and highlight the edited transaction
+        await fetchData();
+
+        const savedId = editingTransaction.id;
         setTimeout(() => {
           setJustEditedTransactionId(savedId);
           document.getElementById(`entry-${savedId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -3348,205 +3245,105 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           }, 2000);
         }, 150);
 
-        // Run direct database updates on textual metadata in background
-        if (supabase) {
-          const payload: any = {
-            amount: amountNum,
-            type: showForm,
-            description: description,
-            category: finalCategory || 'General',
-            mode: finalMode,
-            date: safeToISOString(dateObj)
-          };
-
-          (async () => {
-            try {
-              console.log('[BackgroundSave] Updating entry fields in Supabase...');
-              const { error: entryError } = await supabase
-                .from('entries')
-                .update({ ...payload, image_layout: imageLayout })
-                .eq('id', editingTransaction.id)
-                .eq('user_id', session.user.id);
-              
-              if (entryError) {
-                if (entryError.code === '42703' || entryError.message?.includes('column "image_layout" does not exist')) {
-                  console.warn('[BackgroundSave] image_layout missing in schema, retrying text-only...');
-                  const { error: retryError } = await supabase
-                    .from('entries')
-                    .update(payload)
-                    .eq('id', editingTransaction.id)
-                    .eq('user_id', session.user.id);
-                  if (retryError) throw retryError;
-                } else {
-                  throw entryError;
-                }
-              }
-
-              // Remove from attachments table those that were removed in UI editor (images not present in selectedImages)
-              const keptImages = selectedImages.filter((img) => !img.startsWith('blob:') && !img.startsWith('data:'));
-              console.log('[BackgroundSave] Removing deleted attachments from database. Remaining Cloudinary count:', keptImages.length);
-              let deleteQuery = supabase.from('attachments').delete().eq('entry_id', editingTransaction.id);
-              if (keptImages.length > 0) {
-                deleteQuery = deleteQuery.not('file_url', 'in', `(${keptImages.map(x => `"${x}"`).join(',')})`);
-              }
-              const { error: deleteError } = await deleteQuery;
-              if (deleteError) {
-                console.error('[BackgroundSave] Warning: attachments sync error:', deleteError);
-              }
-
-              // Start background parallel upload triggers for newly added local blob URLs
-              const newBlobs = selectedImages.filter(img => img.startsWith('blob:'));
-              newBlobs.forEach(blobUrl => {
-                uploadSingleImageInBackground(blobUrl, editingTransaction.id, cloudinaryFolder);
-              });
-            } catch (err: any) {
-              console.warn('[BackgroundSave] Supabase sync warning on edit:', err);
-            }
-          })();
-        }
-
       } else {
-        console.log('[handleAddTransaction] Optimistic Creation Mode...');
-        
+        console.log('[handleAddTransaction] Direct Creation Mode...');
         const tempId = safeUUID();
 
-        // 1. Instantly render new row in client UI viewport (Optimistic Rendering)
-        const newTransaction: Transaction = {
+        // Compress and upload all selected images to Cloudinary synchronously
+        const finalImages: string[] = [];
+        for (const img of selectedImages) {
+          if (img.startsWith('blob:')) {
+            const file = imageFilesRef.current[img];
+            if (file) {
+              console.log('[handleAddTransaction] Compressing and uploading image...');
+              const isImage = file.type && file.type.startsWith('image/');
+              const processedFile = isImage ? await compressImage(file) : file;
+              const fileToUpload = processedFile instanceof File 
+                ? processedFile 
+                : new File([processedFile], file.name || 'image.jpg', { type: file.type });
+              const cloudUrl = await uploadToCloudinary(fileToUpload, cloudinaryFolder);
+              if (cloudUrl) {
+                finalImages.push(cloudUrl);
+              }
+            }
+          } else {
+            finalImages.push(img);
+          }
+        }
+
+        const payload: any = {
           id: tempId,
+          cashbook_id: activeBookId,
+          user_id: session.user.id,
           amount: amountNum,
           type: showForm,
           description: description,
           category: finalCategory || 'General',
           mode: finalMode,
-          date: dateObj,
-          images: selectedImages,
-          imageLayout: imageLayout,
+          date: safeToISOString(dateObj),
           source: 'Manual'
         };
 
-        // Instantly save images in attachmentCache so they persist even if user switches or scrolls immediately
-        attachmentCache.set(tempId, { images: selectedImages, isAi: false });
+        let entryError: any = null;
+        
+        // Attempt insert with fallback combinations
+        const firstTry = await supabase
+          .from('entries')
+          .insert([{ ...payload, image_layout: imageLayout }]);
+        entryError = firstTry.error;
 
-        // Update entriesCache
-        const currCached = entriesCache.get(activeBookId) || [];
-        entriesCache.set(activeBookId, [{ 
-          id: tempId, 
-          amount: amountNum, 
-          type: showForm, 
-          description: description, 
-          category: finalCategory || 'General', 
-          mode: finalMode, 
-          date: dateObj, 
-          image_layout: imageLayout,
-          user_id: session.user.id,
-          cashbook_id: activeBookId,
-          source: 'Manual'
-        }, ...currCached]);
+        if (entryError && (entryError.code === '42703' || entryError.message?.toLowerCase().includes('column'))) {
+          const secondTry = await supabase.from('entries').insert([payload]);
+          entryError = secondTry.error;
 
-        setBooks(prevBooks => prevBooks.map(b => 
-          b.id === activeBookId 
-            ? { ...b, transactions: [newTransaction, ...b.transactions] }
-            : b
-        ));
+          if (entryError && (entryError.code === '42703' || entryError.message?.toLowerCase().includes('column'))) {
+            const payloadNoSource = { ...payload };
+            delete payloadNoSource.source;
+            const thirdTry = await supabase
+              .from('entries')
+              .insert([{ ...payloadNoSource, image_layout: imageLayout }]);
+            entryError = thirdTry.error;
 
-        // Let field inputs reset while keeping the form open or closed based on submitAndAddNew state
+            if (entryError && (entryError.code === '42703' || entryError.message?.toLowerCase().includes('column'))) {
+              const fourthTry = await supabase.from('entries').insert([payloadNoSource]);
+              entryError = fourthTry.error;
+            }
+          }
+        }
+
+        if (entryError) throw entryError;
+
+        // Insert attachments if any exist
+        if (finalImages.length > 0) {
+          const attachmentInserts = finalImages.map(url => ({
+            entry_id: tempId,
+            user_id: session.user.id,
+            file_url: url
+          }));
+          const { error: attachError } = await supabase.from('attachments').insert(attachmentInserts);
+          if (attachError) console.error('[handleAddTransaction] Error creating attachments:', attachError);
+        }
+
         if (submitAndAddNew) {
-          resetFormFields(true); // reset inputs but preserve mode
+          resetFormFields(true);
           setQuickAddSuccess(true);
           setTimeout(() => setQuickAddSuccess(false), 1500);
           setIsSubmitting(false);
-
-          // Focus description right after reset
           setTimeout(() => {
             descriptionInputRef.current?.focus();
           }, 80);
         } else {
-          // Shutdown popup form immediately, giving an incredibly fast, instant UI visual feel!
           setShowForm(null);
           resetForm();
           setIsSubmitting(false);
         }
 
-        // 2. Perform background DB core insertion & attachments pipeline
-        if (supabase) {
-          const payload: any = {
-            id: tempId,
-            cashbook_id: activeBookId,
-            user_id: session.user.id,
-            amount: amountNum,
-            type: showForm,
-            description: description,
-            category: finalCategory || 'General',
-            mode: finalMode,
-            date: safeToISOString(dateObj),
-            source: 'Manual'
-          };
-
-          (async () => {
-            try {
-              console.log('[BackgroundSave] Inserting new entry core into Supabase:', tempId);
-              let entryError: any = null;
-              
-              // Stepwise Fallback Insert Strategy: Check every column combination dynamically
-              const firstTry = await supabase
-                .from('entries')
-                .insert([{ ...payload, image_layout: imageLayout }]);
-              entryError = firstTry.error;
-
-              if (entryError && (entryError.code === '42703' || entryError.message?.toLowerCase().includes('column'))) {
-                console.warn('[BackgroundSave] Try 1 failed on column mismatch. Trying Try 2 (with source, but no image_layout)...');
-                const secondTry = await supabase
-                  .from('entries')
-                  .insert([payload]);
-                entryError = secondTry.error;
-
-                if (entryError && (entryError.code === '42703' || entryError.message?.toLowerCase().includes('column'))) {
-                  console.warn('[BackgroundSave] Try 2 failed. Trying Try 3 (no source, but with image_layout)...');
-                  const payloadNoSource = { ...payload };
-                  delete payloadNoSource.source;
-                  const thirdTry = await supabase
-                    .from('entries')
-                    .insert([{ ...payloadNoSource, image_layout: imageLayout }]);
-                  entryError = thirdTry.error;
-
-                  if (entryError && (entryError.code === '42703' || entryError.message?.toLowerCase().includes('column'))) {
-                    console.warn('[BackgroundSave] Try 3 failed. Trying Try 4 (minimum payload: no source, no image_layout)...');
-                    const fourthTry = await supabase
-                      .from('entries')
-                      .insert([payloadNoSource]);
-                    entryError = fourthTry.error;
-                  }
-                }
-              }
-
-              if (entryError) {
-                throw entryError;
-              }
-
-              // Start parallel background upload tasks for selected local blob images
-              const newBlobs = selectedImages.filter(img => img.startsWith('blob:'));
-              newBlobs.forEach(blobUrl => {
-                uploadSingleImageInBackground(blobUrl, tempId, cloudinaryFolder);
-              });
-            } catch (err: any) {
-              console.warn('[BackgroundSave] Supabase insert transaction background sync warning:', err);
-            }
-          })();
-        } else {
-          // If no Supabase (offline/localStorage mode), clean cache
-          selectedImages.forEach(blobUrl => {
-            if (blobUrl.startsWith('blob:')) {
-              try {
-                URL.revokeObjectURL(blobUrl);
-              } catch (e) {}
-              delete imageFilesRef.current[blobUrl];
-            }
-          });
-        }
+        // Reload data immediately so dashboard updates
+        await fetchData();
       }
     } catch (error: any) {
-      console.error('[handleAddTransaction] Error in optimistic transaction flow:', error);
-      setError(error.message || 'Transaction submission failed');
+      console.error('[handleAddTransaction] Error in transaction save flow:', error);
+      setError(error.message || 'Transaction save failed');
       setIsSubmitting(false);
     }
   };
@@ -6010,7 +5807,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   <div className="space-y-4">
                 {/* Mobile Transaction List (Card Based) */}
                  <div ref={mobileContainerRef} className="lg:hidden space-y-3">
-                  {(isEntriesLoading || (activeBookId !== null && (!entriesCache.has(activeBookId) || !lastFetchTimeCache.has(activeBookId)))) && filteredTransactions.length === 0 ? (
+                  {(isEntriesLoading || (activeBookId !== null && !entriesCache.has(activeBookId))) && filteredTransactions.length === 0 ? (
                     <div className="flex flex-col items-center justify-center py-20 text-center space-y-4">
                       <div className="relative flex items-center justify-center">
                         <div className="w-12 h-12 rounded-full border-2 border-indigo-500/20 animate-ping absolute" />
@@ -6171,7 +5968,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                             "divide-y transition-colors duration-300",
                             theme === 'dark' ? "divide-slate-800" : "divide-slate-50"
                           )}
-                        >{(isEntriesLoading || (activeBookId !== null && (!entriesCache.has(activeBookId) || !lastFetchTimeCache.has(activeBookId)))) && filteredTransactions.length === 0 ? (
+                        >{(isEntriesLoading || (activeBookId !== null && !entriesCache.has(activeBookId))) && filteredTransactions.length === 0 ? (
                             <tr>
                               <td colSpan={9} className="px-6 py-20">
                                 <div className="flex flex-col items-center justify-center py-12 text-center space-y-4">
