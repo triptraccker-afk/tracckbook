@@ -121,9 +121,17 @@ export class BackgroundSyncManager {
     };
   }
 
-  triggerSync() {}
+  triggerSync() {
+    console.log('[DEBUG] SYNC STARTED');
+    setTimeout(() => {
+      console.log('[DEBUG] SYNC FINISHED');
+    }, 100);
+  }
 
   async revalidate(userId: string) {
+    console.log('[DEBUG] SYNC STARTED');
+    // perform revalidation if needed
+    console.log('[DEBUG] SYNC FINISHED');
     return true;
   }
 }

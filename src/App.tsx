@@ -1,4 +1,4 @@
-import React, { useState, useEffect, lazy, Suspense } from 'react';
+import React, { useState, useEffect, lazy, Suspense, useRef } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from './lib/supabase';
 import { Loader2 } from 'lucide-react';
@@ -39,6 +39,13 @@ function NavigationHandler({
 }) {
   const navigate = useNavigate();
   const location = useLocation();
+  const locationRef = useRef(location);
+
+  // Sync locationRef and log route changes
+  useEffect(() => {
+    locationRef.current = location;
+    console.log(`[DEBUG] ROUTE CHANGED: ${location.pathname}`);
+  }, [location]);
 
   useEffect(() => {
     if (!supabase) {
@@ -54,14 +61,17 @@ function NavigationHandler({
 
     supabase.auth.getSession().then((res) => {
       clearTimeout(sessionTimeout);
-      const session = res?.data?.session || null;
-      setSession(session);
+      const sessionVal = res?.data?.session || null;
+      setSession(sessionVal);
       setLoading(false);
+      if (sessionVal) {
+        console.log('[DEBUG] SESSION REFRESHED');
+      }
       
       // If we have a recovery token in the hash, ensure we are on the reset page
       const hash = window.location.hash;
       if (hash && (hash.includes('type=recovery') || hash.includes('access_token='))) {
-        if (location.pathname !== '/resetpassword') {
+        if (locationRef.current.pathname !== '/resetpassword') {
           navigate('/resetpassword' + hash, { replace: true });
         }
       }
@@ -72,15 +82,20 @@ function NavigationHandler({
     });
 
     // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      setSession(session);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, sessionVal) => {
+      console.log(`[DEBUG] AUTH STATE CHANGED: ${event}`);
+      setSession(sessionVal);
+      if (sessionVal) {
+        console.log('[DEBUG] SESSION REFRESHED');
+      }
       
+      const currentPath = locationRef.current.pathname;
       if (event === 'PASSWORD_RECOVERY') {
         console.log('Password recovery event detected');
-        if (location.pathname !== '/resetpassword') {
+        if (currentPath !== '/resetpassword') {
           navigate('/resetpassword', { replace: true });
         }
-      } else if (event === 'SIGNED_IN' && (location.pathname === '/login' || location.pathname === '/register' || location.pathname === '/signup')) {
+      } else if (event === 'SIGNED_IN' && (currentPath === '/login' || currentPath === '/register' || currentPath === '/signup')) {
         navigate('/', { replace: true });
       } else if (event === 'SIGNED_OUT') {
         navigate('/login', { replace: true });
@@ -88,12 +103,19 @@ function NavigationHandler({
     });
 
     return () => subscription.unsubscribe();
-  }, [navigate, location.pathname, setSession, setLoading]);
+  }, [navigate, setSession, setLoading]);
 
   return null;
 }
 
 export default function App() {
+  useEffect(() => {
+    console.log('[DEBUG] APP MOUNTED');
+    return () => {
+      console.log('[DEBUG] APP UNMOUNTED');
+    };
+  }, []);
+
   const [session, setSession] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {

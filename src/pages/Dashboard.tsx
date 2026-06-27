@@ -398,11 +398,22 @@ const OptimizedImage = React.memo(({
   onClick?: () => void;
   [key: string]: any;
 }) => {
-  const [isInView, setIsInView] = React.useState(false);
+  const isFullscreen = type === 'fullscreen';
+  const [isInView, setIsInView] = React.useState(isFullscreen);
   const [retryCount, setRetryCount] = React.useState(0);
   const [hasError, setHasError] = React.useState(false);
   const [localBase64, setLocalBase64] = React.useState<string>('');
+  const [isLoaded, setIsLoaded] = React.useState(false);
+  const [progress, setProgress] = React.useState(0);
   const imgRef = React.useRef<HTMLImageElement | null>(null);
+
+  React.useEffect(() => {
+    setIsLoaded(false);
+    setProgress(0);
+    if (isFullscreen) {
+      setIsInView(true);
+    }
+  }, [src, isFullscreen]);
 
   React.useEffect(() => {
     if (src && src.startsWith('local-img-')) {
@@ -422,6 +433,7 @@ const OptimizedImage = React.memo(({
 
   React.useEffect(() => {
     if (!src) return;
+    if (isFullscreen) return;
     
     // Fallback if IntersectionObserver is not supported
     if (!('IntersectionObserver' in window)) {
@@ -446,7 +458,24 @@ const OptimizedImage = React.memo(({
     return () => {
       observer.disconnect();
     };
-  }, [src]);
+  }, [src, isFullscreen]);
+
+  React.useEffect(() => {
+    if (!isFullscreen || isLoaded || !src) return;
+
+    let intervalId: any;
+    intervalId = setInterval(() => {
+      setProgress(prev => {
+        if (prev >= 95) {
+          return prev + 1 >= 99 ? 98 : prev + 1;
+        }
+        const inc = Math.floor(Math.random() * 8) + 4;
+        return Math.min(prev + inc, 95);
+      });
+    }, 45);
+
+    return () => clearInterval(intervalId);
+  }, [isFullscreen, isLoaded, src]);
 
   const optimizedUrl = React.useMemo(() => {
     if (!isInView || hasError) return ''; 
@@ -461,7 +490,7 @@ const OptimizedImage = React.memo(({
       return `${baseUrl}${sep}retry=${retryCount}`;
     }
     return baseUrl;
-  }, [src, type, isInView, retryCount, hasError]);
+  }, [src, type, isInView, retryCount, hasError, localBase64]);
 
   const handleError = () => {
     console.warn(`[ImageLoad] Failed to load ${src}. Attempt ${retryCount}/3`);
@@ -476,6 +505,17 @@ const OptimizedImage = React.memo(({
       }, (retryCount + 1) * 1500); // 1.5s, 3s, 4.5s backoff
     } else {
       setHasError(true);
+    }
+  };
+
+  const handleLoad = () => {
+    if (isFullscreen) {
+      setProgress(100);
+      setTimeout(() => {
+        setIsLoaded(true);
+      }, 100);
+    } else {
+      setIsLoaded(true);
     }
   };
 
@@ -501,19 +541,63 @@ const OptimizedImage = React.memo(({
     );
   }
 
-  return (
+  const showLoader = isFullscreen && !isLoaded && optimizedUrl;
+
+  const content = (
     <img
       ref={imgRef}
       src={optimizedUrl || 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>'}
       alt={alt}
-      className={className}
-      loading="lazy"
+      className={cn(className, isFullscreen && !isLoaded && "opacity-0 invisible")}
+      loading={isFullscreen ? "eager" : "lazy"}
       decoding="async"
       onError={handleError}
+      onLoad={handleLoad}
       onClick={onClick}
       {...props}
     />
   );
+
+  if (isFullscreen) {
+    return (
+      <div className="relative flex items-center justify-center max-w-full max-h-full">
+        {content}
+        {showLoader && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/40 backdrop-blur-sm rounded-lg min-w-[200px] min-h-[200px] z-50 animate-fade-in">
+            <div className="relative w-16 h-16 flex items-center justify-center">
+              <svg className="w-full h-full transform -rotate-90">
+                <circle
+                  cx="32"
+                  cy="32"
+                  r="24"
+                  className="text-white/10"
+                  strokeWidth="3.5"
+                  stroke="currentColor"
+                  fill="transparent"
+                />
+                <circle
+                  cx="32"
+                  cy="32"
+                  r="24"
+                  className="text-indigo-500 transition-all duration-100 ease-out"
+                  strokeWidth="3.5"
+                  strokeDasharray={2 * Math.PI * 24}
+                  strokeDashoffset={2 * Math.PI * 24 - (progress / 100) * (2 * Math.PI * 24)}
+                  strokeLinecap="round"
+                  stroke="currentColor"
+                  fill="transparent"
+                />
+              </svg>
+              <span className="absolute text-xs font-black text-white font-mono">{progress}%</span>
+            </div>
+            <span className="text-[10px] uppercase tracking-widest text-slate-300 font-bold mt-2 animate-pulse">Loading Attachment...</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return content;
 });
 OptimizedImage.displayName = 'OptimizedImage';
 
@@ -1518,6 +1602,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const navigate = useNavigate();
   const location = useLocation();
 
+  const bookSlugRef = React.useRef(bookSlug);
+  React.useEffect(() => {
+    bookSlugRef.current = bookSlug;
+  }, [bookSlug]);
+
+  React.useEffect(() => {
+    console.log('[DEBUG] DASHBOARD MOUNTED');
+    return () => {
+      console.log('[DEBUG] DASHBOARD UNMOUNTED');
+    };
+  }, []);
+
   const currentTabName = tabName || 'entries';
 
   // Global State
@@ -1579,7 +1675,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
   // Synchronize route with activeBookId & tabName
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading && books.length === 0) return;
 
     if (bookSlug && books.length > 0) {
       const foundBook = books.find(b => getBookSlug(b.name, b.id) === bookSlug);
@@ -2508,6 +2604,10 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       return;
     }
 
+    if (force) {
+      console.log('[DEBUG] QUERY INVALIDATED');
+    }
+
     setIsLoading(true);
     try {
       console.log('[fetchData] Loading cashbooks and entries directly from Supabase...');
@@ -2594,8 +2694,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         setBooks(mappedBooks);
 
         // Solve loading delay by resolving activeBookId immediately if not set
-        if (bookSlug) {
-          const foundBook = mappedBooks.find(b => getBookSlug(b.name, b.id) === bookSlug);
+        if (bookSlugRef.current) {
+          const foundBook = mappedBooks.find(b => getBookSlug(b.name, b.id) === bookSlugRef.current);
           if (foundBook) {
             setActiveBookIdState(foundBook.id);
           }
@@ -2609,7 +2709,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       setIsLoading(false);
       setIsEntriesLoading(false);
     }
-  }, [session, bookSlug]);
+  }, [session]);
 
   // Fetch data from Supabase init
   useEffect(() => {
@@ -4868,8 +4968,15 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     }
   };
 
-  if (isLoading) {
-    return null;
+  if (isLoading && books.length === 0) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-white dark:bg-black">
+        <div className="flex flex-col items-center gap-4 animate-fade-in">
+          <Loader2 className="animate-spin text-indigo-600 animate-duration-1000" size={40} />
+          <p className="text-sm font-medium text-slate-500 animate-pulse font-sans">Initializing dashboard...</p>
+        </div>
+      </div>
+    );
   }
 
   return (
