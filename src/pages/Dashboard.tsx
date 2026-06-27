@@ -8275,7 +8275,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                     </div>
 
                     {/* Floating Network Status Badge */}
-                    <div className="absolute bottom-16 right-4 md:right-6 z-50">
+                    <div className="absolute bottom-28 right-4 md:right-6 z-50">
                       <AnimatePresence>
                         {aiNetworkState === 'good' && (
                           <motion.div

@@ -216,25 +216,7 @@ export default function SaaSLandingPage({
             </button>
           </nav>
 
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => onActionClick('signin')}
-              className={cn(
-                "font-bold font-lora text-[11px] uppercase tracking-wider py-2 px-5 rounded-full transition-all duration-350 cursor-pointer border",
-                theme === 'dark' 
-                  ? "bg-zinc-900 text-zinc-100 border-zinc-800 hover:bg-zinc-800 hover:border-zinc-700" 
-                  : "bg-white text-[#374151] border-[#E5E7EB] hover:bg-zinc-50 hover:shadow-md"
-              )}
-            >
-              Sign In
-            </button>
-            <button
-              onClick={() => onActionClick('signup')}
-              className="font-bold font-lora text-[11px] uppercase tracking-wider py-2 px-5 rounded-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white cursor-pointer hover:from-blue-700 hover:to-indigo-700 transition-all shadow-md shadow-blue-500/10 outline-none"
-            >
-              Create Account
-            </button>
-          </div>
+
         </div>
       </header>
 
