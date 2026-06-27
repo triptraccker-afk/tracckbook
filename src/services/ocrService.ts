@@ -137,6 +137,28 @@ export async function processAndOcrImage(
 ): Promise<OcrResult> {
   const startTime = Date.now();
   const originalSizeKB = file.size / 1024;
+  const isImage = file.type && file.type.startsWith('image/');
+
+  if (!isImage) {
+    onProgress?.(35, 'Reading document...');
+    // Convert non-image file directly to base64
+    const base64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    
+    onProgress?.(50, 'Document loaded.');
+    return {
+      text: '',
+      confidence: 100,
+      base64: base64.split(',')[1],
+      ocr_duration_ms: 0,
+      compressedSizeKB: originalSizeKB,
+      originalSizeKB
+    };
+  }
   
   // 1. Optimize / Compress image before OCR
   onProgress?.(15, 'Optimizing image...');

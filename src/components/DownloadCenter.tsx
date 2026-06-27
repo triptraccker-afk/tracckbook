@@ -497,8 +497,18 @@ export default function DownloadCenter({ theme, isOpen, setIsOpen }: DownloadCen
                                 <TypeIcon size={12} className="shrink-0 text-slate-400" />
                                 <span className="truncate">{task.cashbookName}</span>
                               </h5>
-                              <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest leading-none mt-0.5 truncate font-mono">
-                                {taskType.toUpperCase()} • {taskType === 'ai' ? `${task.attachmentsCount} Receipts` : `${task.transactionsCount} Entries`}
+                              <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest leading-none mt-0.5 truncate font-mono flex items-center gap-1.5">
+                                <span>{taskType.toUpperCase()} • {taskType === 'ai' ? `${task.attachmentsCount} Receipts` : `${task.transactionsCount} Entries`}</span>
+                                {isProcessing && taskType === 'ai' && task.networkState && (
+                                  <span className={cn(
+                                    "text-[8px] font-extrabold tracking-widest rounded px-1.5 py-0.5 leading-none font-sans uppercase",
+                                    task.networkState === 'offline' && "bg-rose-500/10 text-rose-500 animate-pulse border border-rose-500/20",
+                                    task.networkState === 'slow' && "bg-amber-500/10 text-amber-500 animate-pulse border border-amber-500/20",
+                                    task.networkState === 'good' && "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20"
+                                  )}>
+                                    {task.networkState}
+                                  </span>
+                                )}
                               </p>
                             </div>
                           </div>
@@ -584,10 +594,15 @@ export default function DownloadCenter({ theme, isOpen, setIsOpen }: DownloadCen
                         <div className="space-y-1.5">
                           <div className="flex justify-between items-center text-[10px] font-black uppercase tracking-widest text-slate-400 gap-2">
                             <span className={cn(
-                              "font-semibold lowercase tracking-normal text-left leading-tight flex-1 min-w-0 truncate font-sans",
+                              "font-semibold lowercase tracking-normal text-left leading-tight flex-1 min-w-0 truncate font-sans flex items-center gap-1.5",
                               isFailed && "text-rose-500 uppercase tracking-widest font-black"
                             )}>
-                              {task.message}
+                              <span>{task.message}</span>
+                              {isProcessing && task.aiTimeRemaining && (
+                                <span className="font-mono text-[9px] text-indigo-500 dark:text-indigo-400 font-bold uppercase shrink-0 animate-pulse">
+                                  ({task.aiTimeRemaining} remaining)
+                                </span>
+                              )}
                             </span>
                             <span className="shrink-0 font-mono">{isCompleted ? '100' : task.progress}%</span>
                           </div>

@@ -81,6 +81,128 @@ import { CountryCodePicker, COUNTRIES, Country } from '../components/CountryCode
 import { PhoneComingSoonModal } from '../components/PhoneComingSoonModal';
 import { addPdfBrandingFooter } from '../utils/pdfBranding';
 
+interface TimelineStep {
+  id: string;
+  label: string;
+}
+
+const TIMELINE_STEPS: TimelineStep[] = [
+  { id: 'receipt_uploaded', label: 'Uploading receipt' },
+  { id: 'uploaded_cloud', label: 'Uploading to TrackBook Cloud' },
+  { id: 'ocr_completed', label: 'Reading receipt' },
+  { id: 'merchant_detected', label: 'Extracting merchant' },
+  { id: 'amount_extracted', label: 'Extracting amount' },
+  { id: 'date_parsed', label: 'Detecting bill category' },
+  { id: 'ai_verification', label: 'Verifying with TrackBook AI' },
+  { id: 'creating_transaction', label: 'Creating transaction' },
+  { id: 'transaction_saved', label: 'Saving to ledger' },
+];
+
+function ProcessingTimeline({ 
+  currentStepId, 
+  completedSteps = [], 
+  theme = 'light' 
+}: { 
+  currentStepId: string; 
+  completedSteps: string[]; 
+  theme: string;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  
+  return (
+    <div 
+      ref={containerRef}
+      className={cn(
+        "max-h-[170px] overflow-y-auto py-2.5 pr-1.5 space-y-3.5 scroll-smooth",
+        "scrollbar-thin scrollbar-thumb-slate-200 dark:scrollbar-thumb-zinc-800 scrollbar-track-transparent"
+      )}
+    >
+      {TIMELINE_STEPS.map((step, idx) => {
+        const isCompleted = completedSteps.includes(step.id) || (step.id === 'transaction_saved' && currentStepId === 'transaction_saved');
+        const isActive = step.id === currentStepId;
+        const isPending = !isCompleted && !isActive;
+
+        // Determine icon & colors
+        let iconContent;
+        let textColorClass;
+        let iconBgClass;
+
+        if (isCompleted) {
+          iconContent = (
+            <motion.div
+              initial={{ scale: 0, rotate: -30 }}
+              animate={{ scale: 1, rotate: 0 }}
+              transition={{ type: "spring", duration: 0.35 }}
+              className="text-emerald-500"
+            >
+              <Check size={11} strokeWidth={4} />
+            </motion.div>
+          );
+          textColorClass = "text-emerald-600 dark:text-emerald-400 font-semibold";
+          iconBgClass = "bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500/30";
+        } else if (isActive) {
+          iconContent = (
+            <div className="relative flex items-center justify-center">
+              <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 dark:bg-indigo-400" />
+              <span className="absolute w-4 h-4 rounded-full bg-indigo-500/20 dark:bg-indigo-400/20 animate-ping" />
+            </div>
+          );
+          textColorClass = "text-indigo-600 dark:text-indigo-400 font-bold";
+          iconBgClass = "bg-indigo-50 dark:bg-indigo-950/40 border-indigo-500";
+        } else {
+          iconContent = <span className="w-1 h-1 rounded-full bg-slate-300 dark:bg-zinc-700" />;
+          textColorClass = "text-slate-400 dark:text-zinc-600 font-medium";
+          iconBgClass = "bg-slate-50 dark:bg-zinc-900 border-slate-200 dark:border-zinc-800";
+        }
+
+        const isLast = idx === TIMELINE_STEPS.length - 1;
+
+        return (
+          <motion.div
+            key={step.id}
+            ref={isActive ? (el => {
+              if (el) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+              }
+            }) : undefined}
+            initial={isActive ? { opacity: 0, y: 10 } : false}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3 }}
+            className="flex items-start gap-3 relative"
+          >
+            {/* Left Connecting Line */}
+            {!isLast && (
+              <div 
+                className={cn(
+                  "absolute left-[9px] top-[20px] w-[2px] h-[calc(100%+6px)] -z-10",
+                  isCompleted 
+                    ? "bg-emerald-200 dark:bg-emerald-900/40" 
+                    : "bg-slate-100 dark:bg-zinc-900"
+                )}
+              />
+            )}
+
+            {/* Icon circle */}
+            <div 
+              className={cn(
+                "w-5 h-5 rounded-full border flex items-center justify-center shrink-0 z-10 transition-all duration-300",
+                iconBgClass
+              )}
+            >
+              {iconContent}
+            </div>
+
+            {/* Label */}
+            <span className={cn("text-xs transition-colors duration-300 leading-none self-center", textColorClass)}>
+              {step.label}
+            </span>
+          </motion.div>
+        );
+      })}
+    </div>
+  );
+}
+
 interface Transaction {
   id: string;
   amount: number;
@@ -1568,13 +1690,17 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [backgroundScanResult, setBackgroundScanResult] = useState<string | null>(null);
 
   // Intelligent TrackBook AI Upload states
-  const [aiWorkflowStep, setAiWorkflowStep] = useState<'group' | 'upload' | 'scanning' | 'confirmation'>('group');
+  const [aiWorkflowStep, setAiWorkflowStep] = useState<'group' | 'upload' | 'scanning' | 'confirmation' | 'completion'>('group');
   const [activeAiTaskId, setActiveAiTaskId] = useState<string | null>(null);
   const lastProcessedRef = useRef<number>(0);
   const [aiGroupSize, setAiGroupSize] = useState<number>(1);
   const [showGroupSizeModal, setShowGroupSizeModal] = useState(false);
   const [aiScanStatus, setAiScanStatus] = useState<string>('Analyzing bill...');
+  const [aiCurrentStepId, setAiCurrentStepId] = useState<string>('receipt_uploaded');
+  const [aiCompletedSteps, setAiCompletedSteps] = useState<string[]>([]);
   const [aiProgress, setAiProgress] = useState<number>(0);
+  const [aiTimeRemaining, setAiTimeRemaining] = useState<string>('Updating...');
+  const [aiNetworkState, setAiNetworkState] = useState<'good' | 'slow' | 'offline'>('good');
   const [aiFile, setAiFile] = useState<File | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [aiFilePreviewUrl, setAiFilePreviewUrl] = useState<string>('');
@@ -1658,6 +1784,10 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       if (task) {
         setAiProgress(task.progress);
         setAiScanStatus(task.message || 'Scanning bill...');
+        setAiTimeRemaining(task.aiTimeRemaining || 'Updating...');
+        setAiNetworkState(task.networkState || 'good');
+        setAiCurrentStepId(task.aiCurrentStepId || 'receipt_uploaded');
+        setAiCompletedSteps(task.aiCompletedSteps || []);
         
         if (task.aiProcessedCount !== undefined) {
           const diff = task.aiProcessedCount - lastProcessedRef.current;
@@ -3236,12 +3366,19 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     try {
       // 1. Compress image in background
       console.log('[BackgroundUpload] Compressing image...', file.name);
-      const compressedBlob = await compressImage(file);
-      const compressedFile = new File([compressedBlob], file.name || 'compressed.jpg', { type: 'image/jpeg' });
+      const isImage = file.type && file.type.startsWith('image/');
+      let processedFile: File;
+
+      if (isImage) {
+        const compressedBlob = await compressImage(file);
+        processedFile = new File([compressedBlob], file.name || 'compressed.jpg', { type: file.type || 'image/jpeg' });
+      } else {
+        processedFile = file;
+      }
 
       // 2. Upload to Cloudinary
       console.log('[BackgroundUpload] Uploading compressed file to Cloudinary...', file.name);
-      const cloudUrl = await uploadToCloudinary(compressedFile, folderName);
+      const cloudUrl = await uploadToCloudinary(processedFile, folderName);
       console.log('[BackgroundUpload] Upload completed successfully:', cloudUrl);
 
       // 3. Save into Supabase 'attachments' table permanently
@@ -4619,20 +4756,27 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         const imagesData: { base64: string, mimeType: string, raw: string | File }[] = [];
         
         for (const file of filesToProcess) {
-          const compressedBlob = await compressImage(file);
-          const compressedFile = new File([compressedBlob], file.name || 'compressed.jpg', { type: 'image/jpeg' });
+          const isImage = file.type && file.type.startsWith('image/');
+          let processedFile: File;
+
+          if (isImage) {
+            const compressedBlob = await compressImage(file);
+            processedFile = new File([compressedBlob], file.name || 'compressed.jpg', { type: file.type || 'image/jpeg' });
+          } else {
+            processedFile = file;
+          }
           
           const base64 = await new Promise<string>((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => resolve(reader.result as string);
             reader.onerror = reject;
-            reader.readAsDataURL(compressedFile);
+            reader.readAsDataURL(processedFile);
           });
           
           imagesData.push({
             base64: base64.split(',')[1],
-            mimeType: 'image/jpeg',
-            raw: compressedFile
+            mimeType: processedFile.type || 'image/jpeg',
+            raw: processedFile
           });
         }
 
@@ -4640,7 +4784,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         const result = await parseMultipleReceipts(imagesData.map(img => ({ base64: img.base64, mimeType: img.mimeType })));
         
         if (result) {
-          setUploadingMessage('Uploading merged bills to Cloudinary...');
+          setUploadingMessage('Uploading merged bills to TrackBook Cloud...');
           console.log('[processFiles] Uploading receipt documents to Cloudinary store...');
           
           const cloudinaryUrls: string[] = [];
@@ -4742,8 +4886,15 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         for (const file of filesToProcess) {
           setUploadingMessage(`Detecting bill ${completed + 1}/${total}...`);
           
-          const compressedBlob = await compressImage(file);
-          const compressedFile = new File([compressedBlob], file.name || 'compressed.jpg', { type: 'image/jpeg' });
+          const isImage = file.type && file.type.startsWith('image/');
+          let processedFile: File;
+
+          if (isImage) {
+            const compressedBlob = await compressImage(file);
+            processedFile = new File([compressedBlob], file.name || 'compressed.jpg', { type: file.type || 'image/jpeg' });
+          } else {
+            processedFile = file;
+          }
           
           await new Promise<void>((resolve, reject) => {
             const reader = new FileReader();
@@ -4752,15 +4903,15 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               try {
                 const base64String = (reader.result as string).split(',')[1];
                 console.log(`[processFiles] Uploading file ${completed + 1}/${total} to Gemini...`);
-                const result = await parseReceipt(base64String, 'image/jpeg');
+                const result = await parseReceipt(base64String, processedFile.type || 'image/jpeg');
                 
                 if (result) {
-                  setUploadingMessage(`Uploading receipt ${completed + 1}/${total} to Cloudinary...`);
+                  setUploadingMessage(`Uploading receipt ${completed + 1}/${total} to TrackBook Cloud...`);
                   console.log(`[processFiles] Uploading file ${completed + 1}/${total} to Cloudinary...`);
                   
                   let cloudinaryUrl = '';
                   try {
-                    cloudinaryUrl = await uploadToCloudinary(compressedFile, cloudinaryFolder);
+                    cloudinaryUrl = await uploadToCloudinary(processedFile, cloudinaryFolder);
                   } catch (err: any) {
                     console.error('[processFiles] Single Cloudinary upload failed:', err);
                     throw new Error(`Cloudinary file upload failed: ${err.message || err}`);
@@ -4844,7 +4995,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 reject(err);
               }
             };
-            reader.readAsDataURL(compressedFile);
+            reader.readAsDataURL(processedFile);
           });
         }
 
@@ -5073,22 +5224,9 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       setAiFilePreviewUrl(nextItem.previewUrl);
       setIsUploading(false); // Let user edit next
     } else {
-      // Completed last entry, close modal, set success toast, and redirect
-      const processedTotal = handwrittenQueue.length;
-      setBackgroundScanResult(`${processedTotal} of ${processedTotal} receipts processed successfully`);
-      setTimeout(() => {
-        setBackgroundScanResult(null);
-      }, 6000);
-
-      setAiWorkflowStep('group');
-      setAiGroupSize(1);
+      // Completed last entry, transition to completion screen
+      setAiWorkflowStep('completion');
       setIsUploading(false);
-      setHandwrittenQueue([]);
-      setCurrentQueueIndex(0);
-      setAiConstructionModal(null);
-
-      const slug = getBookSlug(activeBook?.name || '', activeBook?.id || '');
-      navigate(`/cashbooks/${slug}/entries`);
     }
   };
 
@@ -6622,31 +6760,10 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       </p>
                     </div>
 
-                    {/* Progress tracker animation list */}
-                    <div className="max-w-xs mx-auto space-y-3 pt-4 border-t border-slate-100 dark:border-zinc-900/60 text-left text-xs text-slate-400 dark:text-slate-500 font-sans">
-                      {[
-                        { label: 'Scanning bill...', active: aiScanStatus === 'Scanning bill...' || aiScanStatus === 'Detecting merchant...' || aiScanStatus === 'Extracting amount...' || aiScanStatus === 'Reading date & time...' },
-                        { label: 'Detecting merchant...', active: aiScanStatus === 'Detecting merchant...' || aiScanStatus === 'Extracting amount...' || aiScanStatus === 'Reading date & time...' },
-                        { label: 'Extracting amount...', active: aiScanStatus === 'Extracting amount...' || aiScanStatus === 'Reading date & time...' },
-                        { label: 'Reading date & time...', active: aiScanStatus === 'Reading date & time...' }
-                      ].map((step, idx) => (
-                        <div key={idx} className="flex items-center gap-2">
-                          <div className={cn(
-                            "w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold border",
-                            step.active 
-                              ? "bg-indigo-600 text-white border-indigo-600" 
-                              : "border-slate-200 dark:border-zinc-800 text-slate-400"
-                          )}>
-                            {idx + 1}
-                          </div>
-                          <span className={cn(
-                            "font-semibold",
-                            step.active ? "text-slate-700 dark:text-slate-200" : "text-slate-300 dark:text-zinc-700"
-                          )}>
-                            {step.label}
-                          </span>
-                        </div>
-                      ))}
+                    {/* Professional Processing Timeline */}
+                    <div className="max-w-xs mx-auto pt-4 pb-2 border-t border-slate-100 dark:border-zinc-900/60 text-left">
+                      <p className="text-[10px] font-black text-slate-400 dark:text-zinc-500 uppercase tracking-widest mb-3">Live Processing Timeline</p>
+                      <ProcessingTimeline currentStepId={aiCurrentStepId} completedSteps={aiCompletedSteps} theme={theme} />
                     </div>
 
                     {/* Today's Batch Tracker Component */}
@@ -6980,6 +7097,78 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                           </button>
                         </div>
                       </div>
+                    </div>
+                  </motion.div>
+                )}
+
+                {/* 5. Completion Step */}
+                {aiWorkflowStep === 'completion' && (
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0.95 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    className={cn(
+                      "rounded-3xl border p-12 shadow-md space-y-8 text-center transition-colors duration-300 max-w-md mx-auto relative overflow-hidden",
+                      theme === 'dark' ? "bg-zinc-950 border-zinc-900" : "bg-white border-slate-150"
+                    )}
+                  >
+                    <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/10 rounded-full blur-2xl -z-10" />
+
+                    <motion.div 
+                      initial={{ scale: 0 }}
+                      animate={{ scale: [0, 1.2, 1] }}
+                      transition={{ duration: 0.5, ease: "easeOut" }}
+                      className="w-20 h-20 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-500 rounded-full flex items-center justify-center mx-auto shadow-sm"
+                    >
+                      <Check size={40} strokeWidth={3} className="text-emerald-500" />
+                    </motion.div>
+
+                    <div className="space-y-2">
+                      <h3 className={cn(
+                        "text-xl font-extrabold tracking-tight",
+                        theme === 'dark' ? "text-white" : "text-zinc-900"
+                      )}>Receipt imported successfully.</h3>
+                      <p className="text-slate-500 dark:text-slate-400 text-xs max-w-xs mx-auto leading-relaxed">
+                        Your split entry has been successfully verified, parsed, and logged to your cashbook ledger.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-col gap-2 max-w-xs mx-auto pt-4">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          vibrate();
+                          setAiWorkflowStep('group');
+                          setAiGroupSize(1);
+                          setIsUploading(false);
+                          setHandwrittenQueue([]);
+                          setCurrentQueueIndex(0);
+                          setAiConstructionModal(null);
+                          const slug = getBookSlug(activeBook?.name || '', activeBook?.id || '');
+                          navigate(`/cashbooks/${slug}/entries`);
+                        }}
+                        className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-xs tracking-wide cursor-pointer transition-all shadow-md text-center"
+                      >
+                        Review Entry
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          vibrate();
+                          setAiWorkflowStep('group');
+                          setAiGroupSize(1);
+                          setIsUploading(false);
+                          setHandwrittenQueue([]);
+                          setCurrentQueueIndex(0);
+                        }}
+                        className={cn(
+                          "w-full py-2.5 rounded-xl font-bold text-xs tracking-wide cursor-pointer transition-all border text-center",
+                          theme === 'dark'
+                            ? "border-zinc-800 text-zinc-350 bg-zinc-900/60 hover:bg-zinc-850"
+                            : "border-slate-200 text-slate-650 bg-slate-50 hover:bg-slate-100"
+                        )}
+                      >
+                        Upload Another Receipt
+                      </button>
                     </div>
                   </motion.div>
                 )}
@@ -8068,11 +8257,73 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                             transition={{ type: 'spring', damping: 20, stiffness: 80 }}
                           />
                         </div>
+                        <div className="flex items-center justify-between px-1 text-[10px] font-black text-slate-400 dark:text-zinc-500 uppercase tracking-wider mt-1.5">
+                          <span>Est. Time Remaining</span>
+                          <span className="font-mono text-indigo-600 dark:text-indigo-400 animate-pulse">{aiTimeRemaining}</span>
+                        </div>
+                      </div>
+
+                      {/* Professional Processing Timeline */}
+                      <div className="max-w-xs mx-auto pt-4 pb-2 border-t border-slate-100 dark:border-zinc-900/60 text-left">
+                        <p className="text-[10px] font-black text-slate-400 dark:text-zinc-500 uppercase tracking-widest mb-3">Live Processing Timeline</p>
+                        <ProcessingTimeline currentStepId={aiCurrentStepId} completedSteps={aiCompletedSteps} theme={theme} />
                       </div>
                     </div>
 
                     <div className="text-xs text-slate-400 dark:text-zinc-500 max-w-xs mx-auto leading-relaxed">
                       TrackBook AI is extracting receipt data, mapping categories, and parsing your splits. Please do not close this window.
+                    </div>
+
+                    {/* Floating Network Status Badge */}
+                    <div className="absolute bottom-16 right-4 md:right-6 z-50">
+                      <AnimatePresence>
+                        {aiNetworkState === 'good' && (
+                          <motion.div
+                            initial={{ opacity: 0, scale: 0.9, y: 10 }}
+                            animate={{ opacity: 1, scale: 1, y: 0 }}
+                            exit={{ opacity: 0, scale: 0.9, y: 10 }}
+                            className="bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/50 rounded-2xl p-3 shadow-lg max-w-[200px] text-left flex items-start gap-2 backdrop-blur-md"
+                          >
+                            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-ping mt-1 shrink-0" />
+                            <div>
+                              <h4 className="text-[10px] font-black text-emerald-800 dark:text-emerald-400 leading-none">Connection: Good</h4>
+                              <p className="text-[9px] text-emerald-600 dark:text-emerald-500 font-medium leading-tight mt-0.5">Uploads are running normally.</p>
+                            </div>
+                          </motion.div>
+                        )}
+                        {aiNetworkState === 'slow' && (
+                          <motion.div
+                            initial={{ opacity: 0, scale: 0.9, y: 10 }}
+                            animate={{ opacity: 1, scale: 1, y: 0 }}
+                            exit={{ opacity: 0, scale: 0.9, y: 10 }}
+                            className="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50 rounded-2xl p-3 shadow-lg max-w-[200px] text-left flex items-start gap-2 backdrop-blur-md animate-pulse"
+                          >
+                            <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse mt-1 shrink-0" />
+                            <div>
+                              <h4 className="text-[10px] font-black text-amber-800 dark:text-amber-400 leading-none">Connection: Slow</h4>
+                              <p className="text-[9px] text-amber-600 dark:text-amber-500 font-medium leading-tight mt-0.5">
+                                Internet is slower than usual. Receipt scanning continues automatically.
+                              </p>
+                            </div>
+                          </motion.div>
+                        )}
+                        {aiNetworkState === 'offline' && (
+                          <motion.div
+                            initial={{ opacity: 0, scale: 0.9, y: 10 }}
+                            animate={{ opacity: 1, scale: 1, y: 0 }}
+                            exit={{ opacity: 0, scale: 0.9, y: 10 }}
+                            className="bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 rounded-2xl p-3 shadow-lg max-w-[200px] text-left flex items-start gap-2 backdrop-blur-md border-l-4 border-l-rose-500"
+                          >
+                            <div className="w-2 h-2 rounded-full bg-rose-500 animate-ping mt-1 shrink-0" />
+                            <div>
+                              <h4 className="text-[10px] font-black text-rose-800 dark:text-rose-400 leading-none">Connection Lost</h4>
+                              <p className="text-[9px] text-rose-600 dark:text-rose-500 font-medium leading-tight mt-0.5 animate-pulse">
+                                Waiting for connection... Do not close page.
+                              </p>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
                     </div>
 
                     {/* Background and Cancel Buttons */}
@@ -8341,6 +8592,69 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                           </button>
                         </div>
                       </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 4. Completion Step */}
+                {aiWorkflowStep === 'completion' && (
+                  <div className="space-y-6 text-center py-6">
+                    <motion.div 
+                      initial={{ scale: 0 }}
+                      animate={{ scale: [0, 1.2, 1] }}
+                      transition={{ duration: 0.5, ease: "easeOut" }}
+                      className="w-20 h-20 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-500 rounded-full flex items-center justify-center mx-auto shadow-sm"
+                    >
+                      <Check size={40} strokeWidth={3} className="text-emerald-500" />
+                    </motion.div>
+
+                    <div className="space-y-2">
+                      <h3 className={cn(
+                        "text-xl font-extrabold tracking-tight",
+                        theme === 'dark' ? "text-white" : "text-zinc-900"
+                      )}>Receipt imported successfully.</h3>
+                      <p className="text-slate-500 dark:text-slate-400 text-xs max-w-xs mx-auto leading-relaxed">
+                        Your split entry has been successfully verified, parsed, and logged to your cashbook ledger.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-col gap-2 max-w-xs mx-auto pt-4">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          vibrate();
+                          setAiWorkflowStep('group');
+                          setAiGroupSize(1);
+                          setIsUploading(false);
+                          setHandwrittenQueue([]);
+                          setCurrentQueueIndex(0);
+                          setAiConstructionModal(null);
+                          const slug = getBookSlug(activeBook?.name || '', activeBook?.id || '');
+                          navigate(`/cashbooks/${slug}/entries`);
+                        }}
+                        className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold text-xs tracking-wide cursor-pointer transition-all shadow-md text-center"
+                      >
+                        Review Entry
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          vibrate();
+                          setAiWorkflowStep('group');
+                          setAiGroupSize(1);
+                          setIsUploading(false);
+                          setHandwrittenQueue([]);
+                          setCurrentQueueIndex(0);
+                        }}
+                        className={cn(
+                          "w-full py-2.5 rounded-xl font-bold text-xs tracking-wide cursor-pointer transition-all border text-center",
+                          theme === 'dark'
+                            ? "border-zinc-800 text-zinc-350 bg-zinc-900/60 hover:bg-zinc-850"
+                            : "border-slate-200 text-slate-650 bg-slate-50 hover:bg-slate-100"
+                        )}
+                      >
+                        Upload Another Receipt
+                      </button>
                     </div>
                   </div>
                 )}

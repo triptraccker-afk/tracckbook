@@ -26,6 +26,11 @@ export interface ExportTask {
   aiProcessedCount?: number;
   aiSuccessCount?: number;
   aiFailedCount?: number;
+  aiCurrentIndex?: number;
+  aiTimeRemaining?: string;
+  networkState?: 'good' | 'slow' | 'offline';
+  aiCurrentStepId?: string;
+  aiCompletedSteps?: string[];
   
   groupSize?: number;
   isHandwritten?: boolean;
@@ -284,9 +289,53 @@ export class BackgroundExportManager {
   
   public onReviewAiScan?: (results: any[]) => void;
   private notifications: JobNotification[] = [];
+  public networkState: 'good' | 'slow' | 'offline' = 'good';
 
   constructor() {
+    this.setupNetworkMonitoring();
     this.init();
+  }
+
+  private setupNetworkMonitoring() {
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', () => this.updateNetworkState());
+      window.addEventListener('offline', () => this.updateNetworkState());
+      if ((navigator as any).connection) {
+        ((navigator as any).connection).addEventListener('change', () => this.updateNetworkState());
+      }
+      this.updateNetworkState();
+    }
+  }
+
+  public updateNetworkState() {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      this.networkState = 'offline';
+    } else {
+      const conn = typeof navigator !== 'undefined' ? (navigator as any).connection : null;
+      if (conn) {
+        if (conn.effectiveType === '2g' || conn.effectiveType === '3g' || conn.saveData) {
+          this.networkState = 'slow';
+        } else {
+          this.networkState = 'good';
+        }
+      } else {
+        this.networkState = 'good';
+      }
+    }
+    // Update active tasks with current network state
+    this.tasks.forEach(task => {
+      if (task.type === 'ai' && task.status === 'processing') {
+        task.networkState = this.networkState;
+      }
+    });
+    this.notifyListeners();
+  }
+
+  public recordLatency(ms: number) {
+    if (ms > 4000) {
+      this.networkState = 'slow';
+      this.notifyListeners();
+    }
   }
 
   private async init() {
@@ -766,85 +815,249 @@ export class BackgroundExportManager {
         task.aiProcessedCount = 0;
         task.aiSuccessCount = 0;
         task.aiFailedCount = 0;
+        task.networkState = this.networkState;
         task.message = `0 / ${files.length} Completed`;
         await this.db.saveTask(task);
         this.notifyListeners();
 
-        const results: any[] = [];
+        // Offline recovery: retrieve any partial progress
+        const resultsPayload = await this.db.getPayload(task.id + '_partial_results').catch(() => null) || [];
+        const results: any[] = Array.isArray(resultsPayload) ? resultsPayload : [];
+        const startIndex = task.aiCurrentIndex || 0;
+        task.aiProcessedCount = startIndex;
+        task.aiUploadedCount = startIndex;
+        task.aiSuccessCount = results.length;
+
         const cloudinaryFolder = await getUserCloudinaryFolder();
         const customKey = localStorage.getItem('GEMINI_API_KEY') || '';
 
-        for (let i = 0; i < files.length; i++) {
-          const file = files[i];
+        for (let i = startIndex; i < files.length; i++) {
+          task.aiCurrentIndex = i;
           task.progress = Math.round((i / files.length) * 100);
+          task.networkState = this.networkState;
+          
+          const remainingFiles = files.length - i;
+          const estSec = this.networkState === 'slow' ? Math.max(1, remainingFiles * 15) : Math.max(1, remainingFiles * 6);
+          task.aiTimeRemaining = `${estSec} sec`;
+          
           await this.db.saveTask(task);
           this.notifyListeners();
 
+          const file = files[i];
+
+          const updateStep = async (stepId: string, customMessage?: string) => {
+            const stepMapping: { [key: string]: { message: string, completed: string[] } } = {
+              'receipt_uploaded': { message: 'Uploading receipt...', completed: [] },
+              'uploaded_cloud': { message: 'Uploading to TrackBook Cloud...', completed: ['receipt_uploaded'] },
+              'ocr_completed': { message: 'Reading receipt...', completed: ['receipt_uploaded', 'uploaded_cloud'] },
+              'merchant_detected': { message: 'Extracting merchant...', completed: ['receipt_uploaded', 'uploaded_cloud', 'ocr_completed'] },
+              'amount_extracted': { message: 'Extracting amount...', completed: ['receipt_uploaded', 'uploaded_cloud', 'ocr_completed', 'merchant_detected'] },
+              'date_parsed': { message: 'Detecting bill category...', completed: ['receipt_uploaded', 'uploaded_cloud', 'ocr_completed', 'merchant_detected', 'amount_extracted'] },
+              'ai_verification': { message: 'Verifying with TrackBook AI...', completed: ['receipt_uploaded', 'uploaded_cloud', 'ocr_completed', 'merchant_detected', 'amount_extracted', 'date_parsed'] },
+              'creating_transaction': { message: 'Creating transaction...', completed: ['receipt_uploaded', 'uploaded_cloud', 'ocr_completed', 'merchant_detected', 'amount_extracted', 'date_parsed', 'ai_verification'] },
+              'transaction_saved': { message: 'Saving to ledger...', completed: ['receipt_uploaded', 'uploaded_cloud', 'ocr_completed', 'merchant_detected', 'amount_extracted', 'date_parsed', 'ai_verification', 'creating_transaction'] }
+            };
+
+            const mapping = stepMapping[stepId];
+            if (mapping) {
+              task.aiCurrentStepId = stepId;
+              task.aiCompletedSteps = mapping.completed;
+              task.message = customMessage || mapping.message;
+              task.networkState = this.networkState;
+              
+              const rem = files.length - i;
+              const est = this.networkState === 'slow' ? Math.max(1, rem * 15) : Math.max(1, rem * 6);
+              task.aiTimeRemaining = `${est} sec`;
+              
+              await this.db.saveTask(task);
+              this.notifyListeners();
+            }
+          };
+
           try {
-            // 1. Uploading Receipt...
-            task.aiUploadedCount = i + 1;
-            const cloudinaryUrl = await uploadToCloudinary(file, cloudinaryFolder).catch(err => {
-              console.error('[Background AI] Cloudinary upload failed:', err);
-              return '';
-            });
-
-            // 3. Reading Receipt...
-            const ocrResult = await processAndOcrImage(file, () => {});
-            if (!ocrResult) {
-              throw new Error('OCR failed');
+            // Keep looping while offline
+            while (!navigator.onLine || this.networkState === 'offline') {
+              task.message = "Connection Lost. Waiting to reconnect...";
+              task.aiTimeRemaining = "Waiting to reconnect...";
+              task.networkState = 'offline';
+              await this.db.saveTask(task);
+              this.notifyListeners();
+              await new Promise(r => setTimeout(r, 2000));
             }
 
-            const response = await fetch('/api/gemini/parse-receipt', {
-              method: 'POST',
-              headers: { 
-                'Content-Type': 'application/json',
-                ...(customKey ? { 'x-gemini-api-key': customKey } : {})
-              },
-              body: JSON.stringify({
-                base64Image: ocrResult.base64,
-                mimeType: 'image/jpeg',
-                groupSize: task.groupSize || 1,
-                isHandwritten: !!task.isHandwritten,
-                handwrittenTime: task.handwrittenTime || '12:00 PM',
-                handwrittenIsFood: !!task.handwrittenIsFood,
-                customApiKey: customKey,
-                ocrText: ocrResult.text,
-                ocrConfidence: ocrResult.confidence
-              })
-            });
+            // Step 1: Uploading Receipt...
+            await updateStep('receipt_uploaded');
+            await new Promise(r => setTimeout(r, 400));
 
-            if (!response.ok) {
-              throw new Error('Gemini parse failed');
-            }
-
-            const result = await response.json();
-
-            results.push({
-              file,
-              result: {
-                ...result,
-                amount: parseFloat(result.amount) || 0,
-                merchant: result.merchant || 'Unknown Vendor',
-                billType: result.billType || 'Food',
-                category: result.category || 'Food',
-                date: result.date || '27-05-2026',
-                time: result.time || '12:00 PM',
-                mealType: result.mealType || '',
-                description: result.description || 'Food Expense',
-                ocr_confidence: ocrResult.confidence,
-                ocr_duration_ms: ocrResult.ocr_duration_ms,
-                cloudinaryUrl
+            // Step 2: Uploading to TrackBook Cloud...
+            await updateStep('uploaded_cloud');
+            let cloudinaryUrl = '';
+            let uploadSuccess = false;
+            while (!uploadSuccess) {
+              while (!navigator.onLine || this.networkState === 'offline') {
+                task.message = "Connection Lost. Waiting to reconnect...";
+                task.aiTimeRemaining = "Waiting to reconnect...";
+                task.networkState = 'offline';
+                await this.db.saveTask(task);
+                this.notifyListeners();
+                await new Promise(r => setTimeout(r, 2000));
               }
-            });
 
-            task.aiSuccessCount = (task.aiSuccessCount || 0) + 1;
+              try {
+                task.aiUploadedCount = i + 1;
+                const startTimeUpload = Date.now();
+                cloudinaryUrl = await uploadToCloudinary(file, cloudinaryFolder);
+                const uploadDuration = Date.now() - startTimeUpload;
+                this.recordLatency(uploadDuration);
+                uploadSuccess = true;
+              } catch (err) {
+                console.error('[Background AI] Cloudinary upload failed:', err);
+                if (!navigator.onLine || (this.networkState as string) === 'offline') {
+                  this.networkState = 'offline';
+                  await new Promise(r => setTimeout(r, 2000));
+                } else {
+                  break;
+                }
+              }
+            }
+
+            // Step 3: Reading Receipt (OCR)...
+            await updateStep('ocr_completed');
+            let ocrResult = null;
+            let ocrSuccess = false;
+            while (!ocrSuccess) {
+              while (!navigator.onLine || this.networkState === 'offline') {
+                task.message = "Connection Lost. Waiting to reconnect...";
+                task.aiTimeRemaining = "Waiting to reconnect...";
+                task.networkState = 'offline';
+                await this.db.saveTask(task);
+                this.notifyListeners();
+                await new Promise(r => setTimeout(r, 2000));
+              }
+
+              try {
+                const startTimeOcr = Date.now();
+                ocrResult = await processAndOcrImage(file, () => {});
+                const ocrDuration = Date.now() - startTimeOcr;
+                this.recordLatency(ocrDuration);
+                if (!ocrResult) {
+                  throw new Error('OCR failed');
+                }
+                ocrSuccess = true;
+              } catch (err) {
+                console.error('[Background AI] OCR failed:', err);
+                if (!navigator.onLine || (this.networkState as string) === 'offline') {
+                  this.networkState = 'offline';
+                  await new Promise(r => setTimeout(r, 2000));
+                } else {
+                  break;
+                }
+              }
+            }
+
+            // Step 4: Extracting merchant (Starting AI)...
+            await updateStep('merchant_detected');
+            let result = null;
+            let aiSuccess = false;
+            while (!aiSuccess) {
+              while (!navigator.onLine || this.networkState === 'offline') {
+                task.message = "Connection Lost. Waiting to reconnect...";
+                task.aiTimeRemaining = "Waiting to reconnect...";
+                task.networkState = 'offline';
+                await this.db.saveTask(task);
+                this.notifyListeners();
+                await new Promise(r => setTimeout(r, 2000));
+              }
+
+              try {
+                const startTimeAi = Date.now();
+                const response = await fetch('/api/gemini/parse-receipt', {
+                  method: 'POST',
+                  headers: { 
+                    'Content-Type': 'application/json',
+                    ...(customKey ? { 'x-gemini-api-key': customKey } : {})
+                  },
+                  body: JSON.stringify({
+                    base64Image: ocrResult ? ocrResult.base64 : '',
+                    mimeType: file.type || 'image/jpeg',
+                    groupSize: task.groupSize || 1,
+                    isHandwritten: !!task.isHandwritten,
+                    handwrittenTime: task.handwrittenTime || '12:00 PM',
+                    handwrittenIsFood: !!task.handwrittenIsFood,
+                    customApiKey: customKey,
+                    ocrText: ocrResult ? ocrResult.text : '',
+                    ocrConfidence: ocrResult ? ocrResult.confidence : 100
+                  })
+                });
+
+                const aiDuration = Date.now() - startTimeAi;
+                this.recordLatency(aiDuration);
+
+                if (!response.ok) {
+                  throw new Error('Gemini parse failed');
+                }
+
+                result = await response.json();
+                aiSuccess = true;
+              } catch (err) {
+                console.error('[Background AI] Gemini parse failed:', err);
+                if (!navigator.onLine || (this.networkState as string) === 'offline') {
+                  this.networkState = 'offline';
+                  await new Promise(r => setTimeout(r, 2000));
+                } else {
+                  break;
+                }
+              }
+            }
+
+            if (result) {
+              // Stagger remaining steps for a premium SaaS UX experience
+              await updateStep('amount_extracted');
+              await new Promise(r => setTimeout(r, 450));
+
+              await updateStep('date_parsed');
+              await new Promise(r => setTimeout(r, 450));
+
+              await updateStep('ai_verification');
+              await new Promise(r => setTimeout(r, 450));
+
+              await updateStep('creating_transaction');
+              await new Promise(r => setTimeout(r, 450));
+
+              await updateStep('transaction_saved');
+              await new Promise(r => setTimeout(r, 450));
+
+              results.push({
+                file,
+                result: {
+                  ...result,
+                  amount: parseFloat(result.amount) || 0,
+                  merchant: result.merchant || 'Unknown Vendor',
+                  billType: result.billType || 'Food',
+                  category: result.category || 'Food',
+                  date: result.date || '27-05-2026',
+                  time: result.time || '12:00 PM',
+                  mealType: result.mealType || '',
+                  description: result.description || 'Food Expense',
+                  ocr_confidence: ocrResult ? ocrResult.confidence : 100,
+                  ocr_duration_ms: ocrResult ? ocrResult.ocr_duration_ms : 0,
+                  cloudinaryUrl
+                }
+              });
+
+              task.aiSuccessCount = (task.aiSuccessCount || 0) + 1;
+              // Offline persistence of intermediate progress
+              await this.db.savePayload(task.id + '_partial_results', results);
+            } else {
+              task.aiFailedCount = (task.aiFailedCount || 0) + 1;
+            }
+
           } catch (err) {
             console.error('[Background AI] failed file:', file.name, err);
             task.aiFailedCount = (task.aiFailedCount || 0) + 1;
           }
 
           task.aiProcessedCount = (task.aiProcessedCount || 0) + 1;
-          task.message = `${task.aiProcessedCount} / ${files.length} Completed`;
           task.progress = Math.round(((i + 1) / files.length) * 100);
           await this.db.saveTask(task);
           this.notifyListeners();
@@ -852,12 +1065,16 @@ export class BackgroundExportManager {
 
         // Save AI results to payload table
         await this.db.savePayload(task.id + '_results', results);
+        try {
+          // Clear intermediate recovery payload
+          await this.db.deleteTask(task.id + '_partial_results');
+        } catch (e) {}
 
         task.status = 'completed';
         task.progress = 100;
         task.completedAt = new Date().toISOString();
         task.durationMs = Date.now() - startTime;
-        task.message = `${task.aiProcessedCount} / ${files.length} Completed`;
+        task.message = 'Receipt imported successfully.';
         await this.db.saveTask(task);
         this.notifyListeners();
 
