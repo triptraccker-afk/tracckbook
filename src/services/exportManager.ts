@@ -1,7 +1,7 @@
 import { jsPDF } from 'jspdf';
 import { addPdfBrandingFooter } from '../utils/pdfBranding';
 import * as XLSX from 'xlsx';
-import { uploadToCloudinary, getUserCloudinaryFolder } from './cloudinary';
+import { uploadToCloudinary, getUserCloudinaryFolder, getExportOptimizedCloudinaryUrl } from './cloudinary';
 import { processAndOcrImage } from './ocrService';
 
 export interface ExportTask {
@@ -209,37 +209,7 @@ const workerBlobCode = `
         try {
           if (!url) return;
           
-          let targetUrl = url;
-          // Pre-generate lightweight Cloudinary delivery URLs for ultra-low bandwidth usage
-          if (url.includes('cloudinary.com')) {
-            const splitter = url.includes('/image/upload/') ? '/image/upload/' : '/upload/';
-            const parts = url.split(splitter);
-            if (parts[1]) {
-              const transform = isCompressed 
-                ? (isStrongCompression ? 'f_jpg,q_35,w_800' : 'f_jpg,q_40,w_900')
-                : 'f_jpg,q_82';
-                
-              const folderAndFile = parts[1].split('/');
-              const cleanSegments = folderAndFile.filter(s => {
-                return !(
-                  s.includes('w_') || 
-                  s.includes('q_') || 
-                  s.includes('f_') || 
-                  s.includes('c_') || 
-                  s.includes('h_') || 
-                  s.includes('dpr_') || 
-                  s.includes('auto')
-                );
-              });
-              targetUrl = parts[0] + splitter + transform + '/' + cleanSegments.join('/');
-            }
-          } else if (!url.startsWith('data:')) {
-            // Egress protection: proxy non-Cloudinary images through Cloudinary Fetch API
-            const transform = isCompressed 
-              ? (isStrongCompression ? 'f_jpg,q_35,w_800' : 'f_jpg,q_40,w_900')
-              : 'f_jpg,q_82';
-            targetUrl = 'https://res.cloudinary.com/' + cloudName + '/image/fetch/' + transform + '/' + encodeURIComponent(url);
-          }
+          let targetUrl = getExportOptimizedCloudinaryUrl(url, isCompressed, isStrongCompression);
 
           if (targetUrl.startsWith('data:')) {
             results[url] = targetUrl;

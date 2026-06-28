@@ -69,7 +69,7 @@ import { cn, formatCurrency, vibrate } from '../lib/utils';
 import { parseReceipt, parseMultipleReceipts } from '../services/gemini';
 import { processAndOcrImage } from '../services/ocrService';
 import { supabase } from '../lib/supabase';
-import { uploadToCloudinary, getOptimizedCloudinaryUrl, getExportOptimizedCloudinaryUrl, getUserCloudinaryFolder } from '../services/cloudinary';
+import { uploadToCloudinary, getOptimizedCloudinaryUrl, getExportOptimizedCloudinaryUrl, getUserCloudinaryFolder, resolveAttachmentUrl } from '../services/cloudinary';
 import imageCompression from 'browser-image-compression';
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
@@ -563,7 +563,7 @@ const OptimizedImage = React.memo(({
       <div className="relative flex items-center justify-center max-w-full max-h-full">
         {content}
         {showLoader && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/40 backdrop-blur-sm rounded-lg min-w-[200px] min-h-[200px] z-50 animate-fade-in">
+          <div className="fixed inset-0 flex flex-col items-center justify-center bg-slate-950/60 backdrop-blur-md z-50 animate-fade-in">
             <div className="relative w-16 h-16 flex items-center justify-center">
               <svg className="w-full h-full transform -rotate-90">
                 <circle
@@ -590,7 +590,7 @@ const OptimizedImage = React.memo(({
               </svg>
               <span className="absolute text-xs font-black text-white font-mono">{progress}%</span>
             </div>
-            <span className="text-[10px] uppercase tracking-widest text-slate-300 font-bold mt-2 animate-pulse">Loading Attachment...</span>
+            <span className="text-[10px] uppercase tracking-widest text-slate-300 font-bold mt-3 animate-pulse">Loading Attachment...</span>
           </div>
         )}
       </div>
@@ -1802,6 +1802,15 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [profileSandboxMode, setProfileSandboxMode] = useState(false);
   const [isEditingBook, setIsEditingBook] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [progressModal, setProgressModal] = useState<{
+    isOpen: boolean;
+    type: 'create' | 'edit';
+    progress: number;
+    steps: Array<{ label: string; status: 'pending' | 'loading' | 'success' | 'error' }>;
+    statusText: string;
+    errorMsg: string | null;
+    success: boolean;
+  } | null>(null);
   const [submittingMessage, setSubmittingMessage] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
@@ -2424,6 +2433,115 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [previewIndex, setPreviewIndex] = useState(0);
   const [previewRotation, setPreviewRotation] = useState(0);
   const [previewZoom, setPreviewZoom] = useState(1);
+  const [previewOriginalUrls, setPreviewOriginalUrls] = useState<string[]>([]);
+  const [previewValidationStatus, setPreviewValidationStatus] = useState<boolean[]>([]);
+  const [isPreviewValidating, setIsPreviewValidating] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
+  const handleOpenPreview = async (originalUrls: string[]) => {
+    if (!originalUrls || originalUrls.length === 0) return;
+    
+    setIsPreviewValidating(true);
+    setPreviewError(null);
+    setPreviewOriginalUrls(originalUrls);
+    
+    const resolvedUrls = originalUrls.map(url => resolveAttachmentUrl(url, 'fullscreen'));
+    setPreviewImages(resolvedUrls);
+    setPreviewIndex(0);
+    setPreviewRotation(0);
+    setPreviewZoom(1);
+
+    const statuses = await Promise.all(
+      resolvedUrls.map(async (url) => {
+        if (!url) return false;
+        if (url.startsWith('data:') || url.startsWith('blob:')) return true;
+        return new Promise<boolean>((resolve) => {
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          img.referrerPolicy = 'no-referrer';
+          const timeout = setTimeout(() => {
+            img.onload = null;
+            img.onerror = null;
+            resolve(false);
+          }, 8000);
+          img.onload = () => {
+            clearTimeout(timeout);
+            resolve(true);
+          };
+          img.onerror = () => {
+            clearTimeout(timeout);
+            resolve(false);
+          };
+          img.src = url;
+        });
+      })
+    );
+
+    setPreviewValidationStatus(statuses);
+    setIsPreviewValidating(false);
+
+    const someFailed = statuses.some(s => !s);
+    if (someFailed) {
+      setPreviewError("This receipt couldn't be previewed.");
+    }
+  };
+
+  const handleClosePreview = () => {
+    setPreviewImages(null);
+    setPreviewOriginalUrls([]);
+    setPreviewValidationStatus([]);
+    setIsPreviewValidating(false);
+    setPreviewError(null);
+  };
+
+  const handleRetryPreview = async (index: number) => {
+    setIsPreviewValidating(true);
+    const originalUrl = previewOriginalUrls[index];
+    const resolvedUrl = resolveAttachmentUrl(originalUrl, 'fullscreen');
+
+    const isValid = await new Promise<boolean>((resolve) => {
+      if (!resolvedUrl) return resolve(false);
+      if (resolvedUrl.startsWith('data:') || resolvedUrl.startsWith('blob:')) return resolve(true);
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.referrerPolicy = 'no-referrer';
+      const timeout = setTimeout(() => {
+        img.onload = null;
+        img.onerror = null;
+        resolve(false);
+      }, 8000);
+      img.onload = () => {
+        clearTimeout(timeout);
+        resolve(true);
+      };
+      img.onerror = () => {
+        clearTimeout(timeout);
+        resolve(false);
+      };
+      img.src = resolvedUrl;
+    });
+
+    setPreviewValidationStatus(prev => {
+      const copy = [...prev];
+      copy[index] = isValid;
+      return copy;
+    });
+    setIsPreviewValidating(false);
+
+    const anyFailed = previewValidationStatus.some((s, idx) => idx === index ? !isValid : !s);
+    if (!anyFailed) {
+      setPreviewError(null);
+    } else {
+      setPreviewError("This receipt couldn't be previewed.");
+    }
+  };
+
+  const handleOpenOriginal = (index: number) => {
+    const originalUrl = previewOriginalUrls[index];
+    if (originalUrl) {
+      window.open(originalUrl, '_blank');
+    }
+  };
   const [reportLoading, setReportLoading] = useState<{ type: 'excel' | 'pdf', progress: number, message?: string } | null>(null);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -3248,8 +3366,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     console.log('[handleRetryUpload] Image upload retry is now handled synchronously during save.');
   };
 
-  const handleAddTransaction = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const saveTransaction = async () => {
     if (!activeBookId || !showForm || !amount || !session || !supabase) return;
 
     const finalCategory = category === 'Custom' ? customCategory : category;
@@ -3257,36 +3374,125 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     const amountNum = parseFloat(amount);
     const dateObj = new Date(transactionDate);
 
-    setIsSubmitting(true);
-    setError(null);
+    const isEdit = !!editingTransaction;
+    const hasAttachments = selectedImages.some(img => img.startsWith('blob:'));
 
-    const cloudinaryFolder = await getUserCloudinaryFolder(session?.user);
+    // Initialize progress modal state with appropriate steps
+    let steps: Array<{ label: string; status: 'pending' | 'loading' | 'success' | 'error' }> = [];
+    if (isEdit) {
+      steps = [
+        { label: 'Validating changes', status: 'loading' as const },
+        { label: 'Updating attachment', status: 'pending' as const },
+        { label: 'Updating transaction', status: 'pending' as const },
+        { label: 'Refreshing dashboard', status: 'pending' as const },
+        { label: 'Completed', status: 'pending' as const }
+      ];
+    } else {
+      if (hasAttachments) {
+        steps = [
+          { label: 'Preparing entry', status: 'loading' as const },
+          { label: 'Compressing image', status: 'pending' as const },
+          { label: 'Uploading to TrackBook Cloud', status: 'pending' as const },
+          { label: 'Saving transaction', status: 'pending' as const },
+          { label: 'Completed', status: 'pending' as const }
+        ];
+      } else {
+        steps = [
+          { label: 'Preparing entry', status: 'loading' as const },
+          { label: 'Saving transaction', status: 'pending' as const },
+          { label: 'Completed', status: 'pending' as const }
+        ];
+      }
+    }
+
+    setProgressModal({
+      isOpen: true,
+      type: isEdit ? 'edit' : 'create',
+      progress: 5,
+      steps,
+      statusText: isEdit ? 'Validating changes...' : 'Preparing entry...',
+      errorMsg: null,
+      success: false
+    });
+
+    const updateStepStatus = (
+      stepLabel: string,
+      status: 'pending' | 'loading' | 'success' | 'error',
+      progress: number,
+      statusText: string
+    ) => {
+      setProgressModal(prev => {
+        if (!prev) return null;
+        const nextSteps = prev.steps.map(s => {
+          if (s.label === stepLabel) {
+            return { ...s, status };
+          }
+          return s;
+        });
+        return {
+          ...prev,
+          progress,
+          steps: nextSteps,
+          statusText
+        };
+      });
+    };
 
     try {
-      if (editingTransaction) {
-        console.log('[handleAddTransaction] Direct Edit Mode for existing ID:', editingTransaction.id);
+      const cloudinaryFolder = await getUserCloudinaryFolder(session?.user);
 
-        // Upload any new local blob images to Cloudinary first
+      if (isEdit && editingTransaction) {
+        console.log('[handleAddTransaction] Direct Edit Mode for existing ID:', editingTransaction.id);
+        
+        // 1. Validating changes completed
+        updateStepStatus('Validating changes', 'success', 20, 'Updating attachment...');
+        // Set updating attachment as loading
+        setProgressModal(prev => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            steps: prev.steps.map(s => s.label === 'Updating attachment' ? { ...s, status: 'loading' as const } : s)
+          };
+        });
+
         const finalImages: string[] = [];
+        let index = 0;
+        const totalBlobImages = selectedImages.filter(img => img.startsWith('blob:')).length;
+
         for (const img of selectedImages) {
           if (img.startsWith('blob:')) {
             const file = imageFilesRef.current[img];
             if (file) {
-              console.log('[handleAddTransaction] Compressing and uploading edited image...');
+              // Compressing step
+              updateStepStatus('Updating attachment', 'loading', 30 + Math.floor((index / totalBlobImages) * 15), `Compressing image ${index + 1}/${totalBlobImages}...`);
               const isImage = file.type && file.type.startsWith('image/');
               const processedFile = isImage ? await compressImage(file) : file;
               const fileToUpload = processedFile instanceof File 
                 ? processedFile 
                 : new File([processedFile], file.name || 'image.jpg', { type: file.type });
+              
+              // Uploading step
+              updateStepStatus('Updating attachment', 'loading', 45 + Math.floor((index / totalBlobImages) * 25), `Uploading attachment ${index + 1}/${totalBlobImages}...`);
               const cloudUrl = await uploadToCloudinary(fileToUpload, cloudinaryFolder);
               if (cloudUrl) {
                 finalImages.push(cloudUrl);
               }
+              index++;
             }
           } else {
             finalImages.push(img);
           }
         }
+
+        updateStepStatus('Updating attachment', 'success', 70, 'Updating transaction details...');
+        // Set updating transaction as loading
+        setProgressModal(prev => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            steps: prev.steps.map(s => s.label === 'Updating transaction' ? { ...s, status: 'loading' as const } : s)
+          };
+        });
 
         const payload: any = {
           amount: amountNum,
@@ -3328,18 +3534,47 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           await supabase.from('attachments').insert(attachmentInserts);
         }
 
-        // Close form and refresh dashboard immediately
+        updateStepStatus('Updating transaction', 'success', 85, 'Refreshing dashboard...');
+        // Set refreshing dashboard as loading
+        setProgressModal(prev => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            steps: prev.steps.map(s => s.label === 'Refreshing dashboard' ? { ...s, status: 'loading' as const } : s)
+          };
+        });
+
+        // Refreshing dashboard
+        await fetchData();
+
+        updateStepStatus('Refreshing dashboard', 'success', 100, 'Saving complete!');
+        // Set completed as success, and set success state
+        setProgressModal(prev => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            success: true,
+            steps: prev.steps.map(s => s.label === 'Completed' ? { ...s, status: 'success' as const } : s)
+          };
+        });
+
+        // Hold for 700ms and close
+        await new Promise(resolve => setTimeout(resolve, 700));
+
+        // Close form and finish
         setShowForm(null);
         setEditingTransaction(null);
         resetForm();
         setIsSubmitting(false);
-
-        await fetchData();
+        setProgressModal(null);
 
         const savedId = editingTransaction.id;
         setTimeout(() => {
           setJustEditedTransactionId(savedId);
-          document.getElementById(`entry-${savedId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          const element = document.getElementById(`entry-${savedId}`);
+          if (element) {
+            element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
           setTimeout(() => {
             setJustEditedTransactionId(null);
           }, 2000);
@@ -3349,27 +3584,66 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         console.log('[handleAddTransaction] Direct Creation Mode...');
         const tempId = safeUUID();
 
-        // Compress and upload all selected images to Cloudinary synchronously
+        // 1. Preparing entry step
+        updateStepStatus('Preparing entry', 'success', hasAttachments ? 20 : 40, hasAttachments ? 'Compressing image...' : 'Saving transaction...');
+        
         const finalImages: string[] = [];
-        for (const img of selectedImages) {
-          if (img.startsWith('blob:')) {
-            const file = imageFilesRef.current[img];
-            if (file) {
-              console.log('[handleAddTransaction] Compressing and uploading image...');
-              const isImage = file.type && file.type.startsWith('image/');
-              const processedFile = isImage ? await compressImage(file) : file;
-              const fileToUpload = processedFile instanceof File 
-                ? processedFile 
-                : new File([processedFile], file.name || 'image.jpg', { type: file.type });
-              const cloudUrl = await uploadToCloudinary(fileToUpload, cloudinaryFolder);
-              if (cloudUrl) {
-                finalImages.push(cloudUrl);
+        if (hasAttachments) {
+          // Set compressing image as loading
+          setProgressModal(prev => {
+            if (!prev) return null;
+            return {
+              ...prev,
+              steps: prev.steps.map(s => s.label === 'Compressing image' ? { ...s, status: 'loading' as const } : s)
+            };
+          });
+
+          const blobImages = selectedImages.filter(img => img.startsWith('blob:'));
+          let index = 0;
+          for (const img of selectedImages) {
+            if (img.startsWith('blob:')) {
+              const file = imageFilesRef.current[img];
+              if (file) {
+                updateStepStatus('Compressing image', 'loading', 20 + Math.floor((index / blobImages.length) * 15), `Compressing image ${index + 1}/${blobImages.length}...`);
+                const isImage = file.type && file.type.startsWith('image/');
+                const processedFile = isImage ? await compressImage(file) : file;
+                const fileToUpload = processedFile instanceof File 
+                  ? processedFile 
+                  : new File([processedFile], file.name || 'image.jpg', { type: file.type });
+                
+                if (index === blobImages.length - 1) {
+                  updateStepStatus('Compressing image', 'success', 35, 'Uploading to TrackBook Cloud...');
+                  setProgressModal(prev => {
+                    if (!prev) return null;
+                    return {
+                      ...prev,
+                      steps: prev.steps.map(s => s.label === 'Uploading to TrackBook Cloud' ? { ...s, status: 'loading' as const } : s)
+                    };
+                  });
+                }
+
+                updateStepStatus('Uploading to TrackBook Cloud', 'loading', 40 + Math.floor((index / blobImages.length) * 45), `Uploading attachment ${index + 1}/${blobImages.length}...`);
+                const cloudUrl = await uploadToCloudinary(fileToUpload, cloudinaryFolder);
+                if (cloudUrl) {
+                  finalImages.push(cloudUrl);
+                }
+                index++;
               }
+            } else {
+              finalImages.push(img);
             }
-          } else {
-            finalImages.push(img);
           }
+          updateStepStatus('Uploading to TrackBook Cloud', 'success', 85, 'Saving transaction...');
         }
+
+        // Set saving transaction as loading
+        setProgressModal(prev => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            steps: prev.steps.map(s => s.label === 'Saving transaction' ? { ...s, status: 'loading' as const } : s)
+          };
+        });
 
         const payload: any = {
           id: tempId,
@@ -3424,28 +3698,87 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           if (attachError) console.error('[handleAddTransaction] Error creating attachments:', attachError);
         }
 
+        updateStepStatus('Saving transaction', 'success', 95, 'Refreshing dashboard...');
+
         if (submitAndAddNew) {
           resetFormFields(true);
           setQuickAddSuccess(true);
           setTimeout(() => setQuickAddSuccess(false), 1500);
           setIsSubmitting(false);
+          setProgressModal(null);
           setTimeout(() => {
             descriptionInputRef.current?.focus();
           }, 80);
         } else {
+          updateStepStatus('Completed', 'success', 100, 'Saving complete!');
+          setProgressModal(prev => {
+            if (!prev) return null;
+            return {
+              ...prev,
+              success: true,
+              steps: prev.steps.map(s => s.label === 'Completed' ? { ...s, status: 'success' as const } : s)
+            };
+          });
+
+          // Hold for 700ms and close
+          await new Promise(resolve => setTimeout(resolve, 700));
+
           setShowForm(null);
           resetForm();
           setIsSubmitting(false);
+          setProgressModal(null);
         }
 
         // Reload data immediately so dashboard updates
         await fetchData();
+
+        // Scroll to the newly created transaction!
+        if (!submitAndAddNew) {
+          setTimeout(() => {
+            setJustEditedTransactionId(tempId);
+            const element = document.getElementById(`entry-${tempId}`);
+            if (element) {
+              element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+            setTimeout(() => {
+              setJustEditedTransactionId(null);
+            }, 2000);
+          }, 150);
+        }
       }
     } catch (error: any) {
       console.error('[handleAddTransaction] Error in transaction save flow:', error);
+      
+      // Update step status to error in modal
+      setProgressModal(prev => {
+        if (!prev) return null;
+        const nextSteps = prev.steps.map(s => {
+          if (s.status === 'loading') {
+            return { ...s, status: 'error' as const };
+          }
+          return s;
+        });
+        return {
+          ...prev,
+          isError: true,
+          errorMsg: error.message || 'Transaction save failed',
+          steps: nextSteps,
+          statusText: 'Couldn\'t save your entry.'
+        };
+      });
+
       setError(error.message || 'Transaction save failed');
       setIsSubmitting(false);
     }
+  };
+
+  const handleAddTransaction = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeBookId || !showForm || !amount || !session || !supabase) return;
+
+    setIsSubmitting(true);
+    setError(null);
+    await saveTransaction();
   };
 
   const handleDeleteTransaction = (id: string) => {
@@ -5991,7 +6324,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                                   handleDeleteTransaction={handleDeleteTransaction}
                                   handleRetryUpload={handleRetryUpload}
                                   uploadStatuses={uploadStatuses}
-                                  setPreviewImages={setPreviewImages}
+                                  setPreviewImages={handleOpenPreview}
                                   setPreviewIndex={setPreviewIndex}
                                   setPreviewRotation={setPreviewRotation}
                                   setPreviewZoom={setPreviewZoom}
@@ -6142,7 +6475,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                                   handleDeleteTransaction={handleDeleteTransaction}
                                   handleRetryUpload={handleRetryUpload}
                                   uploadStatuses={uploadStatuses}
-                                  setPreviewImages={setPreviewImages}
+                                  setPreviewImages={handleOpenPreview}
                                   setPreviewIndex={setPreviewIndex}
                                   setPreviewRotation={setPreviewRotation}
                                   setPreviewZoom={setPreviewZoom}
@@ -9362,7 +9695,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                                   type="preview"
                                   className="w-full h-full object-cover rounded-xl border border-slate-200 dark:border-slate-700 cursor-pointer" 
                                   onClick={() => {
-                                    setPreviewImages(selectedImages);
+                                    handleOpenPreview(selectedImages);
                                     setPreviewIndex(i);
                                     setPreviewRotation(0);
                                     setPreviewZoom(1);
@@ -9535,6 +9868,198 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
         )}
       </AnimatePresence>
 
+      {/* Premium Transaction Saving/Updating Modal */}
+      <AnimatePresence>
+        {progressModal && (
+          <div className="fixed inset-0 z-[250] flex items-center justify-center bg-slate-950/75 backdrop-blur-md p-4">
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0, y: 15 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 15 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 350 }}
+              className="relative w-full max-w-md bg-zinc-950/90 border border-slate-800/80 rounded-3xl p-6 sm:p-8 shadow-2xl flex flex-col items-center text-center overflow-hidden"
+            >
+              {/* Star-sparkle glow background effect */}
+              <div className="absolute top-0 left-1/2 -translate-x-1/2 w-48 h-48 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
+
+              {/* Success, Loading, or Error Circular Header */}
+              <div className="relative w-24 h-24 flex items-center justify-center mt-2">
+                {/* Outer Circular loader svg */}
+                <svg className="w-full h-full transform -rotate-90 absolute">
+                  <circle
+                    cx="48"
+                    cy="48"
+                    r="40"
+                    strokeWidth="4"
+                    stroke="currentColor"
+                    fill="transparent"
+                    className="text-slate-800/40"
+                  />
+                  <motion.circle
+                    cx="48"
+                    cy="48"
+                    r="40"
+                    strokeWidth="4"
+                    stroke="currentColor"
+                    fill="transparent"
+                    strokeDasharray={251.2}
+                    initial={{ strokeDashoffset: 251.2 }}
+                    animate={{ strokeDashoffset: 251.2 - (251.2 * progressModal.progress) / 100 }}
+                    transition={{ duration: 0.3, ease: "easeOut" }}
+                    className={cn(
+                      progressModal.errorMsg ? "text-rose-500" : progressModal.success ? "text-emerald-400" : "text-indigo-500"
+                    )}
+                  />
+                </svg>
+
+                {/* Inner Icon */}
+                <div className="relative z-10 flex items-center justify-center">
+                  {progressModal.success ? (
+                    <motion.div
+                      initial={{ scale: 0, rotate: -20 }}
+                      animate={{ scale: 1, rotate: 0 }}
+                      className="w-12 h-12 rounded-full bg-emerald-500/15 border border-emerald-400/30 flex items-center justify-center text-emerald-400"
+                    >
+                      <Check size={24} className="stroke-[3]" />
+                    </motion.div>
+                  ) : progressModal.errorMsg ? (
+                    <motion.div
+                      initial={{ scale: 0 }}
+                      animate={{ scale: 1 }}
+                      className="w-12 h-12 rounded-full bg-rose-500/15 border border-rose-400/30 flex items-center justify-center text-rose-400"
+                    >
+                      <AlertCircle size={24} />
+                    </motion.div>
+                  ) : (
+                    <div className="w-12 h-12 rounded-full bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 relative">
+                      <motion.div
+                        animate={{ rotate: 360 }}
+                        transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
+                        className="absolute inset-0 border-2 border-indigo-400/10 border-t-indigo-400/50 rounded-full"
+                      />
+                      <Sparkles size={20} className="animate-pulse" />
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Progress Percentage Text */}
+              <div className="mt-4 flex flex-col items-center">
+                <span className={cn(
+                  "text-3xl font-black font-mono tracking-tight",
+                  progressModal.errorMsg ? "text-rose-400" : progressModal.success ? "text-emerald-400" : "text-white"
+                )}>
+                  {progressModal.progress}%
+                </span>
+                
+                {/* Horizontal Progress bar */}
+                <div className="w-56 h-1.5 bg-slate-900 rounded-full overflow-hidden mt-3 border border-slate-800/40">
+                  <motion.div 
+                    className={cn(
+                      "h-full rounded-full",
+                      progressModal.errorMsg ? "bg-rose-500" : progressModal.success ? "bg-emerald-400" : "bg-gradient-to-r from-indigo-500 to-indigo-400"
+                    )}
+                    initial={{ width: 0 }}
+                    animate={{ width: `${progressModal.progress}%` }}
+                    transition={{ duration: 0.3, ease: "easeOut" }}
+                  />
+                </div>
+              </div>
+
+              {/* Titles and Subtitles */}
+              <div className="mt-6 space-y-2 px-2">
+                <h3 className="text-lg font-black tracking-tight text-white">
+                  {progressModal.success ? (
+                    progressModal.type === 'create' ? "✓ Entry saved successfully" : "✓ Entry updated successfully"
+                  ) : progressModal.errorMsg ? (
+                    "Couldn't save your entry"
+                  ) : (
+                    progressModal.type === 'create' ? "Saving your entry..." : "Updating your entry..."
+                  )}
+                </h3>
+                
+                <p className="text-xs text-slate-400 leading-relaxed font-medium">
+                  {progressModal.success ? (
+                    "Your secure ledger has been successfully updated."
+                  ) : progressModal.errorMsg ? (
+                    "Couldn't save your entry. Please check your connection and retry."
+                  ) : (
+                    progressModal.type === 'create' 
+                      ? (selectedImages.some(img => img.startsWith('blob:')) 
+                          ? "Your receipt is being securely uploaded to TrackBook Cloud." 
+                          : "Saving your transaction ledger entry securely.")
+                      : "Saving your latest changes securely."
+                  )}
+                </p>
+              </div>
+
+              {/* Steps Timeline checklist */}
+              <div className="mt-8 w-full max-w-[280px] bg-slate-900/40 border border-slate-800/40 rounded-2xl p-4 text-left space-y-3.5">
+                {progressModal.steps.map((step, idx) => (
+                  <div key={idx} className="flex items-center justify-between text-xs font-bold tracking-tight">
+                    <span className={cn(
+                      "transition-colors duration-200 font-sans",
+                      step.status === 'success' ? "text-emerald-400" :
+                      step.status === 'loading' ? "text-white" :
+                      step.status === 'error' ? "text-rose-400" : "text-slate-500"
+                    )}>
+                      {step.label}
+                    </span>
+                    
+                    <div className="flex items-center gap-1.5 font-mono text-[10px]">
+                      {step.status === 'success' && (
+                        <span className="text-emerald-400 flex items-center gap-1">
+                          <Check size={12} className="stroke-[3]" />
+                          <span>Done</span>
+                        </span>
+                      )}
+                      {step.status === 'loading' && (
+                        <span className="text-indigo-400 flex items-center gap-1.5 animate-pulse">
+                          <Loader2 size={11} className="animate-spin" />
+                          <span>Active</span>
+                        </span>
+                      )}
+                      {step.status === 'pending' && (
+                        <span className="text-slate-600">Waiting</span>
+                      )}
+                      {step.status === 'error' && (
+                        <span className="text-rose-500 font-black">Failed</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Error Actions */}
+              {progressModal.errorMsg && (
+                <div className="mt-8 flex gap-3 w-full">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      vibrate(30);
+                      saveTransaction();
+                    }}
+                    className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-black tracking-widest uppercase cursor-pointer transition-all active:scale-95 shadow-lg shadow-indigo-600/10"
+                  >
+                    Retry
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      vibrate(20);
+                      setProgressModal(null);
+                    }}
+                    className="flex-1 py-3 border border-slate-800 hover:bg-slate-900 text-slate-300 rounded-xl text-xs font-black tracking-widest uppercase cursor-pointer transition-all"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Image Gallery Preview Modal */}
       <AnimatePresence>
         {previewImages && (
@@ -9543,8 +10068,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
             <div className="flex items-center justify-between p-4 text-white">
               <div className="flex items-center gap-4">
                 <button 
-                  onClick={() => setPreviewImages(null)}
-                  className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                  onClick={handleClosePreview}
+                  className="p-2 hover:bg-white/10 rounded-full transition-colors cursor-pointer"
                 >
                   <X size={24} />
                 </button>
@@ -9557,30 +10082,35 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
               <div className="flex items-center gap-2">
                 <button 
                   onClick={() => setPreviewZoom(prev => Math.max(0.5, prev - 0.25))}
-                  className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                  className="p-2 hover:bg-white/10 rounded-full transition-colors cursor-pointer"
                   title="Zoom Out"
+                  disabled={previewValidationStatus[previewIndex] === false}
                 >
                   <ZoomOut size={20} />
                 </button>
                 <button 
                   onClick={() => setPreviewZoom(prev => Math.min(3, prev + 0.25))}
-                  className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                  className="p-2 hover:bg-white/10 rounded-full transition-colors cursor-pointer"
                   title="Zoom In"
+                  disabled={previewValidationStatus[previewIndex] === false}
                 >
                   <ZoomIn size={20} />
                 </button>
                 <button 
                   onClick={() => setPreviewRotation(prev => (prev + 90) % 360)}
-                  className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                  className="p-2 hover:bg-white/10 rounded-full transition-colors cursor-pointer"
                   title="Rotate"
+                  disabled={previewValidationStatus[previewIndex] === false}
                 >
                   <RotateCw size={20} />
                 </button>
                 <a 
-                  href={previewImages[previewIndex]} 
+                  href={previewOriginalUrls[previewIndex] || previewImages[previewIndex]} 
+                  target="_blank"
+                  rel="noreferrer"
                   download={`attachment-${previewIndex + 1}.png`}
-                  className="p-2 hover:bg-white/10 rounded-full transition-colors"
-                  title="Download"
+                  className="p-2 hover:bg-white/10 rounded-full transition-colors cursor-pointer"
+                  title="Download Original"
                 >
                   <Download size={20} />
                 </a>
@@ -9589,28 +10119,63 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
             {/* Main Preview Area */}
             <div className="flex-1 relative flex items-center justify-center overflow-hidden">
-              <AnimatePresence mode="wait">
-                <motion.div
-                  key={previewIndex}
-                  initial={{ opacity: 0, scale: 0.9 }}
-                  animate={{ 
-                    opacity: 1, 
-                    scale: previewZoom,
-                    rotate: previewRotation
-                  }}
-                  exit={{ opacity: 0, scale: 0.9 }}
-                  transition={{ type: "spring", damping: 25, stiffness: 200 }}
-                  className="relative max-w-full max-h-full p-4"
-                >
-                  <OptimizedImage 
-                    src={previewImages[previewIndex]} 
-                    alt="preview" 
-                    type="fullscreen"
-                    className="max-w-full max-h-[80vh] object-contain shadow-2xl rounded-lg"
-                    referrerPolicy="no-referrer"
-                  />
-                </motion.div>
-              </AnimatePresence>
+              {isPreviewValidating && (
+                <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-slate-950/60 backdrop-blur-sm text-white">
+                  <div className="w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4" />
+                  <p className="text-sm font-bold animate-pulse text-indigo-300">Validating Receipt Accessibility...</p>
+                </div>
+              )}
+
+              {!isPreviewValidating && previewValidationStatus[previewIndex] === false ? (
+                <div className="flex flex-col items-center justify-center p-8 max-w-md bg-zinc-900/90 border border-zinc-800 rounded-2xl text-center shadow-2xl mx-4 relative z-10">
+                  <div className="w-16 h-16 rounded-full bg-rose-500/10 flex items-center justify-center text-rose-500 mb-6 border border-rose-500/20">
+                    <CloudOff size={32} />
+                  </div>
+                  <h3 className="text-lg font-black text-slate-100 mb-2">This receipt couldn't be previewed.</h3>
+                  <p className="text-xs text-slate-400 leading-relaxed mb-6">
+                    The receipt attachment could not be accessed. This can happen if the image is private, storage is unavailable, or you are offline.
+                  </p>
+                  <div className="flex items-center gap-3 w-full">
+                    <button
+                      onClick={() => handleRetryPreview(previewIndex)}
+                      className="flex-1 py-3 px-4 rounded-xl bg-indigo-650 hover:bg-indigo-600 active:scale-95 text-xs font-bold text-white transition-all cursor-pointer flex items-center justify-center gap-2"
+                    >
+                      <RotateCw size={14} />
+                      <span>Retry</span>
+                    </button>
+                    <button
+                      onClick={() => handleOpenOriginal(previewIndex)}
+                      className="flex-1 py-3 px-4 rounded-xl bg-zinc-850 hover:bg-zinc-850 text-slate-200 border border-zinc-700 active:scale-95 text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-2"
+                    >
+                      <Download size={14} />
+                      <span>Open Original</span>
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <AnimatePresence mode="wait">
+                  <motion.div
+                    key={previewIndex}
+                    initial={{ opacity: 0, scale: 0.9 }}
+                    animate={{ 
+                      opacity: 1, 
+                      scale: previewZoom,
+                      rotate: previewRotation
+                    }}
+                    exit={{ opacity: 0, scale: 0.9 }}
+                    transition={{ type: "spring", damping: 25, stiffness: 200 }}
+                    className="relative max-w-full max-h-full p-4"
+                  >
+                    <OptimizedImage 
+                      src={previewImages[previewIndex]} 
+                      alt="preview" 
+                      type="fullscreen"
+                      className="max-w-full max-h-[80vh] object-contain shadow-2xl rounded-lg"
+                      referrerPolicy="no-referrer"
+                    />
+                  </motion.div>
+                </AnimatePresence>
+              )}
 
               {/* Navigation Arrows */}
               {previewImages.length > 1 && (
@@ -9621,7 +10186,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       setPreviewRotation(0);
                       setPreviewZoom(1);
                     }}
-                    className="absolute left-4 p-4 bg-white/5 hover:bg-white/10 rounded-full text-white backdrop-blur-md transition-all"
+                    className="absolute left-4 p-4 bg-white/5 hover:bg-white/10 rounded-full text-white backdrop-blur-md transition-all cursor-pointer"
                   >
                     <ChevronLeft size={32} />
                   </button>
@@ -9631,7 +10196,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       setPreviewRotation(0);
                       setPreviewZoom(1);
                     }}
-                    className="absolute right-4 p-4 bg-white/5 hover:bg-white/10 rounded-full text-white backdrop-blur-md transition-all"
+                    className="absolute right-4 p-4 bg-white/5 hover:bg-white/10 rounded-full text-white backdrop-blur-md transition-all cursor-pointer"
                   >
                     <ChevronRight size={32} />
                   </button>
@@ -9651,7 +10216,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                       setPreviewZoom(1);
                     }}
                     className={cn(
-                      "w-16 h-16 rounded-lg overflow-hidden border-2 transition-all shrink-0",
+                      "w-16 h-16 rounded-lg overflow-hidden border-2 transition-all shrink-0 cursor-pointer",
                       previewIndex === i 
                         ? (theme === 'dark' ? "border-indigo-500 scale-110 shadow-none" : "border-indigo-500 scale-110 shadow-lg shadow-indigo-500/20") 
                         : "border-transparent opacity-50 hover:opacity-100"
