@@ -61,7 +61,8 @@ import {
   Phone,
   CheckCircle2,
   Mail,
-  Lock
+  Lock,
+  Merge
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -706,7 +707,7 @@ const AttachmentCell = React.memo(({
   transactionId: string;
   uploadStatuses: any;
   handleRetryUpload: (blobUrl: string, transactionId: string) => void;
-  setPreviewImages: (imgs: string[]) => void;
+  setPreviewImages: (imgs: string[], transactionId?: string) => void;
   setPreviewIndex: (idx: number) => void;
   setPreviewRotation: (deg: number) => void;
   setPreviewZoom: (zoom: number) => void;
@@ -748,7 +749,7 @@ const AttachmentCell = React.memo(({
           onClick={(e) => {
             e.stopPropagation();
             if (!isUploading) {
-              setPreviewImages(images);
+              setPreviewImages(images, transactionId);
               setPreviewIndex(0);
               setPreviewRotation(0);
               setPreviewZoom(1);
@@ -816,7 +817,7 @@ const MobileTransactionRow = React.memo(({
   onClick: (id: string) => void;
   uploadStatuses: any;
   handleRetryUpload: (blobUrl: string, transactionId: string) => void;
-  setPreviewImages: (imgs: string[]) => void;
+  setPreviewImages: (imgs: string[], transactionId?: string) => void;
   setPreviewIndex: (idx: number) => void;
   setPreviewRotation: (deg: number) => void;
   setPreviewZoom: (zoom: number) => void;
@@ -969,7 +970,7 @@ const MobileTransactionRow = React.memo(({
                     onClick={(e) => {
                       e.stopPropagation();
                       if (!isUploading) {
-                        setPreviewImages(t.images!);
+                        setPreviewImages(t.images!, t.id);
                         setPreviewIndex(0);
                         setPreviewRotation(0);
                         setPreviewZoom(1);
@@ -1075,7 +1076,7 @@ const DesktopTransactionRow = React.memo(({
   handleDeleteTransaction: (id: string) => void;
   handleRetryUpload: (blobUrl: string, transactionId: string) => void;
   uploadStatuses: any;
-  setPreviewImages: (imgs: string[]) => void;
+  setPreviewImages: (imgs: string[], transactionId?: string) => void;
   setPreviewIndex: (idx: number) => void;
   setPreviewRotation: (deg: number) => void;
   setPreviewZoom: (zoom: number) => void;
@@ -1735,6 +1736,13 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   // Register backgroundExportManager onReviewAiScan handler
   useEffect(() => {
     backgroundExportManager.onReviewAiScan = (results: any[]) => {
+      // Commit any pending deletions immediately before review
+      if (pendingActionRef.current) {
+        commitPendingDeletion(pendingActionRef.current);
+        setUndoAction(null);
+        setShowUndoToast(false);
+      }
+
       if (results && results.length > 0) {
         // Map the results to handwrittenQueue structure
         const mappedQueue = results.map(item => ({
@@ -1816,6 +1824,11 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
   const [showBulkTransactionDeleteConfirm, setShowBulkTransactionDeleteConfirm] = useState(false);
   const [transactionToDelete, setTransactionToDelete] = useState<string | null>(null);
+  const [showMergeConfirmDialog, setShowMergeConfirmDialog] = useState(false);
+  const [mergeDescription, setMergeDescription] = useState('');
+  const [mergeCategory, setMergeCategory] = useState('General');
+  const [mergeType, setMergeType] = useState<'in' | 'out'>('out');
+  const [isMerging, setIsMerging] = useState(false);
   const [newBookName, setNewBookName] = useState('');
   const [editBookName, setEditBookName] = useState('');
   const [showForm, setShowForm] = useState<'in' | 'out' | null>(null);
@@ -2236,6 +2249,8 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [selectedBooks, setSelectedBooks] = useState<Set<string>>(new Set());
   const [showExitConfirm, setShowExitConfirm] = useState(false);
   const [deleteConfirmed, setDeleteConfirmed] = useState(false);
+  const [showDuplicateAiWarning, setShowDuplicateAiWarning] = useState<{ onConfirm: () => void; onCancel: () => void } | null>(null);
+  const [previewTransactionId, setPreviewTransactionId] = useState<string | null>(null);
   const [animatingDeleteId, setAnimatingDeleteId] = useState<string | null>(null);
   const [visibleCount, setVisibleCount] = useState(20);
   const [uploadStatuses, setUploadStatuses] = useState<Record<string, {
@@ -2438,12 +2453,82 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
   const [isPreviewValidating, setIsPreviewValidating] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
 
-  const handleOpenPreview = async (originalUrls: string[]) => {
+  const getTransactionSeqNumber = (txId: string) => {
+    if (!activeBook || !activeBook.transactions) return 1;
+    // Sort transactions chronologically (oldest to newest)
+    const sorted = [...activeBook.transactions].sort((a, b) => {
+      const timeA = new Date(a.date).getTime();
+      const timeB = new Date(b.date).getTime();
+      if (timeA !== timeB) return timeA - timeB;
+      return a.id.localeCompare(b.id);
+    });
+    const index = sorted.findIndex(t => t.id === txId);
+    return index !== -1 ? index + 1 : 1;
+  };
+
+  const getExtensionFromUrl = (url: string) => {
+    if (!url) return 'png';
+    const cleanUrl = url.split('?')[0].split('#')[0];
+    const parts = cleanUrl.split('.');
+    if (parts.length > 1) {
+      const ext = parts[parts.length - 1].toLowerCase();
+      if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'pdf'].includes(ext)) {
+        return ext;
+      }
+    }
+    return 'png';
+  };
+
+  const getDownloadFileName = () => {
+    const url = previewOriginalUrls[previewIndex] || previewImages?.[previewIndex] || '';
+    const ext = getExtensionFromUrl(url);
+    if (previewTransactionId) {
+      const seqNum = getTransactionSeqNumber(previewTransactionId);
+      return `attachment_${seqNum}.${ext}`;
+    }
+    return `attachment_${previewIndex + 1}.${ext}`;
+  };
+
+  const handleDownloadAttachment = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const url = previewOriginalUrls[previewIndex] || previewImages?.[previewIndex];
+    if (!url) return;
+    
+    const filename = getDownloadFileName();
+    
+    try {
+      const response = await fetch(url);
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(blobUrl);
+    } catch (err) {
+      console.error("Fetch download failed, falling back to direct link download attribute", err);
+      const link = document.createElement('a');
+      link.href = url;
+      link.target = "_blank";
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+  };
+
+  const handleOpenPreview = async (originalUrls: string[], transactionId?: string) => {
     if (!originalUrls || originalUrls.length === 0) return;
     
     setIsPreviewValidating(true);
     setPreviewError(null);
     setPreviewOriginalUrls(originalUrls);
+    setPreviewTransactionId(transactionId || null);
     
     const resolvedUrls = originalUrls.map(url => resolveAttachmentUrl(url, 'fullscreen'));
     setPreviewImages(resolvedUrls);
@@ -2492,6 +2577,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     setPreviewValidationStatus([]);
     setIsPreviewValidating(false);
     setPreviewError(null);
+    setPreviewTransactionId(null);
   };
 
   const handleRetryPreview = async (index: number) => {
@@ -2762,6 +2848,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
         // Fetch attachments for all entries in a single step
         let attachmentsMap = new Map<string, string[]>();
+        let aiEntryIds = new Set<string>();
         if (allEntryIds.length > 0) {
           const { attachments, aiAttachments } = await fetchAttachmentsDeduplicated(allEntryIds);
           if (attachments) {
@@ -2777,6 +2864,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           if (aiAttachments) {
             for (const att of aiAttachments) {
               if (att && att.entry_id && att.file_url) {
+                aiEntryIds.add(att.entry_id);
                 if (!attachmentsMap.has(att.entry_id)) {
                   attachmentsMap.set(att.entry_id, []);
                 }
@@ -2790,11 +2878,15 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
           const rawEntries = entriesMapByCashbook.get(cb.id) || [];
           const entryList = rawEntries.map(t => {
             const images = attachmentsMap.get(t.id) || [];
+            const isMerged = t.image_layout === 'merge' || t.bill_type === 'MERGE' || t.billType === 'MERGE';
+            const isAi = aiEntryIds.has(t.id) || !!t.isAi || t.source === 'AI';
             return {
               ...t,
+              imageLayout: isMerged ? 'merge' : (t.image_layout || 'split'),
               date: t.date ? new Date(t.date) : new Date(),
               images,
-              source: t.source || (t.isAi ? 'AI' : ((t.is_imported || t.imported_from_share_code) ? 'Imported' : 'Manual'))
+              isAi,
+              source: t.source || (isAi ? 'AI' : ((t.is_imported || t.imported_from_share_code) ? 'Imported' : 'Manual'))
             };
           });
 
@@ -3377,6 +3469,41 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     const isEdit = !!editingTransaction;
     const hasAttachments = selectedImages.some(img => img.startsWith('blob:'));
 
+    // Check if there are any changes for an edit transaction
+    let hasChanges = true;
+    if (isEdit && editingTransaction) {
+      const amountUnchanged = amountNum === editingTransaction.amount;
+      const descUnchanged = description === editingTransaction.description;
+      const catUnchanged = finalCategory === editingTransaction.category;
+      const modeUnchanged = finalMode === editingTransaction.mode;
+      
+      const originalDateFormatted = safeToDateTimeLocal(editingTransaction.date);
+      const newDateFormatted = safeToDateTimeLocal(dateObj);
+      const dateUnchanged = originalDateFormatted === newDateFormatted;
+
+      const originalImages = editingTransaction.images || [];
+      const imagesUnchanged = selectedImages.length === originalImages.length &&
+        selectedImages.every((img, i) => img === originalImages[i]);
+
+      const layoutUnchanged = imageLayout === (editingTransaction.imageLayout || 'split');
+
+      if (amountUnchanged && descUnchanged && catUnchanged && modeUnchanged && dateUnchanged && imagesUnchanged && layoutUnchanged) {
+        hasChanges = false;
+      }
+    }
+
+    if (isEdit && !hasChanges) {
+      // No changes made, just close without any animation or DB queries!
+      setShowForm(null);
+      setEditingTransaction(null);
+      resetForm();
+      setIsSubmitting(false);
+      return;
+    }
+
+    // Only show loading animation if we are editing (and there are actual changes) or if we are creating and NOT choosing "Save & Add New".
+    const showLoadingAnimation = isEdit || !submitAndAddNew;
+
     // Initialize progress modal state with appropriate steps
     let steps: Array<{ label: string; status: 'pending' | 'loading' | 'success' | 'error' }> = [];
     if (isEdit) {
@@ -3405,15 +3532,17 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       }
     }
 
-    setProgressModal({
-      isOpen: true,
-      type: isEdit ? 'edit' : 'create',
-      progress: 5,
-      steps,
-      statusText: isEdit ? 'Validating changes...' : 'Preparing entry...',
-      errorMsg: null,
-      success: false
-    });
+    if (showLoadingAnimation) {
+      setProgressModal({
+        isOpen: true,
+        type: isEdit ? 'edit' : 'create',
+        progress: 5,
+        steps,
+        statusText: isEdit ? 'Validating changes...' : 'Preparing entry...',
+        errorMsg: null,
+        success: false
+      });
+    }
 
     const updateStepStatus = (
       stepLabel: string,
@@ -3421,6 +3550,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       progress: number,
       statusText: string
     ) => {
+      if (!showLoadingAnimation) return;
       setProgressModal(prev => {
         if (!prev) return null;
         const nextSteps = prev.steps.map(s => {
@@ -3871,6 +4001,104 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
 
     setSelectedTransactions(new Set());
     setShowBulkTransactionDeleteConfirm(false);
+  };
+
+  const openMergeDialog = () => {
+    if (!activeBookId) return;
+    const activeBook = books.find(b => b.id === activeBookId);
+    if (!activeBook) return;
+
+    const selectedTxs = activeBook.transactions.filter(t => selectedTransactions.has(t.id));
+    if (selectedTxs.length < 2) return;
+
+    const totalAmt = selectedTxs.reduce((sum, t) => sum + t.amount, 0);
+    const desc = `Merged: ${selectedTxs.map(t => t.description).join(', ')}`;
+    const truncatedDesc = desc.length > 85 ? desc.substring(0, 82) + '...' : desc;
+
+    setMergeDescription(truncatedDesc);
+    setMergeCategory(selectedTxs[0]?.category || 'General');
+    setMergeType(selectedTxs[0]?.type || 'out');
+    setShowMergeConfirmDialog(true);
+  };
+
+  const handleMergeTransactions = async () => {
+    if (!activeBookId || selectedTransactions.size < 2 || !session) return;
+    setIsMerging(true);
+    setError(null);
+
+    try {
+      const activeBook = books.find(b => b.id === activeBookId);
+      if (!activeBook) throw new Error('Cashbook not found');
+
+      const selectedTxs = activeBook.transactions.filter(t => selectedTransactions.has(t.id));
+      const totalAmount = selectedTxs.reduce((sum, t) => sum + t.amount, 0);
+      const newId = safeUUID();
+
+      const payload: any = {
+        id: newId,
+        cashbook_id: activeBookId,
+        user_id: session.user.id,
+        amount: totalAmount,
+        type: mergeType,
+        description: mergeDescription || 'Merged Transactions',
+        category: mergeCategory,
+        mode: 'Online',
+        date: safeToISOString(new Date()),
+        image_layout: 'merge',
+        bill_type: 'MERGE'
+      };
+
+      const { error: insertError } = await supabase.from('entries').insert([payload]);
+      if (insertError) {
+        if (insertError.code === '42703' || insertError.message?.includes('column "image_layout" does not exist') || insertError.message?.includes('column "bill_type" does not exist')) {
+          const fallbackPayload = { ...payload };
+          delete fallbackPayload.image_layout;
+          delete fallbackPayload.bill_type;
+          const { error: retryError } = await supabase.from('entries').insert([fallbackPayload]);
+          if (retryError) throw retryError;
+        } else {
+          throw insertError;
+        }
+      }
+
+      const selectedIds = Array.from(selectedTransactions);
+      const { data: oldAtts } = await supabase.from('attachments').select('*').in('entry_id', selectedIds);
+      const { data: oldAiAtts } = await supabase.from('ai_attachments').select('*').in('entry_id', selectedIds);
+
+      if (oldAtts && oldAtts.length > 0) {
+        const newAtts = oldAtts.map(att => ({
+          entry_id: newId,
+          user_id: session.user.id,
+          file_url: att.file_url,
+          file_name: att.file_name || 'merged_attachment',
+          file_type: att.file_type || 'image'
+        }));
+        await supabase.from('attachments').insert(newAtts);
+      }
+
+      if (oldAiAtts && oldAiAtts.length > 0) {
+        const newAiAtts = oldAiAtts.map(att => ({
+          entry_id: newId,
+          user_id: session.user.id,
+          file_url: att.file_url,
+          file_name: att.file_name || 'merged_ai_attachment',
+          file_type: att.file_type || 'image'
+        }));
+        await supabase.from('ai_attachments').insert(newAiAtts);
+      }
+
+      const { error: deleteError } = await supabase.from('entries').delete().in('id', selectedIds);
+      if (deleteError) throw deleteError;
+
+      setSelectedTransactions(new Set());
+      setShowMergeConfirmDialog(false);
+      await fetchData();
+    } catch (err: any) {
+      console.error('[Merge Transactions Error]:', err);
+      setError(err.message || 'Failed to merge transactions');
+    } finally {
+      setIsMerging(false);
+    }
   };
 
   const handleEditTransaction = (t: Transaction) => {
@@ -5129,10 +5357,15 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     setActiveAiTaskId(taskId);
   };
 
-  const handleSaveAiEntry = async () => {
+  const handleSaveAiEntry = async (forceSave = false) => {
     if (!activeBookId) return;
-    setIsUploading(true);
-    setError(null);
+
+    // Commit any pending deletions immediately to Supabase
+    if (pendingActionRef.current) {
+      await commitPendingDeletion(pendingActionRef.current);
+      setUndoAction(null);
+      setShowUndoToast(false);
+    }
 
     const amountNum = parseFloat(aiAmount) || 0;
     
@@ -5142,6 +5375,54 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
     if (parts.length === 3) {
       dateObj = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
     }
+
+    if (!forceSave && activeBook) {
+      // Exclude any transactions that are currently in the pending delete queue
+      let activeTransactions = activeBook.transactions || [];
+      if (pendingActionRef.current) {
+        const action = pendingActionRef.current;
+        if (action.type === 'transaction' && action.data?.id) {
+          activeTransactions = activeTransactions.filter(tx => tx.id !== action.data.id);
+        } else if (action.type === 'bulk_transactions' && Array.isArray(action.data)) {
+          const deletedIds = new Set(action.data.map((d: any) => d.id));
+          activeTransactions = activeTransactions.filter(tx => !deletedIds.has(tx.id));
+        }
+      }
+
+      const isDuplicate = activeTransactions.some(tx => {
+        const amountMatches = Math.abs(tx.amount - amountNum) < 0.01;
+        
+        const txDateStr = new Date(tx.date).toDateString();
+        const newDateStr = dateObj.toDateString();
+        const dateMatches = txDateStr === newDateStr;
+        
+        const txDescLower = (tx.description || '').toLowerCase();
+        const newDescLower = aiDescription.toLowerCase();
+        const newMerchantLower = aiMerchant.toLowerCase();
+        
+        const descMatches = txDescLower.includes(newMerchantLower) || 
+                            newDescLower.includes(txDescLower) || 
+                            txDescLower.includes(newDescLower);
+                            
+        return amountMatches && dateMatches && descMatches;
+      });
+
+      if (isDuplicate) {
+        setShowDuplicateAiWarning({
+          onConfirm: () => {
+            setShowDuplicateAiWarning(null);
+            handleSaveAiEntry(true);
+          },
+          onCancel: () => {
+            setShowDuplicateAiWarning(null);
+          }
+        });
+        return;
+      }
+    }
+
+    setIsUploading(true);
+    setError(null);
 
     const tempId = safeUUID();
     const cloudinaryFolder = await getUserCloudinaryFolder(session?.user);
@@ -6057,6 +6338,18 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                         <Share size={16} />
                         Share Entries
                       </button>
+                      {selectedTransactions.size >= 2 && (
+                        <button
+                          onClick={openMergeDialog}
+                          className={cn(
+                            "flex items-center gap-2 px-4 h-11 bg-indigo-650 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all hover:scale-[1.02] active:scale-[0.98] whitespace-nowrap text-sm cursor-pointer duration-200",
+                            theme === 'dark' ? "shadow-none" : "shadow-lg shadow-indigo-100"
+                          )}
+                        >
+                          <Merge size={16} />
+                          Merge ({selectedTransactions.size})
+                        </button>
+                      )}
                       <button
                         onClick={() => { setShowBulkTransactionDeleteConfirm(true); setDeleteConfirmed(false); }}
                         className={cn(
@@ -10104,16 +10397,13 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                 >
                   <RotateCw size={20} />
                 </button>
-                <a 
-                  href={previewOriginalUrls[previewIndex] || previewImages[previewIndex]} 
-                  target="_blank"
-                  rel="noreferrer"
-                  download={`attachment-${previewIndex + 1}.png`}
-                  className="p-2 hover:bg-white/10 rounded-full transition-colors cursor-pointer"
+                <button 
+                  onClick={handleDownloadAttachment}
+                  className="p-2 hover:bg-white/10 rounded-full transition-colors cursor-pointer text-white"
                   title="Download Original"
                 >
                   <Download size={20} />
-                </a>
+                </button>
               </div>
             </div>
 
@@ -10576,7 +10866,7 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
       </AnimatePresence>
 
       <AnimatePresence>
-        {isSubmitting && (
+        {isSubmitting && !submitAndAddNew && (
           <div className={cn(
             "fixed inset-0 z-[200] flex items-center justify-center p-4 backdrop-blur-md transition-colors duration-300",
             theme === 'dark' ? "bg-black/80" : "bg-slate-900/40"
@@ -10681,6 +10971,140 @@ export default function Dashboard({ session, theme, setTheme }: { session: any, 
                   )}
                 >
                   Delete
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Merge Transactions Confirmation Modal */}
+      <AnimatePresence>
+        {showMergeConfirmDialog && (
+          <div className={cn(
+            "fixed inset-0 z-[150] flex items-center justify-center p-4 backdrop-blur-sm transition-colors duration-300 overflow-y-auto",
+            theme === 'dark' ? "bg-black/60" : "bg-slate-900/40"
+          )}>
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              className={cn(
+                "w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4 transition-colors duration-300",
+                theme === 'dark' ? "bg-zinc-950 text-white" : "bg-white text-black"
+              )}
+            >
+              <div className="w-12 h-12 bg-indigo-50 dark:bg-indigo-950/20 text-indigo-600 dark:text-indigo-400 rounded-full flex items-center justify-center">
+                <Merge size={24} />
+              </div>
+              
+              <div className="space-y-1">
+                <h3 className="text-lg font-extrabold tracking-tight">Merge Selected Entries?</h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Merge <span className="font-bold text-indigo-600 dark:text-indigo-400">{selectedTransactions.size}</span> selected transactions into a single new transaction.
+                </p>
+              </div>
+
+              <div className="space-y-3.5 pt-1">
+                {/* Description Input */}
+                <div className="space-y-1 text-left">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 dark:text-slate-400">Description</label>
+                  <input
+                    type="text"
+                    value={mergeDescription}
+                    onChange={(e) => setMergeDescription(e.target.value)}
+                    placeholder="Enter merged description"
+                    className={cn(
+                      "w-full px-4.5 h-11 border-2 rounded-xl outline-none focus:border-indigo-500 transition-all text-sm font-semibold",
+                      theme === 'dark' ? "bg-zinc-900 border-zinc-800 text-white" : "bg-slate-50 border-slate-100 text-black"
+                    )}
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  {/* Category Select */}
+                  <div className="space-y-1 text-left">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 dark:text-slate-400">Category</label>
+                    <select
+                      value={mergeCategory}
+                      onChange={(e) => setMergeCategory(e.target.value)}
+                      className={cn(
+                        "w-full px-4 h-11 border-2 rounded-xl outline-none focus:border-indigo-500 transition-all text-sm font-semibold appearance-none bg-no-repeat bg-[right_12px_center]",
+                        theme === 'dark' ? "bg-zinc-900 border-zinc-800 text-white" : "bg-slate-50 border-slate-100 text-black"
+                      )}
+                    >
+                      {CATEGORIES.map(cat => (
+                        <option key={cat} value={cat}>{cat}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Transaction Type Select */}
+                  <div className="space-y-1 text-left">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500 dark:text-slate-400">Type</label>
+                    <select
+                      value={mergeType}
+                      onChange={(e) => setMergeType(e.target.value as any)}
+                      className={cn(
+                        "w-full px-4 h-11 border-2 rounded-xl outline-none focus:border-indigo-500 transition-all text-sm font-semibold appearance-none bg-no-repeat bg-[right_12px_center]",
+                        theme === 'dark' ? "bg-zinc-900 border-zinc-800 text-white" : "bg-slate-50 border-slate-100 text-black"
+                      )}
+                    >
+                      <option value="out">Cash Out (-)</option>
+                      <option value="in">Cash In (+)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Total Merged Amount Preview */}
+                <div className={cn(
+                  "p-3.5 rounded-xl flex items-center justify-between border border-dashed transition-colors duration-300",
+                  theme === 'dark' ? "bg-zinc-900/40 border-zinc-800" : "bg-slate-50/50 border-slate-200"
+                )}>
+                  <span className="text-xs font-bold text-slate-500 dark:text-slate-400">Merged Total Amount:</span>
+                  <span className={cn(
+                    "text-base font-black font-mono",
+                    mergeType === 'in' ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-450"
+                  )}>
+                    {mergeType === 'in' ? '+' : '-'}{formatCurrency(
+                      books.find(b => b.id === activeBookId)
+                        ?.transactions.filter(t => selectedTransactions.has(t.id))
+                        .reduce((sum, t) => sum + t.amount, 0) || 0
+                    )}
+                  </span>
+                </div>
+              </div>
+
+              {error && (
+                <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-955/20 border border-rose-200/50 text-rose-650 dark:text-rose-400 text-xs font-semibold text-left">
+                  {error}
+                </div>
+              )}
+
+              <div className="flex gap-3 pt-2">
+                <button 
+                  onClick={() => setShowMergeConfirmDialog(false)}
+                  disabled={isMerging}
+                  className={cn(
+                    "flex-1 py-3 border rounded-xl font-bold transition-all cursor-pointer text-sm disabled:opacity-50",
+                    theme === 'dark' ? "border-slate-800 text-slate-400 hover:bg-slate-800" : "border-slate-200 text-slate-600 hover:bg-slate-50"
+                  )}
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={handleMergeTransactions}
+                  disabled={isMerging}
+                  className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-650/50 text-white rounded-xl font-bold shadow-lg shadow-indigo-100 dark:shadow-none transition-all cursor-pointer flex items-center justify-center gap-2 text-sm disabled:cursor-not-allowed"
+                >
+                  {isMerging ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      Merging...
+                    </>
+                  ) : (
+                    'Confirm Merge'
+                  )}
                 </button>
               </div>
             </motion.div>
@@ -11057,7 +11481,7 @@ Open TrackBook → Import Shared Entries`)}`}
                 </span>
               </div>
             </div>
-            <div className="grid grid-cols-4 gap-2.5">
+            <div className={cn("grid gap-2", selectedTransactions.size >= 2 ? "grid-cols-5" : "grid-cols-4")}>
               <button
                 onClick={toggleSelectAll}
                 className={cn(
@@ -11091,6 +11515,15 @@ Open TrackBook → Import Shared Entries`)}`}
                 <Share size={16} />
                 <span>Share</span>
               </button>
+              {selectedTransactions.size >= 2 && (
+                <button
+                  onClick={openMergeDialog}
+                  className="flex flex-col items-center justify-center h-16 rounded-[18px] transition-all font-bold font-sans text-[10px] tracking-wider uppercase gap-1.5 bg-indigo-650 border border-indigo-750 text-white cursor-pointer hover:bg-indigo-700 active:scale-95 duration-150 shadow-lg shadow-indigo-600/20"
+                >
+                  <Merge size={16} />
+                  <span>Merge</span>
+                </button>
+              )}
               <button
                 onClick={() => { setShowBulkTransactionDeleteConfirm(true); setDeleteConfirmed(false); }}
                 className="flex flex-col items-center justify-center h-16 rounded-[18px] transition-all font-bold font-sans text-[10px] tracking-wider uppercase gap-1.5 bg-rose-600 border border-rose-650 text-white cursor-pointer hover:bg-rose-700 active:scale-95 duration-150 shadow-lg shadow-rose-600/20"
@@ -11454,6 +11887,63 @@ Open TrackBook → Import Shared Entries`)}`}
               </div>
             </div>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Duplicate AI Entry Warning Modal */}
+      <AnimatePresence>
+        {showDuplicateAiWarning && (
+          <div className="fixed inset-0 z-[1000] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={showDuplicateAiWarning.onCancel}
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              className={cn(
+                "w-full max-w-sm rounded-3xl p-6 shadow-2xl text-center space-y-4 transition-colors duration-300 relative z-10",
+                theme === 'dark' ? "bg-zinc-950 border border-zinc-850 text-white" : "bg-white border border-slate-100 text-slate-800"
+              )}
+            >
+              <div className={cn(
+                "w-16 h-16 rounded-full flex items-center justify-center mx-auto transition-colors duration-300",
+                theme === 'dark' ? "bg-amber-900/20 text-amber-400" : "bg-amber-50 text-amber-600"
+              )}>
+                <AlertCircle size={32} />
+              </div>
+              <div className="space-y-2">
+                <h3 className={cn(
+                  "text-xl font-bold transition-colors duration-300",
+                  theme === 'dark' ? "text-slate-100" : "text-slate-800"
+                )}>Duplicate Entry?</h3>
+                <p className="text-slate-500 dark:text-slate-400 text-sm leading-relaxed">
+                  This image and entry are already added. Do you want to add it anyway?
+                </p>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button 
+                  onClick={showDuplicateAiWarning.onCancel}
+                  className="flex-1 py-3 border border-slate-200 dark:border-slate-800 rounded-xl font-bold text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={showDuplicateAiWarning.onConfirm}
+                  className={cn(
+                    "flex-1 py-3 bg-amber-500 hover:bg-amber-600 text-white rounded-xl font-bold transition-all cursor-pointer",
+                    theme === 'dark' ? "shadow-none" : "shadow-lg shadow-amber-100"
+                  )}
+                >
+                  Add Anyway
+                </button>
+              </div>
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
 

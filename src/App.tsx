@@ -93,7 +93,8 @@ function NavigationHandler({
       if (event === 'PASSWORD_RECOVERY') {
         console.log('Password recovery event detected');
         if (currentPath !== '/resetpassword') {
-          navigate('/resetpassword', { replace: true });
+          const currentHash = window.location.hash || '';
+          navigate('/resetpassword' + currentHash, { replace: true });
         }
       } else if (event === 'SIGNED_IN' && (currentPath === '/login' || currentPath === '/register' || currentPath === '/signup')) {
         navigate('/', { replace: true });

@@ -35,35 +35,19 @@ export default function Auth({
   const navigate = useNavigate();
   const location = useLocation();
 
-  const [mode, setMode] = useState<AuthMode>(() => {
-    const path = window.location.pathname;
-    if (path === '/register' || path === '/signup') return 'signup';
-    if (path === '/forgot') return 'forgot';
-    return 'signin';
-  });
+  const mode: AuthMode = (location.pathname === '/register' || location.pathname === '/signup') 
+    ? 'signup' 
+    : (location.pathname === '/forgot' ? 'forgot' : 'signin');
 
-  // Bidirectional routing sync
-  useEffect(() => {
-    const path = location.pathname;
-    if ((path === '/register' || path === '/signup') && mode !== 'signup') {
-      setMode('signup');
-    } else if (path === '/forgot' && mode !== 'forgot') {
-      setMode('forgot');
-    } else if (path === '/login' && mode !== 'signin') {
-      setMode('signin');
-    }
-  }, [location.pathname, mode]);
-
-  useEffect(() => {
-    const path = window.location.pathname;
-    if (mode === 'signup' && path !== '/register' && path !== '/signup') {
+  const setMode = (newMode: AuthMode) => {
+    if (newMode === 'signup') {
       navigate('/signup');
-    } else if (mode === 'signin' && path !== '/login') {
-      navigate('/login');
-    } else if (mode === 'forgot' && path !== '/forgot') {
+    } else if (newMode === 'forgot') {
       navigate('/forgot');
+    } else {
+      navigate('/login');
     }
-  }, [mode, navigate]);
+  };
   const [loginMethod, setLoginMethod] = useState<'email' | 'phone'>('email');
   const [showPhoneComingSoon, setShowPhoneComingSoon] = useState(false);
   const [selectedCountry, setSelectedCountry] = useState<Country>(COUNTRIES[0]);
